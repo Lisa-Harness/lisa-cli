@@ -3,9 +3,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["."]
+# pyproject.toml lives at hosts/cli/, so ../.. is the repo root where
+# the hosts/ package directory lives.
+where = ["../.."]
 include = ["hosts.cli*"]
-namespaces = true
+namespaces = false
 
 [project]
 name = "lisa-host-cli"
