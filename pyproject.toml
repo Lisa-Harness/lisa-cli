@@ -23,20 +23,20 @@ members = ["hosts/cli"]
 
 [tool.uv.sources]
 lisa-host-cli = { workspace = true }
-# When the `dev` extra is installed alongside a sibling ../lisa framework
-# checkout, uncomment these to resolve framework packages as editable path
-# deps instead of from PyPI. This enables live development against framework
-# HEAD without publishing. The default install (without these) pulls all
-# framework packages from PyPI so the CLI works as a standalone clone.
-# lisa-host-runtime = { path = "../lisa/host", editable = true }
-# lisa-kernel = { path = "../lisa/kernel", editable = true }
-# lisa-sdk = { path = "../lisa/sdk", editable = true }
-# lisa-mcp-servers = { path = "../lisa/mcp_server", editable = true }
-# lisa-pack-memory = { path = "../lisa/sdk/packs/memory", editable = true }
-# lisa-pack-core = { path = "../lisa/sdk/packs/core", editable = true }
-# lisa-pack-introspect = { path = "../lisa/sdk/packs/introspect", editable = true }
-# lisa-pack-checkpoint = { path = "../lisa/sdk/packs/checkpoint", editable = true }
-# lisa-pack-recovery = { path = "../lisa/sdk/packs/recovery", editable = true }
+# Framework packages resolve from the sibling ../../lisa checkout as editable
+# path deps. This enables `uv run lisa` with a local framework checkout
+# alongside this repo. Once the framework packages are published to PyPI,
+# these overrides can be removed so the CLI works as a standalone clone
+# with no sibling checkout required.
+lisa-host-runtime = { path = "../../lisa/host", editable = true }
+lisa-kernel = { path = "../../lisa/kernel", editable = true }
+lisa-sdk = { path = "../../lisa/sdk", editable = true }
+lisa-mcp-servers = { path = "../../lisa/mcp_server", editable = true }
+lisa-pack-memory = { path = "../../lisa/sdk/packs/memory", editable = true }
+lisa-pack-core = { path = "../../lisa/sdk/packs/core", editable = true }
+lisa-pack-introspect = { path = "../../lisa/sdk/packs/introspect", editable = true }
+lisa-pack-checkpoint = { path = "../../lisa/sdk/packs/checkpoint", editable = true }
+lisa-pack-recovery = { path = "../../lisa/sdk/packs/recovery", editable = true }
 
 [tool.ruff]
 line-length = 100
