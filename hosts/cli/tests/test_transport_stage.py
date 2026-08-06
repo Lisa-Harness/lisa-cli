@@ -798,8 +798,13 @@ def test_live_height_floor_and_reserve() -> None:
 # ── live status header ───────────────────────────────────────────────
 
 
-def test_status_header_renders_mode_model_tokens() -> None:
-    """The status header shows mode, model, and turn/session token counts."""
+def test_status_header_renders_mode_model_caps() -> None:
+    """The status header shows mode, model, and the always-on cap strip.
+
+    The cap strip renders on every tier (not just power/debug): tools,
+    iterations, and turn tokens against their caps. With no caps set, the
+    compact ``N<count>`` form is used for each dimension.
+    """
     console = Console(quiet=True, force_terminal=False)
     transport = RichTransport(console=console, debug=False)
     transport.start_thinking("dispatch", session_tokens=500)
@@ -813,7 +818,29 @@ def test_status_header_renders_mode_model_tokens() -> None:
     plain = text.plain
     assert "mode coding" in plain
     assert "anthropic:haiku" in plain
-    assert "tokens 120/620" in plain
+    # Cap strip (ask 3): always-on, compact N form when cap is 0/unset.
+    assert "N120 tok" in plain
+    assert "N0 tools" in plain
+    assert "N0 iter" in plain
+
+
+def test_status_header_renders_caps_with_limits() -> None:
+    """The cap strip shows count/cap ratios when caps are set (ask 3)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch", session_tokens=19500)
+    transport._current_mode = "coding"
+    transport._status_current_model = "haiku"
+    transport._max_tool_calls = 8
+    transport._tool_call_count = 4
+    transport._max_iterations = 5
+    transport._current_iter = 2
+    transport._context_budget = 32000
+    transport._status_turn_tokens = 12000
+    plain = transport._render_status_header().plain
+    assert "4/8 tools" in plain
+    assert "2/5 iter" in plain
+    assert "12000/32000 tok" in plain
 
 
 def test_status_header_session_seeded_from_baseline() -> None:
@@ -849,7 +876,108 @@ async def test_model_call_updates_live_status_header() -> None:
     assert transport._status_turn_tokens == 120
     assert transport._status_session_tokens == 220
     header = transport._render_status_header().plain
-    assert "tokens 120/220" in header
+    # The cap strip shows turn tokens in compact N form (no context budget set).
+    assert "N120 tok" in header
+
+
+def test_aggregate_progress_blends_caps() -> None:
+    """_aggregate_progress returns the max of consumed-cap ratios (ask 2)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch")
+    # No caps set -> None (bar suppressed).
+    assert transport._aggregate_progress() is None
+    # Tool cap only.
+    transport._max_tool_calls = 8
+    transport._tool_call_count = 4
+    assert transport._aggregate_progress() == 0.5
+    # Iteration cap is the binding constraint (higher ratio).
+    transport._max_iterations = 5
+    transport._current_iter = 4
+    assert transport._aggregate_progress() == 0.8
+    # Context budget ratio dominates.
+    transport._context_budget = 10000
+    transport._status_turn_tokens = 9500
+    assert abs(transport._aggregate_progress() - 0.95) < 1e-9
+
+
+def test_progress_bar_gradient_fill() -> None:
+    """_progress_bar fills left-to-right using the block ramp (ask 2)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch")
+    assert transport._progress_bar(0.0) == "        "  # 8 empty cells
+    assert transport._progress_bar(1.0) == "████████"  # 8 full cells
+    half = transport._progress_bar(0.5)
+    assert half.startswith("████")
+    assert half.endswith("    ")
+
+
+def test_prompt_banner_pinned_when_message_supplied() -> None:
+    """The prompt banner renders the submitted message (ask 1)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch", message="restart the webapp")
+    banner = transport._render_prompt_banner()
+    assert "restart the webapp" in banner.plain
+    assert banner.plain.startswith("❯")
+
+
+def test_prompt_banner_empty_when_no_message() -> None:
+    """No banner when start_thinking is called without a message (ask 1)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch")
+    banner = transport._render_prompt_banner()
+    assert banner.plain == ""
+
+
+def test_live_display_includes_prompt_banner_and_header() -> None:
+    """The Live display leads with the prompt banner then the status header (ask 1)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch", session_tokens=10, message="hello")
+    group = transport._render_live_display()
+    # Group.renderables[0] is the banner, [1] is the status header.
+    renderables = list(group.renderables)
+    assert "hello" in renderables[0].plain
+    assert "mode" not in renderables[0].plain  # banner is just the prompt
+
+
+def test_context_gauge_colors_at_pressure_thresholds() -> None:
+    """The context gauge turns gold3 at pressure_threshold, indian_red at hard (ask 3)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking(
+        "dispatch",
+        context_budget=10000,
+        context_pressure_threshold=0.65,
+        context_hard_threshold=0.85,
+    )
+    # Below pressure threshold: muted.
+    transport._status_session_tokens = 4000
+    gauge = transport._context_gauge()
+    assert gauge is not None
+    assert "gold3" not in str(gauge.style)
+    assert "indian_red" not in str(gauge.style)
+    # At pressure threshold: gold3.
+    transport._status_session_tokens = 6600
+    gauge = transport._context_gauge()
+    assert gauge is not None
+    assert "gold3" in str(gauge.style)
+    # At hard threshold: indian_red.
+    transport._status_session_tokens = 8600
+    gauge = transport._context_gauge()
+    assert gauge is not None
+    assert "indian_red" in str(gauge.style)
+
+
+def test_context_gauge_suppressed_when_no_budget() -> None:
+    """The context gauge is None when context_budget <= 0 (ask 3)."""
+    console = Console(quiet=True, force_terminal=False)
+    transport = RichTransport(console=console, debug=False)
+    transport.start_thinking("dispatch")  # no context_budget
+    assert transport._context_gauge() is None
 
 
 @pytest.mark.asyncio

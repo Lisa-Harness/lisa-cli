@@ -83,3 +83,31 @@ def test_footer_shows_handoff_when_mode_changed_mid_turn(tmp_path: Path) -> None
     out = capture.get().strip()
     assert "▾ default" in out
     assert "→ coding" in out
+
+
+def test_repl_toolbar_shows_ctrl_j_when_shift_enter_unsupported() -> None:
+    """The toolbar shows 'Ctrl+J newline' until an s-enter event fires (ask 4)."""
+    from hosts.cli.repl import _repl_bottom_toolbar
+    from hosts.cli.transport import RichTransport
+
+    console = _make_console()
+    transport = RichTransport(console=console, debug=False)
+    transport.shift_enter_supported = False
+    toolbar = _repl_bottom_toolbar(transport, session_name="test")
+    plain = "".join(text for _, text in toolbar)
+    assert "Ctrl+J newline" in plain
+    assert "Shift+Enter" not in plain
+
+
+def test_repl_toolbar_shows_shift_enter_once_supported() -> None:
+    """Once shift_enter_supported is set, the toolbar shows 'Shift+Enter newline' (ask 4)."""
+    from hosts.cli.repl import _repl_bottom_toolbar
+    from hosts.cli.transport import RichTransport
+
+    console = _make_console()
+    transport = RichTransport(console=console, debug=False)
+    transport.shift_enter_supported = True
+    toolbar = _repl_bottom_toolbar(transport, session_name="test")
+    plain = "".join(text for _, text in toolbar)
+    assert "Shift+Enter newline" in plain
+    assert "Ctrl+J" not in plain

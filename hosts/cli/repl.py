@@ -28,13 +28,14 @@ from typing import Any
 from host.callbacks import TransportCallbacks
 from host.handle_message import handle_message
 from host.runtime import HostRuntime
-from hosts.cli.transport import RichTransport
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.rule import Rule
 from rich.text import Text
+
+from hosts.cli.transport import RichTransport
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,39 @@ def _is_repl_quit_command(message: str) -> bool:
     return message.lower() in {"exit", "quit", "/exit", "/quit"}
 
 
+def _context_lane_budget(runtime: HostRuntime) -> int:
+    """Sum the ``max_tokens`` of all context lanes in the session plan.
+
+    Returns 0 when the session plan is absent or no lane sets ``max_tokens``
+    (the status header suppresses the context gauge when the budget is 0).
+    """
+    plan = runtime.session_plan
+    if plan is None:
+        return 0
+    try:
+        lanes = plan.manifest.context.lanes
+    except AttributeError:
+        return 0
+    return sum(lane.max_tokens for lane in lanes if getattr(lane, "max_tokens", None) is not None)
+
+
+def _context_compaction_thresholds(runtime: HostRuntime) -> tuple[float, float]:
+    """Read the compaction pressure/hard thresholds from the session plan.
+
+    Returns ``(pressure_threshold, hard_threshold)``. Both default to 0.0 when
+    the session plan or compaction tuning is absent — the context gauge then
+    stays muted (no threshold-based color change).
+    """
+    plan = runtime.session_plan
+    if plan is None:
+        return 0.0, 0.0
+    try:
+        compaction = plan.manifest.context.history.compaction
+    except AttributeError:
+        return 0.0, 0.0
+    return float(compaction.pressure_threshold), float(compaction.hard_threshold)
+
+
 async def _process_repl_turn(
     runtime: HostRuntime,
     transport: TransportCallbacks,
@@ -356,7 +390,21 @@ async def _process_repl_turn(
     # phase (command parse, start_mode bypass, current_mode_id selection).
     # There is no separate router; handoff is mid-turn via transition_stage.
     if isinstance(transport, RichTransport):
-        transport.start_thinking("dispatch", session_tokens=runtime.tokens.session_total_tokens)
+        # Pin the submitted prompt to the top of the Live region (ask 1) and
+        # seed the context-pressure gauge (ask 3). The budget is the sum of
+        # the session plan's context-lane max_tokens; the thresholds are the
+        # compaction pressure/hard thresholds. Both are read here (once per
+        # turn) rather than on every stage event.
+        context_budget = _context_lane_budget(runtime)
+        pressure_threshold, hard_threshold = _context_compaction_thresholds(runtime)
+        transport.start_thinking(
+            "dispatch",
+            session_tokens=runtime.tokens.session_total_tokens,
+            message=message,
+            context_budget=context_budget,
+            context_pressure_threshold=pressure_threshold,
+            context_hard_threshold=hard_threshold,
+        )
     try:
         result = await handle_message(runtime, message, transport)
     except (asyncio.CancelledError, KeyboardInterrupt):
@@ -704,13 +752,16 @@ def _repl_bottom_toolbar(transport: RichTransport, *, session_name: str = "") ->
     # you always know which session plan is driving the current turn.
     session_label = session_name.strip() if session_name and session_name.strip() else "session"
 
+    # The newline chord reflects runtime detection: Shift+Enter on
+    # kitty/CSI-u terminals, Ctrl+J as the portable fallback (ask 4).
+    newline_chord = "Shift+Enter" if transport.shift_enter_supported else "Ctrl+J"
     return FormattedText(
         [
             ("class:bottom-toolbar", f" {session_label} "),
             ("class:bottom-toolbar.text", "│ "),
             (
                 "class:bottom-toolbar",
-                " Enter submit · newline Ctrl+J · ↑/↓ history · Tab complete ",
+                f" Enter submit · {newline_chord} newline · ↑/↓ history · Tab complete ",
             ),
             ("class:bottom-toolbar.text", "│ "),
             ("class:bottom-toolbar.hint", "Ctrl+O "),
@@ -731,15 +782,19 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
     """Build chat-box key bindings for the multi-line REPL prompt.
 
     - Enter: submit the current buffer (chat-box semantics).
-    - Ctrl+J: insert a newline (for multi-line input). In a raw terminal
-      there is no ``ControlEnter`` key — Ctrl+Enter and Enter both transmit
-      the same byte (CR / ``ControlM``), so prompt_toolkit treats them as one
-      key. Ctrl+J (``ControlJ`` / LF) is the distinguishable newline chord; it
-      is a reliable single-chord binding that, unlike Esc-prefixed sequences,
-      cannot be mistaken for an Alt modifier and leak stray characters into
-      the buffer (the previous ``Esc→Enter`` binding could emit a stage/call
-      fragment into the input area when the escape timed out without a
-      follow-up key).
+    - Shift+Enter: insert a newline (for multi-line input). On terminals that
+      speak the kitty/CSI-u keyboard protocol, Shift+Enter transmits a
+      distinguishable sequence and this binding fires. On a raw terminal
+      Shift+Enter and Enter transmit the same byte (CR / ``ControlM``), so
+      this binding never matches there; Ctrl+J (below) is the portable
+      fallback. The first time ``s-enter`` fires we set
+      ``transport.shift_enter_supported`` so the bottom toolbar can show the
+      newline chord that actually works on this terminal rather than a static
+      (and possibly lying) hint.
+    - Ctrl+J: insert a newline — the portable single-chord newline that works
+      on every terminal (including bare SSH, CI logs, and terminals that
+      collapse Shift+Enter into Enter). Kept even when Shift+Enter is bound so
+      no user is stranded.
     - Ctrl+Y: expand/collapse ALL visible thinking segments in the transcript.
       Thinking is rendered as multiple interspersed rows that interleave with
       the tool calls (a tool/model event closes the current segment). The
@@ -763,6 +818,13 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
     @bindings.add("enter")
     def _submit(event: Any) -> None:
         event.current_buffer.validate_and_handle()
+
+    @bindings.add("s-enter")
+    def _newline_shift_enter(event: Any) -> None:
+        # Shift+Enter — only fires on kitty/CSI-u terminals. Set the flag so
+        # the bottom toolbar shows this chord as the working newline.
+        transport.shift_enter_supported = True
+        event.current_buffer.insert_text("\n")
 
     @bindings.add("c-j")
     def _newline(event: Any) -> None:

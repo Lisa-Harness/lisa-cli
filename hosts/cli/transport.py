@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, ClassVar, Literal
 
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
@@ -59,6 +60,7 @@ STYLE_BORDER_CONTEXT = "gold3"
 STYLE_BORDER_ERROR = "indian_red"
 STYLE_STAGE = "grey58"
 STYLE_TEXT_MUTED = "grey58"
+STYLE_TEXT_PRIMARY = "bright_white"
 STYLE_GRAPHIC = "grey58"
 STYLE_ROW_TRANSITION = "gold3"
 STYLE_ROW_MODEL = "dark_sea_green4"
@@ -82,6 +84,10 @@ _MIN_VISIBLE_ROWS = 6
 #: compact ``N`` counter (no bar), since a saturating bar against infinity is
 #: meaningless.
 _PIP_MAX_WIDTH = 16
+
+#: Minimum model-call iterations sampled before the ETA estimate appears in
+#: the status header. Below this the rolling average is too noisy to be useful.
+_ETA_MIN_ITERATIONS = 2
 
 #: Width of the duration sparkline shown on ``model_call_complete``.
 _SPARK_WIDTH = 8
@@ -273,6 +279,10 @@ class RichTransport:
         self._live: Live | None = None
         self._thinking_stage: str = ""
         self._thinking_spinner: str = "dots"
+        # Whether any on_text_chunk visible-answer delta arrived this turn —
+        # used by on_response to decide between re-rendering the staged stream
+        # and printing the clean Panel. Reset in start_thinking.
+        self._streamed_during_turn: bool = False
         # The visible-answer deltas stream into a staging buffer that is NEVER
         # shown as the final answer — on completion the Live region tears down
         # and a clean Markdown Panel renders the full answer. The buffer exists
@@ -304,6 +314,32 @@ class RichTransport:
         self._status_model_provider: str = ""
         self._status_turn_tokens: int = 0
         self._status_session_tokens: int = 0
+        # ── Pinned-prompt + glanceable-progress state (ask 1 & 2) ────────
+        # The submitted message, pinned to the top of the Live region for the
+        # whole turn so the user's question stays visible during long jobs.
+        # Reset to "" in stop_thinking. Empty for slash-command turns that
+        # supply no message.
+        self._turn_prompt: str = ""
+        # perf_counter() captured at start_thinking so the status header can
+        # show elapsed seconds without a wall-clock dependency.
+        self._turn_started_perf: float = 0.0
+        # ── Per-turn caps (ask 3) ────────────────────────────────────────
+        # The max_* caps surfaced by stage events, stored so the always-on
+        # status-header cap strip and _aggregate_progress can read them
+        # without waiting for a specific stage event. 0 means "unset /
+        # unlimited" and renders in the compact N<count> form.
+        self._max_tool_calls: int = 0
+        self._max_iterations: int = 0
+        self._max_handoffs: int = 0
+        self._current_iter: int = 0
+        # ── Context-lane budget + compaction pressure (ask 3) ────────────
+        # The token budget for the context window (sum of
+        # session_plan.manifest.context.lanes[*].max_tokens) and the two
+        # compaction pressure thresholds that color the context gauge. 0
+        # budget means "not configured" and suppresses the gauge.
+        self._context_budget: int = 0
+        self._context_pressure_threshold: float = 0.0
+        self._context_hard_threshold: float = 0.0
         # Index of the in-flight tool row, so its completion updates in place.
         self._open_tool_row: int | None = None
         # Index of the in-flight model row, so its completion updates in place.
@@ -312,10 +348,26 @@ class RichTransport:
         # Text (visible answer bright, reasoning dimmed). Persists across
         # stop_thinking — the transcript flushes it to scrollback.
         self._stream_text: Text = Text()
+        # ── Shift+Enter runtime detection (ask 4) ────────────────────────
+        # True once an ``s-enter`` key event has fired in the REPL — i.e. the
+        # terminal speaks the kitty/CSI-u keyboard protocol and can
+        # distinguish Shift+Enter from Enter. The bottom toolbar reads this
+        # to show the newline chord that will actually work on this terminal
+        # rather than a static (and possibly lying) hint.
+        self.shift_enter_supported: bool = False
 
     # ── Live region lifecycle ───────────────────────────────────────
 
-    def start_thinking(self, stage: str = "dispatch", *, session_tokens: int = 0) -> None:
+    def start_thinking(
+        self,
+        stage: str = "dispatch",
+        *,
+        session_tokens: int = 0,
+        message: str = "",
+        context_budget: int = 0,
+        context_pressure_threshold: float = 0.0,
+        context_hard_threshold: float = 0.0,
+    ) -> None:
         """Start the flowing transcript so the user sees the turn is active.
 
         The default stage is ``dispatch`` — the pre-pipeline phase where
@@ -327,6 +379,16 @@ class RichTransport:
         ``session_tokens`` seeds the live status header's cumulative session
         token count (the runtime's pre-turn total), so the header shows the
         real running total rather than starting at zero each turn.
+
+        ``message`` is the user's submitted prompt; it is pinned to the top of
+        the Live region for the whole turn (ask 1) so the question stays
+        visible during long jobs. Empty for slash-command turns.
+
+        ``context_budget`` / ``context_pressure_threshold`` /
+        ``context_hard_threshold`` configure the context-pressure gauge in the
+        status header (ask 3): the token budget for the context window and the
+        two compaction thresholds that color the gauge. ``context_budget <= 0``
+        suppresses the gauge.
         """
         self.stop_thinking()
         self._thinking_stage = stage
@@ -342,6 +404,15 @@ class RichTransport:
         self._status_model_provider = ""
         self._status_turn_tokens = 0
         self._status_session_tokens = session_tokens
+        self._turn_prompt = message
+        self._turn_started_perf = perf_counter()
+        self._max_tool_calls = 0
+        self._max_iterations = 0
+        self._max_handoffs = 0
+        self._current_iter = 0
+        self._context_budget = context_budget
+        self._context_pressure_threshold = context_pressure_threshold
+        self._context_hard_threshold = context_hard_threshold
         self._open_tool_row = None
         self._open_model_row = None
         self._open_thinking_row = None
@@ -419,36 +490,203 @@ class RichTransport:
         return max(_MIN_VISIBLE_ROWS, height - _RESERVED_BELOW_LINES)
 
     def _render_status_header(self) -> Text:
-        """Render the persistent live status bar (mode · model · tokens).
+        """Render the persistent live status bar (two lines).
 
         This is the always-on guard against runaway sessions: it sits at the
         top of the Live region and updates on every stage event, so the mode,
-        active model, and turn/session token counts are visible and current
-        for the whole turn — not just once above the input prompt.
+        active model, per-turn caps, aggregate progress, elapsed/ETA, and
+        context-lane pressure are visible and current for the whole turn — not
+        just once above the input prompt.
+
+        Line 1: ``mode <m> │ <provider>:<model> │ <bar> <pct>% │ <tools>/<cap>
+        tools · <iter>/<cap> iter · <turn_tok>/<budget> tok``.
+        Line 2: ``ctx <ctx_bar> <ctx_pct>% │ <elapsed>s · ~<eta>s left`` — the
+        context pressure gauge (colored at the compaction thresholds) plus the
+        turn timer. ETA appears only once ≥2 model iterations have been
+        sampled; before that only elapsed time is shown. The context gauge is
+        suppressed when ``_context_budget <= 0``.
         """
-        parts: list[str] = []
+        line1 = self._render_status_line1()
+        line2 = self._render_status_line2()
+        header = Text()
+        header.append(line1)
+        if line2.plain:
+            header.append("\n")
+            header.append(line2)
+        return header
+
+    def _render_status_line1(self) -> Text:
+        """Status header line 1: mode · model · progress bar · cap strip."""
+        parts: list[Text] = []
         if self._current_mode:
-            parts.append(f"mode {self._current_mode}")
+            parts.append(Text(f"mode {self._current_mode}", style="bold " + STYLE_STAGE))
         if self._status_current_model:
             model = self._status_current_model
             if self._status_model_provider:
                 model = f"{self._status_model_provider}:{model}"
-            parts.append(model)
-        parts.append(f"tokens {self._status_turn_tokens}/{self._status_session_tokens}")
-        text = " │ ".join(parts)
-        return Text(text, style="bold " + STYLE_STAGE)
+            parts.append(Text(model, style="bold " + STYLE_STAGE))
+        # Aggregate progress bar (ask 2): glanceable fill across all caps.
+        progress = self._aggregate_progress()
+        if progress is not None:
+            pct = round(progress * 100)
+            parts.append(Text(f"{self._progress_bar(progress)} {pct}%", style="bold steel_blue3"))
+        # Cap strip (ask 3): always-on counts/caps, all tiers.
+        cap_parts: list[str] = []
+        cap_parts.append(self._format_cap(self._tool_call_count, self._max_tool_calls, "tools"))
+        cap_parts.append(self._format_cap(self._current_iter, self._max_iterations, "iter"))
+        cap_parts.append(self._format_cap(self._status_turn_tokens, self._context_budget, "tok"))
+        parts.append(Text(" · ".join(cap_parts), style=STYLE_TEXT_MUTED))
+        return Text(" │ ").join(parts)
+
+    def _render_status_line2(self) -> Text:
+        """Status header line 2: context pressure gauge · elapsed/ETA."""
+        parts: list[Text] = []
+        if self._context_budget > 0:
+            gauge = self._context_gauge()
+            if gauge is not None:
+                parts.append(gauge)
+        elapsed = self._elapsed_seconds()
+        eta = self._eta_seconds()
+        timer = f"{elapsed}s"
+        if eta is not None:
+            timer += f" · ~{eta}s left"
+        parts.append(Text(timer, style=STYLE_TEXT_MUTED))
+        return Text(" │ ").join(parts) if parts else Text("")
+
+    def _aggregate_progress(self) -> float | None:
+        """Blend consumed-cap ratios into a single 0–1 progress value.
+
+        Uses the caps already tracked internally: tool calls, model iterations,
+        handoffs, and turn tokens against the context budget. Each dimension
+        contributes its consumed ratio (count/cap); dimensions with cap 0
+        (unset/unlimited) drop out. Returns the **max** of the available
+        ratios — the binding constraint reads as the progress, which matches
+        the "guard against runaway" intent. Returns ``None`` when no caps are
+        set at all (the bar is suppressed in that case).
+        """
+        ratios: list[float] = []
+        if self._max_tool_calls > 0:
+            ratios.append(self._tool_call_count / self._max_tool_calls)
+        if self._max_iterations > 0:
+            ratios.append(self._current_iter / self._max_iterations)
+        if self._max_handoffs > 0:
+            ratios.append(self._handoff_count / self._max_handoffs)
+        if self._context_budget > 0:
+            ratios.append(self._status_turn_tokens / self._context_budget)
+        if not ratios:
+            return None
+        return max(0.0, min(1.0, max(ratios)))
+
+    def _progress_bar(self, ratio: float, *, width: int = 8) -> str:
+        """Render ``ratio`` (0–1) as a gradient block bar of ``width`` cells.
+
+        Reuses the ``_BLOCK_RAMP`` ramp (`` ▁▂▃▄▅▆▇█``) so the progress bar
+        shares its visual language with the duration sparklines and pip
+        counters. The filled portion graduates left-to-right; the unfilled
+        tail is the empty cell.
+        """
+        ratio = max(0.0, min(1.0, ratio))
+        filled = round(ratio * width)
+        if filled >= width:
+            return _BLOCK_RAMP[-1] * width
+        if filled <= 0:
+            return _BLOCK_RAMP[0] * width
+        return _BLOCK_RAMP[-1] * filled + _BLOCK_RAMP[0] * (width - filled)
+
+    def _format_cap(self, count: int, cap: int, label: str) -> str:
+        """Format a count/cap pair for the status header cap strip.
+
+        ``cap > 0`` → ``<count>/<cap> <label>`` (the faithful ratio). ``cap <= 0``
+        (unset/unlimited) → ``N<count> <label>`` (the compact counter, matching
+        the existing ``_pip_counter`` convention for unlimited caps).
+        """
+        if cap > 0:
+            return f"{count}/{cap} {label}"
+        return f"N{count} {label}"
+
+    def _context_gauge(self) -> Text | None:
+        """Render the context-lane pressure gauge (ask 3).
+
+        ``ctx <bar> <pct>%`` where the fill is ``session_total_tokens /
+        context_budget``. The bar colors at the compaction thresholds: muted
+        below ``pressure_threshold``, ``gold3`` at the soft threshold, and
+        ``indian_red`` at the hard threshold. Returns ``None`` when the budget
+        is unset or the fill ratio is zero (gauge suppressed until there's
+        something to show).
+        """
+        if self._context_budget <= 0:
+            return None
+        ratio = self._status_session_tokens / self._context_budget
+        ratio = max(0.0, min(1.0, ratio))
+        if ratio <= 0:
+            return None
+        if self._context_hard_threshold > 0 and ratio >= self._context_hard_threshold:
+            style = "bold indian_red"
+        elif self._context_pressure_threshold > 0 and ratio >= self._context_pressure_threshold:
+            style = "bold gold3"
+        else:
+            style = STYLE_TEXT_MUTED
+        bar = self._progress_bar(ratio)
+        pct = round(ratio * 100)
+        return Text(f"ctx {bar} {pct}%", style=style)
+
+    def _elapsed_seconds(self) -> int:
+        """Whole seconds elapsed since ``start_thinking`` for this turn."""
+        if self._turn_started_perf <= 0:
+            return 0
+        return int(perf_counter() - self._turn_started_perf)
+
+    def _eta_seconds(self) -> int | None:
+        """Estimate seconds remaining for the turn, or ``None`` if unknown.
+
+        Uses the rolling average of ``_iteration_durations`` and the remaining
+        iteration estimate (``max_iterations - current_iter``). Returns
+        ``None`` until ≥2 iterations have been sampled (no wild guesses on the
+        first iteration) or when no iteration cap is set.
+        """
+        if self._max_iterations <= 0 or len(self._iteration_durations) < _ETA_MIN_ITERATIONS:
+            return None
+        remaining = self._max_iterations - self._current_iter
+        if remaining <= 0:
+            return 0
+        avg_ms = sum(self._iteration_durations) / len(self._iteration_durations)
+        return max(0, int(avg_ms * remaining / 1000.0))
+
+    def _render_prompt_banner(self) -> Text:
+        """Render the pinned submitted-prompt banner (ask 1).
+
+        One line at the very top of the Live region: ``❯ <message>`` in bold
+        bright_white, truncated to terminal width so it never wraps. Empty
+        (returns a blank Text) when no prompt was supplied — slash-command
+        turns that call ``start_thinking`` without a message show no banner.
+        """
+        if not self._turn_prompt:
+            return Text("")
+        width = self.console.size.width or 80
+        body = _truncate(self._turn_prompt.replace("\n", " ").strip(), max(0, width - 4))
+        line = Text()
+        line.append("❯ ", style="bold steel_blue3")
+        line.append(body, style="bold " + STYLE_TEXT_PRIMARY)
+        return line
 
     def _render_live_display(self) -> Group:
-        """Build the Live renderable: the live status header + recent transcript rows.
+        """Build the Live renderable: prompt banner + status header + transcript.
 
-        The status header is fixed at the top and updates in place on every
-        stage event (mode, model, token counters). Below it the transcript
-        scrolls; the most recent rows are shown and the active (last) row gets
-        a trailing spinner. Thinking rows render collapsed (a compact
-        ``▸ Thinking… N char`` summary) or expanded (the full dimmed segment
-        body) per the global ``thinking_collapsed`` flag.
+        Layout (top → bottom):
+        1. The pinned prompt banner (ask 1) — the user's submitted question,
+           always visible during the turn.
+        2. The live status header (asks 2 & 3) — mode · model · progress bar ·
+           cap strip on line 1; context gauge · elapsed/ETA on line 2.
+        3. The transcript rows, most recent at the bottom; the active (last)
+           row gets a trailing spinner. Thinking rows render collapsed (a
+           compact ``▸ Thinking… N char`` summary) or expanded (the full dimmed
+           segment body) per the global ``thinking_collapsed`` flag.
         """
-        renderables: list[Any] = [self._render_status_header()]
+        renderables: list[Any] = []
+        banner = self._render_prompt_banner()
+        if banner.plain:
+            renderables.append(banner)
+        renderables.append(self._render_status_header())
         rows = self._rows[-self._live_height() :]
         for i, row in enumerate(rows):
             is_active = row.active and self._live is not None and i == len(rows) - 1
@@ -676,6 +914,11 @@ class RichTransport:
             self._tool_call_count += 1
             self._open_tool_row = len(self._rows)
             max_calls = int(data.get("max_tool_calls") or 0)
+            # Track the cap for the always-on status header cap strip (ask 3)
+            # and the aggregate progress blend (ask 2). A later event may
+            # raise it; keep the max seen so the cap never appears to shrink.
+            if max_calls > self._max_tool_calls:
+                self._max_tool_calls = max(self._max_tool_calls, max_calls)
             graphic = _pip_counter(self._tool_call_count, max_calls)
             self._append_row(
                 _Row(
@@ -719,6 +962,9 @@ class RichTransport:
         arrow = "→" if from_mode else "⇥"
         text = f"[{to_mode}] handoff: {from_mode or 'start'} {arrow} {to_mode}"
         max_handoffs = int(data.get("max_handoffs") or 0)
+        # Track the cap for the always-on status header and aggregate progress.
+        if max_handoffs > self._max_handoffs:
+            self._max_handoffs = max(self._max_handoffs, max_handoffs)
         graphic = _pip_counter(self._handoff_count, max_handoffs)
         self._append_row(_Row(kind="transition", text=text, graphic=graphic, data=data))
 
@@ -735,6 +981,15 @@ class RichTransport:
         if iter_raw in (None, "", 0):
             iter_raw = data.get("_state.iteration")
         iter_count = int(iter_raw) if iter_raw not in (None, "", 0) else 0
+
+        # Track the iteration cap and current iteration for the always-on
+        # status header cap strip (ask 3) and the aggregate progress blend
+        # (ask 2). ``iter_count`` is the iteration about to run (on
+        # model_call) or just completed (on model_call_complete).
+        if max_iter > self._max_iterations:
+            self._max_iterations = max(self._max_iterations, max_iter)
+        if iter_count > self._current_iter:
+            self._current_iter = max(self._current_iter, iter_count)
 
         # Update the persistent live status header so mode/model stay current
         # the instant the model call begins (model_call_complete below adds
