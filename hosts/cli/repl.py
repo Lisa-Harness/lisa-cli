@@ -819,12 +819,22 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
     def _submit(event: Any) -> None:
         event.current_buffer.validate_and_handle()
 
-    @bindings.add("s-enter")
-    def _newline_shift_enter(event: Any) -> None:
-        # Shift+Enter — only fires on kitty/CSI-u terminals. Set the flag so
-        # the bottom toolbar shows this chord as the working newline.
-        transport.shift_enter_supported = True
-        event.current_buffer.insert_text("\n")
+    # Shift+Enter — only fires on kitty/CSI-u terminals. Older prompt_toolkit
+    # versions (and some platforms) don't recognize ``s-enter`` as a valid key
+    # name and raise ValueError at binding-construction time. Wrap it so the
+    # binding is skipped gracefully on those builds; Ctrl+J below is the
+    # portable fallback that always works. The toolbar hint reflects whichever
+    # chord is actually bound via ``transport.shift_enter_supported``.
+    try:
+
+        @bindings.add("s-enter")
+        def _newline_shift_enter(event: Any) -> None:
+            # Set the flag so the bottom toolbar shows this chord as the
+            # working newline on this terminal.
+            transport.shift_enter_supported = True
+            event.current_buffer.insert_text("\n")
+    except ValueError:
+        pass
 
     @bindings.add("c-j")
     def _newline(event: Any) -> None:
