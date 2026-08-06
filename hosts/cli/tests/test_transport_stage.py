@@ -954,19 +954,20 @@ def test_context_gauge_colors_at_pressure_thresholds() -> None:
         context_pressure_threshold=0.65,
         context_hard_threshold=0.85,
     )
-    # Below pressure threshold: muted.
-    transport._status_session_tokens = 4000
+    # Below pressure threshold: muted. The gauge uses turn tokens (per-turn
+    # context consumption), not the cumulative session total.
+    transport._status_turn_tokens = 4000
     gauge = transport._context_gauge()
     assert gauge is not None
     assert "gold3" not in str(gauge.style)
     assert "indian_red" not in str(gauge.style)
     # At pressure threshold: gold3.
-    transport._status_session_tokens = 6600
+    transport._status_turn_tokens = 6600
     gauge = transport._context_gauge()
     assert gauge is not None
     assert "gold3" in str(gauge.style)
     # At hard threshold: indian_red.
-    transport._status_session_tokens = 8600
+    transport._status_turn_tokens = 8600
     gauge = transport._context_gauge()
     assert gauge is not None
     assert "indian_red" in str(gauge.style)
