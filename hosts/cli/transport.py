@@ -70,8 +70,8 @@ STYLE_STREAM_ANSWER = "bright_white"
 STYLE_STREAM_REASONING = "grey42"
 
 #: Lines reserved below the Live region for post-turn content that must stay
-#: visible: the turn footer (1), the Rule separator (1), the powerline status
-#: line (1), and the input prompt line (1).
+#: visible: the turn footer (1), the Rule separator (1), the bottom toolbar
+#: (1), and the input prompt line (1).
 _RESERVED_BELOW_LINES = 4
 
 #: Floor for the number of transcript rows kept visible in the Live region.
@@ -335,14 +335,6 @@ class RichTransport:
         self._max_iterations: int = 0
         self._max_handoffs: int = 0
         self._current_iter: int = 0
-        # ── Context-lane budget + compaction pressure (ask 3) ────────────
-        # The token budget for the context window (sum of
-        # session_plan.manifest.context.lanes[*].max_tokens) and the two
-        # compaction pressure thresholds that color the context gauge. 0
-        # budget means "not configured" and suppresses the gauge.
-        self._context_budget: int = 0
-        self._context_pressure_threshold: float = 0.0
-        self._context_hard_threshold: float = 0.0
         # Index of the in-flight tool row, so its completion updates in place.
         self._open_tool_row: int | None = None
         # Index of the in-flight model row, so its completion updates in place.
@@ -367,9 +359,6 @@ class RichTransport:
         *,
         session_tokens: int = 0,
         message: str = "",
-        context_budget: int = 0,
-        context_pressure_threshold: float = 0.0,
-        context_hard_threshold: float = 0.0,
     ) -> None:
         """Start the flowing transcript so the user sees the turn is active.
 
@@ -386,12 +375,6 @@ class RichTransport:
         ``message`` is the user's submitted prompt; it is pinned to the top of
         the Live region for the whole turn (ask 1) so the question stays
         visible during long jobs. Empty for slash-command turns.
-
-        ``context_budget`` / ``context_pressure_threshold`` /
-        ``context_hard_threshold`` configure the context-pressure gauge in the
-        status header (ask 3): the token budget for the context window and the
-        two compaction thresholds that color the gauge. ``context_budget <= 0``
-        suppresses the gauge.
         """
         self.stop_thinking()
         self._thinking_stage = stage
@@ -414,9 +397,6 @@ class RichTransport:
         self._max_iterations = 0
         self._max_handoffs = 0
         self._current_iter = 0
-        self._context_budget = context_budget
-        self._context_pressure_threshold = context_pressure_threshold
-        self._context_hard_threshold = context_hard_threshold
         self._open_tool_row = None
         self._open_model_row = None
         self._open_thinking_row = None
@@ -499,34 +479,22 @@ class RichTransport:
         return max(_MIN_VISIBLE_ROWS, height - _RESERVED_BELOW_LINES)
 
     def _render_status_header(self) -> Text:
-        """Render the persistent live status bar (two lines).
+        """Render the persistent live status bar (one line).
 
         This is the always-on guard against runaway sessions: it sits at the
         top of the Live region and updates on every stage event, so the mode,
         active model, per-turn caps, aggregate progress, elapsed/ETA, and
-        context-lane pressure are visible and current for the whole turn — not
+        session token total are visible and current for the whole turn — not
         just once above the input prompt.
 
-        Line 1: ``mode <m> │ <provider>:<model> │ <bar> <pct>% │ models <N> ·
-        <tools>/<cap> tools · <iter>/<cap> iter · turn <turn_tok>/<budget> tok``.
-        Line 2: ``session <session_tok> tok │ ctx <ctx_bar> <ctx_pct>% │
-        <elapsed>s · ~<eta>s left`` — the cumulative session total, context
-        pressure gauge (colored at the compaction thresholds), and turn timer.
-        ETA appears only once ≥2 model iterations have been sampled; before
-        that only elapsed time is shown. The context gauge is suppressed when
-        ``_context_budget <= 0``.
-        """
-        line1 = self._render_status_line1()
-        line2 = self._render_status_line2()
-        header = Text()
-        header.append(line1)
-        if line2.plain:
-            header.append("\n")
-            header.append(line2)
-        return header
+        ``mode <m> · <provider>:<model> · [<bar> <pct>% ·] models <N> ·
+        <tools>/<cap> tools · <iter>/<cap> iter · turn <turn_tok> tok ·
+        session <session_tok> tok · <elapsed>s[ · ~<eta>s left]``.
 
-    def _render_status_line1(self) -> Text:
-        """Status header line 1: mode · model · progress bar · cap strip."""
+        The progress bar only appears when at least one per-turn cap (tools,
+        iterations, handoffs) is set. ETA appears only once ≥2 model
+        iterations have been sampled.
+        """
         parts: list[Text] = []
         if self._current_mode:
             parts.append(Text(f"mode {self._current_mode}", style="bold " + STYLE_STAGE))
@@ -535,46 +503,41 @@ class RichTransport:
             if self._status_model_provider:
                 model = f"{self._status_model_provider}:{model}"
             parts.append(Text(model, style="bold " + STYLE_STAGE))
-        # Aggregate progress bar (ask 2): glanceable fill across all caps.
+        # Aggregate progress bar: only when per-turn caps are set.
         progress = self._aggregate_progress()
         if progress is not None:
             pct = round(progress * 100)
             parts.append(
                 Text(f"{self._progress_bar(progress)} {pct}%", style="bold steel_blue3")
             )
-        # Cap strip (ask 3): always-on counts/caps, all tiers.
+        # Cap strip: always-on counts/caps.
         cap_parts: list[str] = [f"models {self._model_call_count}"]
         cap_parts.append(self._format_cap(self._tool_call_count, self._max_tool_calls, "tools"))
         cap_parts.append(self._format_cap(self._current_iter, self._max_iterations, "iter"))
-        cap_parts.append(self._format_turn_tokens())
+        cap_parts.append(f"turn {self._status_turn_tokens} tok")
         parts.append(Text(" · ".join(cap_parts), style=STYLE_TEXT_MUTED))
-        return Text(" │ ").join(parts)
-
-    def _render_status_line2(self) -> Text:
-        """Status header line 2: session tokens · context pressure · elapsed/ETA."""
-        parts: list[Text] = [Text(f"session {self._status_session_tokens} tok", style=STYLE_TEXT_MUTED)]
-        if self._context_budget > 0:
-            gauge = self._context_gauge()
-            if gauge is not None:
-                parts.append(gauge)
+        # Session tokens.
+        parts.append(Text(f"session {self._status_session_tokens} tok", style=STYLE_TEXT_MUTED))
+        # Elapsed / ETA.
         elapsed = self._elapsed_seconds()
         eta = self._eta_seconds()
         timer = f"{elapsed}s"
         if eta is not None:
             timer += f" · ~{eta}s left"
         parts.append(Text(timer, style=STYLE_TEXT_MUTED))
-        return Text(" │ ").join(parts) if parts else Text("")
+        return Text(" · ").join(parts)
+
 
     def _aggregate_progress(self) -> float | None:
         """Blend consumed-cap ratios into a single 0–1 progress value.
 
-        Uses the caps already tracked internally: tool calls, model iterations,
-        handoffs, and turn tokens against the context budget. Each dimension
-        contributes its consumed ratio (count/cap); dimensions with cap 0
-        (unset/unlimited) drop out. Returns the **max** of the available
-        ratios — the binding constraint reads as the progress, which matches
-        the "guard against runaway" intent. Returns ``None`` when no caps are
-        set at all (the bar is suppressed in that case).
+        Uses the per-turn caps tracked internally: tool calls, model
+        iterations, and handoffs. Each dimension contributes its consumed
+        ratio (count/cap); dimensions with cap 0 (unset/unlimited) drop out.
+        Returns the **max** of the available ratios — the binding constraint
+        reads as the progress, which matches the "guard against runaway"
+        intent. Returns ``None`` when no caps are set at all (the bar is
+        suppressed in that case).
         """
         ratios: list[float] = []
         if self._max_tool_calls > 0:
@@ -583,8 +546,6 @@ class RichTransport:
             ratios.append(self._current_iter / self._max_iterations)
         if self._max_handoffs > 0:
             ratios.append(self._handoff_count / self._max_handoffs)
-        if self._context_budget > 0:
-            ratios.append(self._status_turn_tokens / self._context_budget)
         if not ratios:
             return None
         return max(0.0, min(1.0, max(ratios)))
@@ -616,37 +577,6 @@ class RichTransport:
             return f"{count}/{cap} {label}"
         return f"N{count} {label}"
 
-    def _format_turn_tokens(self) -> str:
-        """Format the explicit per-turn token total, with an optional budget."""
-        if self._context_budget > 0:
-            return f"turn {self._status_turn_tokens}/{self._context_budget} tok"
-        return f"turn {self._status_turn_tokens} tok"
-
-    def _context_gauge(self) -> Text | None:
-        """Render the context-lane pressure gauge (ask 3).
-
-        ``ctx <bar> <pct>%`` where the fill is ``session_total_tokens /
-        context_budget``. The bar colors at the compaction thresholds: muted
-        below ``pressure_threshold``, ``gold3`` at the soft threshold, and
-        ``indian_red`` at the hard threshold. Returns ``None`` when the budget
-        is unset or the fill ratio is zero (gauge suppressed until there's
-        something to show).
-        """
-        if self._context_budget <= 0:
-            return None
-        ratio = self._status_session_tokens / self._context_budget
-        ratio = max(0.0, min(1.0, ratio))
-        if ratio <= 0:
-            return None
-        if self._context_hard_threshold > 0 and ratio >= self._context_hard_threshold:
-            style = "bold indian_red"
-        elif self._context_pressure_threshold > 0 and ratio >= self._context_pressure_threshold:
-            style = "bold gold3"
-        else:
-            style = STYLE_TEXT_MUTED
-        bar = self._progress_bar(ratio)
-        pct = round(ratio * 100)
-        return Text(f"ctx {bar} {pct}%", style=style)
 
     def _elapsed_seconds(self) -> int:
         """Whole seconds elapsed since ``start_thinking`` for this turn."""
@@ -693,8 +623,8 @@ class RichTransport:
         Layout (top → bottom):
         1. The pinned prompt banner (ask 1) — the user's submitted question,
            always visible during the turn.
-        2. The live status header (asks 2 & 3) — mode · model · progress bar ·
-           cap strip on line 1; context gauge · elapsed/ETA on line 2.
+        2. The live status header — mode · model · progress bar · cap strip ·
+           session tokens · elapsed/ETA on one line.
         3. The transcript rows, most recent at the bottom; the active (last)
            row gets a trailing spinner. Thinking rows render collapsed (a
            compact ``▸ Thinking… N char`` summary) or expanded (the full dimmed

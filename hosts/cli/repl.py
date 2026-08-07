@@ -342,39 +342,6 @@ def _is_repl_quit_command(message: str) -> bool:
     return message.lower() in {"exit", "quit", "/exit", "/quit"}
 
 
-def _context_lane_budget(runtime: HostRuntime) -> int:
-    """Sum the ``max_tokens`` of all context lanes in the session plan.
-
-    Returns 0 when the session plan is absent or no lane sets ``max_tokens``
-    (the status header suppresses the context gauge when the budget is 0).
-    """
-    plan = runtime.session_plan
-    if plan is None:
-        return 0
-    try:
-        lanes = plan.manifest.context.lanes
-    except AttributeError:
-        return 0
-    return sum(lane.max_tokens for lane in lanes if getattr(lane, "max_tokens", None) is not None)
-
-
-def _context_compaction_thresholds(runtime: HostRuntime) -> tuple[float, float]:
-    """Read the compaction pressure/hard thresholds from the session plan.
-
-    Returns ``(pressure_threshold, hard_threshold)``. Both default to 0.0 when
-    the session plan or compaction tuning is absent — the context gauge then
-    stays muted (no threshold-based color change).
-    """
-    plan = runtime.session_plan
-    if plan is None:
-        return 0.0, 0.0
-    try:
-        compaction = plan.manifest.context.history.compaction
-    except AttributeError:
-        return 0.0, 0.0
-    return float(compaction.pressure_threshold), float(compaction.hard_threshold)
-
-
 async def _process_repl_turn(
     runtime: HostRuntime,
     transport: TransportCallbacks,
@@ -390,20 +357,11 @@ async def _process_repl_turn(
     # phase (command parse, start_mode bypass, current_mode_id selection).
     # There is no separate router; handoff is mid-turn via transition_stage.
     if isinstance(transport, RichTransport):
-        # Pin the submitted prompt to the top of the Live region (ask 1) and
-        # seed the context-pressure gauge (ask 3). The budget is the sum of
-        # the session plan's context-lane max_tokens; the thresholds are the
-        # compaction pressure/hard thresholds. Both are read here (once per
-        # turn) rather than on every stage event.
-        context_budget = _context_lane_budget(runtime)
-        pressure_threshold, hard_threshold = _context_compaction_thresholds(runtime)
+        # Pin the submitted prompt to the top of the Live region (ask 1).
         transport.start_thinking(
             "dispatch",
             session_tokens=runtime.tokens.session_total_tokens,
             message=message,
-            context_budget=context_budget,
-            context_pressure_threshold=pressure_threshold,
-            context_hard_threshold=hard_threshold,
         )
     try:
         result = await handle_message(runtime, message, transport)

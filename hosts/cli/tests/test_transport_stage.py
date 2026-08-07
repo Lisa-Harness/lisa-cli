@@ -843,12 +843,11 @@ def test_status_header_renders_caps_with_limits() -> None:
     transport._tool_call_count = 4
     transport._max_iterations = 5
     transport._current_iter = 2
-    transport._context_budget = 32000
     transport._status_turn_tokens = 12000
     plain = transport._render_status_header().plain
     assert "4/8 tools" in plain
     assert "2/5 iter" in plain
-    assert "turn 12000/32000 tok" in plain
+    assert "turn 12000 tok" in plain
     assert "session 19500 tok" in plain
 
 
@@ -907,10 +906,10 @@ def test_aggregate_progress_blends_caps() -> None:
     transport._max_iterations = 5
     transport._current_iter = 4
     assert transport._aggregate_progress() == 0.8
-    # Context budget ratio dominates.
-    transport._context_budget = 10000
-    transport._status_turn_tokens = 9500
-    assert abs(transport._aggregate_progress() - 0.95) < 1e-9
+    # Handoff cap dominates.
+    transport._max_handoffs = 3
+    transport._handoff_count = 3
+    assert transport._aggregate_progress() == 1.0
 
 
 def test_progress_bar_gradient_fill() -> None:
@@ -954,42 +953,6 @@ def test_live_display_includes_prompt_banner_and_header() -> None:
     renderables = list(group.renderables)
     assert "hello" in renderables[0].plain
     assert "mode" not in renderables[0].plain  # banner is just the prompt
-
-
-def test_context_gauge_colors_at_pressure_thresholds() -> None:
-    """The context gauge turns gold3 at pressure_threshold, indian_red at hard (ask 3)."""
-    console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
-    transport.start_thinking(
-        "dispatch",
-        context_budget=10000,
-        context_pressure_threshold=0.65,
-        context_hard_threshold=0.85,
-    )
-    # Below pressure threshold: muted.
-    transport._status_session_tokens = 4000
-    gauge = transport._context_gauge()
-    assert gauge is not None
-    assert "gold3" not in str(gauge.style)
-    assert "indian_red" not in str(gauge.style)
-    # At pressure threshold: gold3.
-    transport._status_session_tokens = 6600
-    gauge = transport._context_gauge()
-    assert gauge is not None
-    assert "gold3" in str(gauge.style)
-    # At hard threshold: indian_red.
-    transport._status_session_tokens = 8600
-    gauge = transport._context_gauge()
-    assert gauge is not None
-    assert "indian_red" in str(gauge.style)
-
-
-def test_context_gauge_suppressed_when_no_budget() -> None:
-    """The context gauge is None when context_budget <= 0 (ask 3)."""
-    console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
-    transport.start_thinking("dispatch")  # no context_budget
-    assert transport._context_gauge() is None
 
 
 @pytest.mark.asyncio
