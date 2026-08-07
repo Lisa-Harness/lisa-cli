@@ -668,12 +668,11 @@ async def test_toggle_thinking_during_turn_expands_inflight_rows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_response_renders_call_summary() -> None:
-    """After the answer panel, a compact call-stats summary line is rendered
-    when the turn had tool/model calls.
-    """
+async def test_on_response_renders_workflow_summary() -> None:
+    """Successful completion renders response and workflow summaries, not a raw transcript."""
     transport = _make_stream_transport()
     transport.start_thinking("model_call")
+    await transport.on_text_chunk("", reasoning="internal activity")
     await transport.on_stage(
         "model_call", {"mode_id": "default", "iteration": 1, "duration_ms": 500}
     )
@@ -689,9 +688,16 @@ async def test_on_response_renders_call_summary() -> None:
     await transport.on_response("answer")
 
     out_after = transport.console.file.getvalue()[len(out_before) :]
-    # The summary mentions the call count.
-    assert "1 call" in out_after
-    assert "✓" in out_after
+    assert "Response" in out_after
+    assert "Workflow" in out_after
+    assert "Completed" in out_after
+    assert "turn 0 tok" in out_after
+    assert "session 0 tok" in out_after
+    assert "1 model call" in out_after
+    assert "1 tool call" in out_after
+    assert "1 succeeded, 0 failed" in out_after
+    assert "ok search 200ms" in out_after
+    assert "internal activity" not in out_after
 
 
 @pytest.mark.asyncio
@@ -818,8 +824,10 @@ def test_status_header_renders_mode_model_caps() -> None:
     plain = text.plain
     assert "mode coding" in plain
     assert "anthropic:haiku" in plain
-    # Cap strip (ask 3): always-on, compact N form when cap is 0/unset.
-    assert "N120 tok" in plain
+    # Both token totals are explicit while work is in flight.
+    assert "models 0" in plain
+    assert "turn 120 tok" in plain
+    assert "session 620 tok" in plain
     assert "N0 tools" in plain
     assert "N0 iter" in plain
 
@@ -840,7 +848,8 @@ def test_status_header_renders_caps_with_limits() -> None:
     plain = transport._render_status_header().plain
     assert "4/8 tools" in plain
     assert "2/5 iter" in plain
-    assert "12000/32000 tok" in plain
+    assert "turn 12000/32000 tok" in plain
+    assert "session 19500 tok" in plain
 
 
 def test_status_header_session_seeded_from_baseline() -> None:
@@ -876,8 +885,11 @@ async def test_model_call_updates_live_status_header() -> None:
     assert transport._status_turn_tokens == 120
     assert transport._status_session_tokens == 220
     header = transport._render_status_header().plain
-    # The cap strip shows turn tokens in compact N form (no context budget set).
-    assert "N120 tok" in header
+    assert "models 1" in header
+    assert "turn 120 tok" in header
+    assert "session 220 tok" in header
+    model_row = next(row for row in transport._rows if row.kind == "model")
+    assert "120 tok" in model_row.text
 
 
 def test_aggregate_progress_blends_caps() -> None:

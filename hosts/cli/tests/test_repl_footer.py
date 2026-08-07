@@ -10,7 +10,10 @@ from __future__ import annotations
 # pylint: disable=protected-access
 import io
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
+import pytest
 from host.runtime import HostRuntime, TurnContext
 from hosts.cli.repl import _render_turn_footer
 from rich.console import Console
@@ -111,3 +114,64 @@ def test_repl_toolbar_shows_shift_enter_once_supported() -> None:
     plain = "".join(text for _, text in toolbar)
     assert "Shift+Enter newline" in plain
     assert "Ctrl+J" not in plain
+
+
+def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older prompt_toolkit must not block REPL startup over ``s-enter``."""
+    from hosts.cli import repl as cli_repl
+    from hosts.cli.transport import RichTransport
+
+    registered_keys: list[str] = []
+
+    class _BindingsRejectingShiftEnter:
+        def add(self, key: str) -> Any:
+            if key == "s-enter":
+                raise ValueError("Invalid key: s-enter")
+            registered_keys.append(key)
+
+            def _decorate(callback: Any) -> Any:
+                return callback
+
+            return _decorate
+
+    monkeypatch.setattr(cli_repl, "KeyBindings", _BindingsRejectingShiftEnter)
+    transport = RichTransport(console=_make_console(), debug=False)
+
+    bindings = cli_repl._build_repl_key_bindings(transport)
+
+    assert bindings is not None
+    assert "enter" in registered_keys
+    assert "c-j" in registered_keys
+    assert transport.shift_enter_supported is False
+
+
+@pytest.mark.asyncio
+async def test_rich_turn_uses_transport_workflow_summary_not_footer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Rich transport owns the completed-turn summary and footer is not repeated."""
+    from hosts.cli import repl as cli_repl
+    from hosts.cli.transport import RichTransport
+
+    runtime = _make_runtime(tmp_path)
+    console = _make_console()
+    transport = RichTransport(console=console, debug=False)
+    footer_calls: list[tuple[object, ...]] = []
+
+    async def _handle_message(*args: Any) -> SimpleNamespace:
+        callback_transport = args[2]
+        await callback_transport.on_response("answer")
+        return SimpleNamespace(text="answer")
+
+    def _record_footer(*args: object) -> None:
+        footer_calls.append(args)
+
+    monkeypatch.setattr(cli_repl, "handle_message", _handle_message)
+    monkeypatch.setattr(cli_repl, "_render_turn_footer", _record_footer)
+
+    await cli_repl._process_repl_turn(runtime, transport, console, "hello")
+
+    assert footer_calls == []

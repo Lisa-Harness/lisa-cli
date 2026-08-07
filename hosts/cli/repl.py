@@ -430,7 +430,7 @@ async def _process_repl_turn(
         # is reused on the next turn. MCPToolPool.call_tool and aclose
         # already handle CancelledError internally (kernel/tools/mcp_client.py).
         if isinstance(transport, RichTransport):
-            transport.stop_thinking()
+            transport.stop_thinking(flush_transcript=True)
         # Flush any half-streamed on_text_chunk output that was written
         # without a trailing newline before the interrupt.
         console.file.write("\n")
@@ -448,7 +448,7 @@ async def _process_repl_turn(
         return
     except Exception as exc:  # pylint: disable=broad-except
         if isinstance(transport, RichTransport):
-            transport.stop_thinking()
+            transport.stop_thinking(flush_transcript=True)
         elapsed_ms = (time.perf_counter() - turn_start) * 1000.0
         runtime.tokens.session_error_count += 1
         runtime.tokens.session_total_latency_ms += elapsed_ms
@@ -482,7 +482,8 @@ async def _process_repl_turn(
     # ``runtime.last_turn_context`` (populated by handle_message) and the
     # per-turn elapsed timer. Skipped when there's no completion context
     # (e.g. an early-exit host-command path).
-    _render_turn_footer(console, runtime, elapsed_ms)
+    if not isinstance(transport, RichTransport):
+        _render_turn_footer(console, runtime, elapsed_ms)
 
     console.print(Rule(style=STYLE_RULE))
 

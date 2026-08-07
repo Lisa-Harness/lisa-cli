@@ -301,6 +301,9 @@ class RichTransport:
         self._rows: list[_Row] = []
         # Per-iteration model-call durations for the current turn (sparkline).
         self._iteration_durations: list[float] = []
+        # Number of model calls started in the current turn. This is distinct
+        # from workflow iteration because a turn can change modes or fork.
+        self._model_call_count: int = 0
         # Running counters for the graphic column.
         self._handoff_count: int = 0
         self._tool_call_count: int = 0
@@ -398,6 +401,7 @@ class RichTransport:
         self._current_mode = ""
         self._rows = []
         self._iteration_durations = []
+        self._model_call_count = 0
         self._handoff_count = 0
         self._tool_call_count = 0
         self._status_current_model = ""
@@ -427,7 +431,7 @@ class RichTransport:
             self._render_live_display(),
             console=self.console,
             refresh_per_second=4,
-            transient=False,
+            transient=True,
         )
         if live is not None:
             try:
@@ -439,22 +443,32 @@ class RichTransport:
         self._live = live
         self._status = live
 
-    def stop_thinking(self, *, flush_stream: bool = False) -> None:
+    def stop_thinking(
+        self,
+        *,
+        flush_transcript: bool = False,
+        flush_stream: bool = False,
+    ) -> None:
         """Stop the thinking display if it is running.
 
-        Flushes the transcript rows (tool calls + thinking segments) to
-        scrollback as the permanent turn record, then tears down the Live
-        region. The streamed answer is NOT flushed here — ``on_response``
-        renders the clean Markdown Panel from the full response text. When
-        ``flush_stream`` is True (the mid-turn error path), any partial
-        answer staged so far is flushed so partial work isn't silently lost
-        before the error panel shows.
+        By default this removes the transient working display without writing
+        it to scrollback, keeping successful completion focused on the final
+        response and workflow summary. Set ``flush_transcript`` for diagnostic
+        outcomes (errors and cancellations) that need to preserve the ordered
+        tool/model/thinking activity. The streamed answer is never flushed on
+        a successful response; when ``flush_stream`` is True, partial answer
+        text is retained with the diagnostic transcript.
         """
         live = self._live
         status = self._status
         self._live = None
         self._status = None
         if live is not None:
+            try:
+                live.stop()
+            except Exception:  # pylint: disable=broad-except
+                pass
+        if flush_transcript and live is not None:
             for row in self._rows:
                 try:
                     self.console.print(self._row_line(row))
@@ -465,11 +479,6 @@ class RichTransport:
                     self.console.print(self._answer_staging)
                 except Exception:  # pylint: disable=broad-except
                     pass
-        if live is not None:
-            try:
-                live.stop()
-            except Exception:  # pylint: disable=broad-except
-                pass
         if status is not None and status is not live:
             try:
                 status.stop()
@@ -498,13 +507,14 @@ class RichTransport:
         context-lane pressure are visible and current for the whole turn — not
         just once above the input prompt.
 
-        Line 1: ``mode <m> │ <provider>:<model> │ <bar> <pct>% │ <tools>/<cap>
-        tools · <iter>/<cap> iter · <turn_tok>/<budget> tok``.
-        Line 2: ``ctx <ctx_bar> <ctx_pct>% │ <elapsed>s · ~<eta>s left`` — the
-        context pressure gauge (colored at the compaction thresholds) plus the
-        turn timer. ETA appears only once ≥2 model iterations have been
-        sampled; before that only elapsed time is shown. The context gauge is
-        suppressed when ``_context_budget <= 0``.
+        Line 1: ``mode <m> │ <provider>:<model> │ <bar> <pct>% │ models <N> ·
+        <tools>/<cap> tools · <iter>/<cap> iter · turn <turn_tok>/<budget> tok``.
+        Line 2: ``session <session_tok> tok │ ctx <ctx_bar> <ctx_pct>% │
+        <elapsed>s · ~<eta>s left`` — the cumulative session total, context
+        pressure gauge (colored at the compaction thresholds), and turn timer.
+        ETA appears only once ≥2 model iterations have been sampled; before
+        that only elapsed time is shown. The context gauge is suppressed when
+        ``_context_budget <= 0``.
         """
         line1 = self._render_status_line1()
         line2 = self._render_status_line2()
@@ -533,16 +543,16 @@ class RichTransport:
                 Text(f"{self._progress_bar(progress)} {pct}%", style="bold steel_blue3")
             )
         # Cap strip (ask 3): always-on counts/caps, all tiers.
-        cap_parts: list[str] = []
+        cap_parts: list[str] = [f"models {self._model_call_count}"]
         cap_parts.append(self._format_cap(self._tool_call_count, self._max_tool_calls, "tools"))
         cap_parts.append(self._format_cap(self._current_iter, self._max_iterations, "iter"))
-        cap_parts.append(self._format_cap(self._status_turn_tokens, self._context_budget, "tok"))
+        cap_parts.append(self._format_turn_tokens())
         parts.append(Text(" · ".join(cap_parts), style=STYLE_TEXT_MUTED))
         return Text(" │ ").join(parts)
 
     def _render_status_line2(self) -> Text:
-        """Status header line 2: context pressure gauge · elapsed/ETA."""
-        parts: list[Text] = []
+        """Status header line 2: session tokens · context pressure · elapsed/ETA."""
+        parts: list[Text] = [Text(f"session {self._status_session_tokens} tok", style=STYLE_TEXT_MUTED)]
         if self._context_budget > 0:
             gauge = self._context_gauge()
             if gauge is not None:
@@ -605,6 +615,12 @@ class RichTransport:
         if cap > 0:
             return f"{count}/{cap} {label}"
         return f"N{count} {label}"
+
+    def _format_turn_tokens(self) -> str:
+        """Format the explicit per-turn token total, with an optional budget."""
+        if self._context_budget > 0:
+            return f"turn {self._status_turn_tokens}/{self._context_budget} tok"
+        return f"turn {self._status_turn_tokens} tok"
 
     def _context_gauge(self) -> Text | None:
         """Render the context-lane pressure gauge (ask 3).
@@ -968,7 +984,14 @@ class RichTransport:
         if max_handoffs > self._max_handoffs:
             self._max_handoffs = max(self._max_handoffs, max_handoffs)
         graphic = _pip_counter(self._handoff_count, max_handoffs)
-        self._append_row(_Row(kind="transition", text=text, graphic=graphic, data=data))
+        self._append_row(
+            _Row(
+                kind="transition",
+                text=text,
+                graphic=graphic,
+                data={**data, "from_mode": from_mode, "to_mode": to_mode},
+            )
+        )
 
     def _route_model_call(self, label: str, data: dict[str, Any]) -> None:
         """Route a model-call stage event to a single in-place-updated row.
@@ -1002,6 +1025,7 @@ class RichTransport:
             self._status_model_provider = str(provider) if provider not in (None, "") else ""
 
         if label == "model_call":
+            self._model_call_count += 1
             graphic = _pip_counter(iter_count, max_iter)
             self._open_model_row = len(self._rows)
             self._append_row(
@@ -1077,7 +1101,18 @@ class RichTransport:
         duration = (complete or data).get("duration_ms")
         if status_glyph and duration not in (None, "", 0):
             body += f" {round(float(duration))}ms"
-        suffix = self._render_stage_suffix(data) if self._detail in ("power", "debug") else ""
+        completion_data = complete or {}
+        total_tokens = completion_data.get("_state.total_tokens") or completion_data.get(
+            "total_tokens"
+        )
+        if total_tokens in (None, "", 0):
+            total_tokens = data.get("_state.total_tokens") or data.get("total_tokens")
+        if status_glyph and total_tokens not in (None, "", 0):
+            body += f" {total_tokens} tok"
+        metadata = {**data, **completion_data}
+        if metadata.get("_state.total_tokens") and not metadata.get("total_tokens"):
+            metadata["total_tokens"] = metadata["_state.total_tokens"]
+        suffix = self._render_stage_suffix(metadata) if self._detail in ("power", "debug") else ""
         return f"{prefix}{body}{suffix}"
 
     def _complete_tool_row(self, data: dict[str, Any]) -> None:
@@ -1232,35 +1267,61 @@ class RichTransport:
 
     # ── Streaming / response / debug / error ────────────────────────
 
-    def _render_call_summary(self) -> None:
-        """Render the togglable call-stats summary after the answer.
+    def _render_workflow_summary(self) -> None:
+        """Render the compact execution summary beneath a successful response."""
+        from rich.table import Table
 
-        On the ``clean``/``power`` tier a compact one-liner (tool-call count,
-        total model time, handoff note). On the ``debug`` tier a full per-row
-        breakdown — one line per tool call with its status and duration, plus
-        the model-call iterations with their sparkline — so the operator can
-        audit the turn trajectory. No-op when there were no calls.
-        """
         tools = [r for r in self._rows if r.kind == "tool"]
         models = [r for r in self._rows if r.kind == "model"]
         transitions = [r for r in self._rows if r.kind == "transition"]
-        if not tools and not models and not transitions:
-            return
+        forks = [r for r in self._rows if r.kind == "fork"]
+
+        ok = sum(1 for row in tools if "✓" in row.text)
+        failed = sum(1 for row in tools if "✗" in row.text)
+        model_time_ms = round(sum(self._iteration_durations))
+        route = self._current_mode or "default"
+        model = self._status_current_model or "-"
+        if self._status_model_provider:
+            model = f"{self._status_model_provider}:{model}"
+
+        summary = Table.grid(padding=(0, 1))
+        summary.add_column(style=STYLE_TEXT_MUTED, no_wrap=True)
+        summary.add_column()
+        summary.add_row("Outcome", Text(f"Completed · {route} · {model}"))
+        if transitions:
+            route_parts = [str(transitions[0].data.get("from_mode") or route)]
+            route_parts.extend(str(row.data.get("to_mode") or route) for row in transitions)
+            summary.add_row("Route", Text(" → ".join(route_parts)))
+        summary.add_row(
+            "Tokens",
+            Text(
+                f"turn {self._status_turn_tokens} tok · session {self._status_session_tokens} tok"
+            ),
+        )
+        summary.add_row(
+            "Activity",
+            Text(
+                f"{self._model_call_count} model call{'s' if self._model_call_count != 1 else ''}"
+                f" · {model_time_ms}ms · {len(tools)} tool call{'s' if len(tools) != 1 else ''} "
+                f"({ok} succeeded, {failed} failed)"
+                f" · {len(transitions)} handoff{'s' if len(transitions) != 1 else ''}"
+            ),
+        )
+        if tools:
+            events: list[str] = []
+            for row in tools:
+                outcome = "failed" if "✗" in row.text else "ok"
+                tool_name = str(row.data.get("tool") or "tool")
+                duration = row.data.get("duration_ms")
+                suffix = f" {duration}ms" if duration not in (None, "", 0) else ""
+                events.append(f"{outcome} {tool_name}{suffix}")
+            summary.add_row("Tools", Text(" · ".join(events)))
+        if forks:
+            summary.add_row("Fork", Text(forks[-1].text.splitlines()[0]))
+        self.console.print(Panel(summary, title="Workflow", border_style=STYLE_BORDER_RESPONSE))
+
         if self._detail == "debug":
             self._render_call_summary_debug(tools, models, transitions)
-            return
-        parts: list[str] = []
-        if tools:
-            ok = sum(1 for r in tools if "✓" in r.text)
-            failed = sum(1 for r in tools if "✗" in r.text)
-            parts.append(f"{len(tools)} call{'s' if len(tools) != 1 else ''} ({ok}✓/{failed}✗)")
-        if models:
-            total_ms = sum(self._iteration_durations)
-            parts.append(f"{len(models)} model {round(total_ms)}ms")
-        if transitions:
-            parts.append(f"{len(transitions)} handoff")
-        if parts:
-            self.console.print(Text("  ·  ".join(parts), style=STYLE_TEXT_MUTED))
 
     def _render_call_summary_debug(
         self, tools: list[_Row], models: list[_Row], transitions: list[_Row]
@@ -1329,21 +1390,18 @@ class RichTransport:
     async def on_response(self, text: str, data: dict[str, Any] | None = None) -> None:
         """Render the final response as a clean Markdown Panel.
 
-        Tears down the Live region — the transcript (tool calls + thinking
-        segments) flushes to scrollback as the turn record — then renders the
-        fully formatted answer. The streamed answer is NOT reused: streaming it
-        inline made the final unreadable with interspersed tool calls, so the
-        clean Panel is always rendered from the complete ``text``.
+        Tears down the transient Live region without flushing raw reasoning or
+        tool activity to scrollback, then renders the fully formatted answer
+        and a clear workflow summary. The streamed answer is NOT reused:
+        rendering the complete ``text`` keeps the final response readable.
         """
-        self.stop_thinking()
+        self.stop_thinking(flush_transcript=False)
         self._answer_staging = Text()
         if text:
             self.console.print(
                 Panel(Markdown(text), title="Response", border_style=STYLE_BORDER_RESPONSE)
             )
-        # Togglable call-stats summary after the answer. Clean tier shows a
-        # compact one-liner; debug tier shows the full per-row breakdown.
-        self._render_call_summary()
+        self._render_workflow_summary()
 
     async def on_debug_context(self, context: dict[str, Any]) -> None:
         """Render turn context in a Rich Panel (only on the debug tier)."""
@@ -1367,7 +1425,7 @@ class RichTransport:
         scrollback first so partial work isn't silently lost before the error
         panel shows.
         """
-        self.stop_thinking(flush_stream=True)
+        self.stop_thinking(flush_transcript=True, flush_stream=True)
         self._answer_staging = Text()
         body = message
         if exc is not None:
