@@ -47,12 +47,12 @@ def test_restart_current_process_unix_uses_execv(tmp_path: Path) -> None:
         patch.object(cli_main.os, "name", "posix"),
         patch.object(cli_main.os, "execv", fake_execv),
         patch.object(cli_main.sys, "executable", "/usr/bin/python"),
-        patch.object(cli_main.sys, "argv", ["lisa", "--debug"]),
+        patch.object(cli_main.sys, "argv", ["lisa", "--log-level", "debug"]),
     ):
         cli_main._restart_current_process()
 
     assert captured["path"] == "/usr/bin/python"
-    assert captured["args"] == ["/usr/bin/python", "lisa", "--debug"]
+    assert captured["args"] == ["/usr/bin/python", "lisa", "--log-level", "debug"]
 
 
 def test_restart_current_process_windows_exits_without_spawning(

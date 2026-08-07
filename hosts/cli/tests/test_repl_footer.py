@@ -94,7 +94,7 @@ def test_repl_toolbar_shows_ctrl_j_when_shift_enter_unsupported() -> None:
     from hosts.cli.transport import RichTransport
 
     console = _make_console()
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.shift_enter_supported = False
     toolbar = _repl_bottom_toolbar(transport, session_name="test")
     plain = "".join(text for _, text in toolbar)
@@ -108,12 +108,37 @@ def test_repl_toolbar_shows_shift_enter_once_supported() -> None:
     from hosts.cli.transport import RichTransport
 
     console = _make_console()
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.shift_enter_supported = True
     toolbar = _repl_bottom_toolbar(transport, session_name="test")
     plain = "".join(text for _, text in toolbar)
     assert "Shift+Enter newline" in plain
     assert "Ctrl+J" not in plain
+
+
+def test_repl_toolbar_shows_mode_and_omits_tab_complete() -> None:
+    """The toolbar surfaces the current mode and drops 'Tab complete' (ask)."""
+    from hosts.cli.repl import _repl_bottom_toolbar
+    from hosts.cli.transport import RichTransport
+
+    console = _make_console()
+    transport = RichTransport(console=console)
+    toolbar = _repl_bottom_toolbar(transport, session_name="test", mode_id="coding")
+    plain = "".join(text for _, text in toolbar)
+    assert "mode:coding" in plain
+    assert "Tab complete" not in plain
+
+
+def test_repl_toolbar_mode_defaults_to_default() -> None:
+    """An empty mode_id renders as 'default' in the toolbar."""
+    from hosts.cli.repl import _repl_bottom_toolbar
+    from hosts.cli.transport import RichTransport
+
+    console = _make_console()
+    transport = RichTransport(console=console)
+    toolbar = _repl_bottom_toolbar(transport, session_name="test")
+    plain = "".join(text for _, text in toolbar)
+    assert "mode:default" in plain
 
 
 def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
@@ -137,7 +162,7 @@ def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
             return _decorate
 
     monkeypatch.setattr(cli_repl, "KeyBindings", _BindingsRejectingShiftEnter)
-    transport = RichTransport(console=_make_console(), debug=False)
+    transport = RichTransport(console=_make_console())
 
     bindings = cli_repl._build_repl_key_bindings(transport)
 
@@ -158,7 +183,7 @@ async def test_rich_turn_uses_transport_workflow_summary_not_footer(
 
     runtime = _make_runtime(tmp_path)
     console = _make_console()
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     footer_calls: list[tuple[object, ...]] = []
 
     async def _handle_message(*args: Any) -> SimpleNamespace:

@@ -47,7 +47,7 @@ def test_process_repl_turn_keyboard_interrupt_returns_prompt(
 
     runtime = _make_runtime(tmp_path)
     console = Console(quiet=True)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
 
     async def _raise_interrupt(*a: Any, **k: Any) -> Any:
@@ -105,7 +105,7 @@ def test_process_repl_turn_cancelled_error_returns_prompt(
 
     runtime = _make_runtime(tmp_path)
     console = Console(quiet=True)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
 
     async def _raise_cancelled(*a: Any, **k: Any) -> Any:
@@ -132,7 +132,7 @@ def test_process_repl_turn_keyboard_interrupt_stops_spinner(
 
     runtime = _make_runtime(tmp_path)
     console = Console(quiet=True)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
     assert transport._status is not None
 
@@ -158,7 +158,7 @@ def test_process_repl_turn_normal_exception_still_errors(
 
     runtime = _make_runtime(tmp_path)
     console = Console(quiet=True)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
 
     async def _raise_value_error(*a: Any, **k: Any) -> Any:
         raise ValueError("boom")

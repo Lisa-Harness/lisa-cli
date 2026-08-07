@@ -44,7 +44,6 @@ STYLE_TEXT_PRIMARY = "bright_white"
 STYLE_TEXT_MUTED = "grey58"
 STYLE_BORDER_SESSION = "steel_blue3"
 STYLE_BORDER_RESPONSE = "dark_sea_green4"
-STYLE_BORDER_CONTEXT = "gold3"
 STYLE_RULE = "grey42"
 STYLE_PROMPT = "bold steel_blue3"
 
@@ -176,7 +175,7 @@ async def run_repl(
     # route preview + token counters without threading the runtime through
     # every status-segment call.
     console._lisa_runtime = runtime  # type: ignore[attr-defined]
-    transport = RichTransport(console=console, debug=runtime.config.debug)
+    transport = RichTransport(console=console)
 
     # Set the initial route preview so the status line shows the
     # resolved model before the first turn is executed. When start_mode
@@ -427,12 +426,6 @@ async def _process_repl_turn(
         runtime.tokens.session_mode_counts.get(mode_id, 0) + 1
     )
 
-    # Debug context is delivered via transport.on_debug_context during the
-    # turn; render the last-turn context here too when debug is on, to
-    # match the post-turn panel.
-    if runtime.config.debug and runtime.last_turn_context is not None:
-        _render_turn_context(console, runtime.last_turn_context)
-
     # The transport's on_response already rendered the response panel during
     # the turn. If on_response was a no-op (e.g. NullTransport), render here
     # as a fallback — but RichTransport already printed it.
@@ -498,35 +491,6 @@ def _print_startup_banner(console: Console) -> None:
     title.append("interactive terminal host", style=STYLE_TEXT_MUTED)
     console.print(title)
     console.print()
-
-
-def _render_turn_context(console: Console, context: Any) -> None:
-    """Render a turn-context dict or TurnContext as a Rich Panel."""
-    if isinstance(context, dict):
-        payload = context
-    else:
-        # TurnContext dataclass → dict
-        payload = {
-            k: getattr(context, k)
-            for k in (
-                "timestamp_utc",
-                "raw_message",
-                "mode_id",
-                "mode_kind",
-                "query",
-                "preferred_model_id",
-                "handoff",
-            )
-        }
-    import json
-
-    console.print(
-        Panel(
-            json.dumps(payload, indent=2, ensure_ascii=True, default=str),
-            title="Turn Context",
-            border_style=STYLE_BORDER_CONTEXT,
-        )
-    )
 
 
 def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Error") -> None:
@@ -673,6 +637,7 @@ def _build_repl_prompt_session(
         bottom_toolbar=lambda: _repl_bottom_toolbar(
             transport,
             session_name=runtime.session_plan.manifest.name,
+            mode_id=runtime.current_mode_id,
         ),
         style=Style.from_dict(_REPL_PROMPT_STYLE) if Style is not None else None,
     )
@@ -692,14 +657,16 @@ _REPL_PROMPT_STYLE = {
 }
 
 
-def _repl_bottom_toolbar(transport: RichTransport, *, session_name: str = "") -> Any:
-    """Render the bottom toolbar: session name + live char/line count + hints.
+def _repl_bottom_toolbar(
+    transport: RichTransport, *, session_name: str = "", mode_id: str = ""
+) -> Any:
+    """Render the bottom toolbar: session name + mode + live char/line count + hints.
 
     Called by prompt_toolkit on every buffer mutation (and on explicit
-    invalidation from the Ctrl+O / Ctrl+Y toggles). Returns
+    invalidation from the Ctrl+Y toggle). Returns
     ``FormattedText`` (a list of ``(style, text)`` tuples) so the toolbar
     updates in real time as the user types — and reflects the current
-    detail/thinking toggle state rather than a static hint string.
+    thinking toggle state rather than a static hint string.
     """
     # Import inside the function so the module imports cleanly when
     # prompt_toolkit is absent (the toolbar is only used when it is present).
@@ -721,13 +688,6 @@ def _repl_bottom_toolbar(transport: RichTransport, *, session_name: str = "") ->
 
     # Reflect the live toggle state in the hint segments so the toolbar
     # doubles as a status indicator, not just a static cheat-sheet.
-    detail_tier = transport.detail
-    if detail_tier == "debug":
-        detail_label = "detail:debug"
-    elif detail_tier == "power":
-        detail_label = "detail:on"
-    else:
-        detail_label = "detail:off"
     thinking_label = "thinking:off" if transport.thinking_collapsed else "thinking:on"
 
     # The session-context name (from its front matter) anchors the toolbar so
@@ -737,18 +697,19 @@ def _repl_bottom_toolbar(transport: RichTransport, *, session_name: str = "") ->
     # The newline chord reflects runtime detection: Shift+Enter on
     # kitty/CSI-u terminals, Ctrl+J as the portable fallback (ask 4).
     newline_chord = "Shift+Enter" if transport.shift_enter_supported else "Ctrl+J"
+    mode_label = mode_id.strip() if mode_id and mode_id.strip() else "default"
     return FormattedText(
         [
             ("class:bottom-toolbar", f" {session_label} "),
             ("class:bottom-toolbar.text", "│ "),
+            ("class:bottom-toolbar.hint", "mode:"),
+            ("class:bottom-toolbar.metric", f"{mode_label} "),
+            ("class:bottom-toolbar.text", "│ "),
             (
                 "class:bottom-toolbar",
-                f" Enter submit · {newline_chord} newline · ↑/↓ history · Tab complete ",
+                f" Enter submit · {newline_chord} newline · ↑/↓ history ",
             ),
             ("class:bottom-toolbar.text", "│ "),
-            ("class:bottom-toolbar.hint", "Ctrl+O "),
-            ("class:bottom-toolbar.metric", detail_label),
-            ("class:bottom-toolbar.text", " · "),
             ("class:bottom-toolbar.hint", "Ctrl+Y "),
             ("class:bottom-toolbar.metric", thinking_label),
             ("class:bottom-toolbar.text", " · "),
@@ -782,12 +743,6 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
       the tool calls (a tool/model event closes the current segment). The
       toggle flips every thinking row at once so the user can inspect the
       model's reasoning across the whole turn without hunting for each segment.
-    - Ctrl+O: toggle the detail tier between clean (default) and power, which
-      adds the graphic column (pip counters, duration sparklines, token
-      suffixes) to each transcript row. No-op on the construction-only debug
-      tier. After toggling, the bottom toolbar is invalidated so its
-      ``detail:off/on/debug`` segment reflects the new tier immediately
-      rather than waiting for the next keystroke.
 
     Without these bindings, prompt_toolkit's default ``multiline=True``
     behaviour is the reverse (Enter inserts a newline; Esc→Enter submits),
@@ -827,11 +782,6 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
         transport.toggle_thinking()
         _invalidate_repl_toolbar(event)
 
-    @bindings.add("c-o")
-    def _toggle_detail(event: Any) -> None:
-        transport.toggle_detail()
-        _invalidate_repl_toolbar(event)
-
     return bindings
 
 
@@ -839,9 +789,9 @@ def _invalidate_repl_toolbar(event: Any) -> None:
     """Force prompt_toolkit to re-render the bottom toolbar after a toggle.
 
     The toolbar callback fires automatically only on buffer mutations; the
-    detail/thinking toggles mutate transport state without touching the
-    buffer, so without an explicit invalidation the stale hint string stays
-    on screen until the user types again.
+    thinking toggle mutates transport state without touching the buffer, so
+    without an explicit invalidation the stale hint string stays on screen
+    until the user types again.
     """
     try:
         event.app.invalidate()

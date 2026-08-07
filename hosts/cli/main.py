@@ -171,13 +171,6 @@ _VERSION_OPTION = typer.Option(
 # These Annotated type aliases define each runtime option exactly once so every
 # subcommand shares identical flag names, defaults, and help text.
 
-DebugOption = Annotated[
-    bool,
-    typer.Option(
-        "--debug",
-        help="Print turn context above each response.",
-    ),
-]
 LogLevelOption = Annotated[
     str,
     typer.Option(
@@ -300,7 +293,6 @@ StreamingOption = Annotated[
 
 def _initialize_runtime(
     *,
-    debug: bool,
     log_level: str = "",
     log_path: str = "",
     no_log: bool = False,
@@ -330,7 +322,6 @@ def _initialize_runtime(
 
     return build_runtime(
         host_kind="cli",
-        debug=debug,
         log_level=log_level,
         log_path=log_path,
         no_log=no_log,
@@ -371,7 +362,6 @@ def _initialize_runtime_or_exit(**kwargs: Any) -> HostRuntime | None:
 
 def _run_default_no_args_mode(
     *,
-    debug: bool,
     log_level: str,
     log: str,
     no_log: bool,
@@ -391,7 +381,6 @@ def _run_default_no_args_mode(
     The default no-args mode is the interactive REPL.
     """
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -469,7 +458,6 @@ def _exit_restart_required() -> None:
 def _cli_callback(
     ctx: typer.Context,
     version: bool = _VERSION_OPTION,
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -490,7 +478,6 @@ def _cli_callback(
     if ctx.invoked_subcommand is not None:
         return
     _run_default_no_args_mode(
-        debug=debug,
         log_level=log_level,
         log=log,
         no_log=no_log,
@@ -514,7 +501,6 @@ def _cli_callback(
 
 @app.command("cli", help="Run the interactive Lisa terminal REPL.")
 def _cli_command(
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -530,7 +516,6 @@ def _cli_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -738,7 +723,6 @@ def _verify_check_session_context(runtime: HostRuntime) -> tuple[str, str]:
 
 @app.command("verify", help="Run verification checks of the Lisa environment.")
 def _verify_command(
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -754,7 +738,6 @@ def _verify_command(
 ) -> None:
     """Run verification checks of the Lisa environment."""
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -807,7 +790,6 @@ def _verify_command(
 
 @app.command("modes", help="List supported Lisa modes.")
 def _modes_command(
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -822,7 +804,6 @@ def _modes_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -868,7 +849,6 @@ def _models_command(
         "--force",
         help="With 'discover', overwrite an existing proposal manifest.",
     ),
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -883,7 +863,6 @@ def _models_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -965,7 +944,6 @@ def _models_command(
 
 @app.command("operations", help="List internal operations with IDs for allowlist authoring.")
 def _operations_command(
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -980,7 +958,6 @@ def _operations_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1012,7 +989,6 @@ def _operations_command(
     ),
 )
 def _tools_command(
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1027,7 +1003,6 @@ def _tools_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1139,7 +1114,6 @@ def _mcp_command(
         "",
         help="Optional server id to drill into that server's tools.",
     ),
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1154,7 +1128,6 @@ def _mcp_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1198,7 +1171,6 @@ def _pack_command(
         "",
         help="Install spec or package name (required for install/uninstall).",
     ),
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1213,7 +1185,6 @@ def _pack_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1283,7 +1254,6 @@ async def _run_pack_uninstall(runtime: HostRuntime, package_name: str) -> tuple[
 @app.command("once", help="Run a single turn and print the response.")
 def _once_command(
     message: str = typer.Argument(..., help="Message to route through the host."),
-    debug: DebugOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1298,7 +1268,6 @@ def _once_command(
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
-        debug=debug,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1329,7 +1298,7 @@ async def _run_once_with_teardown(runtime: HostRuntime, message: str) -> bool:
     from host.handle_message import handle_message
     from hosts.cli.transport import RichTransport
 
-    transport = RichTransport(console=console, debug=runtime.config.debug)
+    transport = RichTransport(console=console)
     try:
         await runtime.start()
         await handle_message(runtime, message, transport)

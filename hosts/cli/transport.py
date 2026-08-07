@@ -15,17 +15,7 @@ The turn renders as a single flowing column of rows — no panes, headers, or
 boxes. Each stage event becomes one left-aligned line; tool calls are
 one-liners that update in place as they complete; the streamed answer flows
 into the transcript and *persists* (the fully formatted Markdown panel appears
-only when the turn did not stream). Telemetry (pip counters, duration
-sparklines, token suffixes) is opt-in via the detail tiers below.
-
-Detail tiers
-------------
-* ``clean`` (default) — stage lines and tool one-liners with status glyphs.
-* ``power`` (``Ctrl+O`` toggle) — the same rows plus the graphic column
-  (pip counters, duration sparklines, token-flow suffixes).
-* ``debug`` (``--debug``, construction-only) — the full operator rendering:
-  every bookkeeping stage event gets a row with all metadata, plus the
-  ``on_debug_context`` panel.
+only when the turn did not stream).
 
 Stage-line legend
 -----------------
@@ -34,8 +24,6 @@ Stage-line legend
 * ``→ op / → tool / → mcp / ↦`` — tool-kind glyphs (in-process operation, pack
   tool, MCP call, transition).
 * ``✓ / ✗ / …`` — tool-completion status glyphs.
-* Power/debug tiers add: ``●``/``○`` pip counters, block-ramp duration
-  sparklines (``▁▂▃▄▅▆▇█``), and token suffixes (``↑``/``↓``/``Σ``).
 """
 
 from __future__ import annotations
@@ -43,7 +31,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.live import Live
@@ -56,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 # ── Visual style constants (kept in sync with the Lisa palette) ──
 STYLE_BORDER_RESPONSE = "dark_sea_green4"
-STYLE_BORDER_CONTEXT = "gold3"
 STYLE_BORDER_ERROR = "indian_red"
 STYLE_STAGE = "grey58"
 STYLE_TEXT_MUTED = "grey58"
@@ -78,64 +65,13 @@ _RESERVED_BELOW_LINES = 4
 #: Guarantees a usable view on very short terminals / non-tty consoles.
 _MIN_VISIBLE_ROWS = 6
 
-#: Maximum width of the pip counter. When the cap exceeds this, the pip row is
-#: capped at this width and saturates with ``⁺``; when the cap is smaller, the
-#: row tracks the cap exactly. When the cap is 0 (unlimited), the pip row is a
-#: compact ``N`` counter (no bar), since a saturating bar against infinity is
-#: meaningless.
-_PIP_MAX_WIDTH = 16
-
 #: Minimum model-call iterations sampled before the ETA estimate appears in
 #: the status header. Below this the rolling average is too noisy to be useful.
 _ETA_MIN_ITERATIONS = 2
 
-#: Width of the duration sparkline shown on ``model_call_complete``.
-_SPARK_WIDTH = 8
-
-#: Block ramp used for both the duration bar and the sparkline. Index 0 is the
-#: empty cell; index 7 is the full block.
+#: Block ramp used for the progress bar. Index 0 is the empty cell; index 7 is
+#: the full block.
 _BLOCK_RAMP = " ▁▂▃▄▅▆▇█"
-
-#: Gradient ramp for the pip counter fill: light → medium → dark → full
-#: block, left to right across the filled portion. Index 0 is the empty cell
-#: used for the unfilled tail; the remaining cells graduate the fill.
-_PIP_GRADIENT = "░▒▓█"
-
-
-def _pip_counter(count: int, cap: int) -> str:
-    """Render ``count`` as a gradient block bar that tracks the cap.
-
-    ``cap > 0`` draws a bar of ``_PIP_MAX_WIDTH`` cells whose filled fraction is
-    ``count / cap`` (clamped to full); the cap is rendered faithfully no matter
-    how large it is, so a 300-call budget does not saturate after 16 calls. The
-    filled portion graduates left-to-right from ``░`` (light) through ``▒``/``▓``
-    to ``█`` (full block) so the bar reads as a filling gradient; the unfilled
-    tail is ``░``. The bar saturates with ``⁺`` only when ``count`` actually
-    exceeds ``cap``. ``cap <= 0`` (unlimited) renders a compact ``N{count}``
-    counter. Used only on the ``power``/``debug`` detail tiers.
-    """
-    if cap <= 0:
-        return f"N{count}"
-    width = _PIP_MAX_WIDTH
-    if count >= cap:
-        full = "█" * width
-        return full + "⁺" if count > cap else full
-    filled = round(count * width / cap)
-    if filled >= width:
-        filled = width - 1 if count < cap else width
-    if filled <= 0:
-        return "░" * width
-    # Graduate the filled cells across the gradient ramp (light → full).
-    # The last filled cell maps to the full block; earlier cells ramp through
-    # the lighter shades so the fill reads as a gradient, not a hard edge.
-    cells: list[str] = []
-    grad = _PIP_GRADIENT  # ░▒▓█
-    for i in range(filled):
-        # Map position 0..filled-1 onto 1..len(grad)-1 (skip the empty cell at
-        # index 0); the last filled cell is always the full block (█).
-        idx = len(grad) - 1 if filled == 1 else round((i + 1) * (len(grad) - 1) / (filled - 1))
-        cells.append(grad[max(1, min(idx, len(grad) - 1))])
-    return "".join(cells) + "░" * (width - filled)
 
 
 #: Glyphs for tool-dispatch completion status.
@@ -143,41 +79,6 @@ _TOOL_STATUS_GLYPH = {"ok": "✓", "error": "✗", "running": "…", "": "·"}
 
 #: Maximum length of the primary tool argument shown inline on a tool row.
 _ARG_PREVIEW_MAX = 40
-
-
-def _sparkline(values: list[float], width: int = _SPARK_WIDTH) -> str:
-    """Render a single-line unicode sparkline of ``values``.
-
-    Each value maps to one block-ramp cell, normalized against the max of
-    ``values`` (or 1.0 when all are zero). The most recent ``width`` values are
-    kept. Returns an empty string when ``values`` is empty.
-    """
-    if not values:
-        return ""
-    recent = values[-width:]
-    peak = max(recent) if recent else 0.0
-    if peak <= 0:
-        peak = 1.0
-    cells: list[str] = []
-    for v in recent:
-        ratio = max(0.0, min(1.0, float(v) / peak))
-        idx = round(ratio * (len(_BLOCK_RAMP) - 1))
-        cells.append(_BLOCK_RAMP[idx])
-    return "".join(cells)
-
-
-def _block_bar(value: float, reference: float = 0.0) -> str:
-    """Render a single block-ramp cell for ``value`` against ``reference``.
-
-    When ``reference <= 0`` the value maps onto a 0–1000ms heuristic scale so
-    the first iteration still shows a proportional cell.
-    """
-    if value <= 0:
-        return _BLOCK_RAMP[0]
-    scale = reference if reference > 0 else 1000.0
-    ratio = max(0.0, min(1.0, value / scale))
-    idx = round(ratio * (len(_BLOCK_RAMP) - 1))
-    return _BLOCK_RAMP[idx]
 
 
 def _truncate(value: str, limit: int = _ARG_PREVIEW_MAX) -> str:
@@ -221,10 +122,8 @@ class _TrailingSpinner:
 class _Row:
     """One row in the transcript.
 
-    ``kind`` selects the style; ``text`` is the status words; ``graphic`` is the
-    power/debug-tier leading column (pip counter / sparkline); ``active`` marks
-    the spinner-bearing row; ``data`` retains the raw payload so a detail-tier
-    toggle can re-render graphics on demand.
+    ``kind`` selects the style; ``text`` is the status words; ``active`` marks
+    the spinner-bearing row; ``data`` retains the raw payload.
 
     For ``kind == "thinking"`` the row carries one reasoning segment: ``text``
     is the segment body (kept collapsed/expanded per the transport flag) and
@@ -234,7 +133,6 @@ class _Row:
 
     kind: str
     text: str
-    graphic: str = ""
     active: bool = False
     data: dict[str, Any] = field(default_factory=dict)
     thinking_expanded: bool = False
@@ -256,21 +154,15 @@ class RichTransport:
     Attributes:
         console: The Rich Console to render to. Defaults to a shared
             ``Console()``; callers may pass a custom one (testing, redirection).
-        debug: When True, selects the ``debug`` detail tier (every bookkeeping
-            stage event renders, plus the ``on_debug_context`` panel).
     """
 
-    def __init__(self, *, console: Console | None = None, debug: bool = False) -> None:
+    def __init__(self, *, console: Console | None = None) -> None:
         self.console: Console = console or Console()
-        self.debug = debug
-        # Detail tier: ``clean`` (default) → ``power`` (Ctrl+O) → ``debug``
-        # (--debug, construction-only). Seed from the debug flag.
-        self._detail: Literal["clean", "power", "debug"] = "debug" if debug else "clean"
         # When True (default), each thinking row renders a compact
         # ``▸ Thinking… N char`` summary; when False, the full segment body is
         # shown. ``Ctrl+Y`` toggles ALL thinking rows together (they are
         # interspersed with tool calls, so a single global flag is the right
-        # model, not a per-segment one). Preserved across detail tiers.
+        # model, not a per-segment one).
         self.thinking_collapsed: bool = True
         # ``_status`` is a non-None sentinel while the Live region is active and
         # ``None`` when stopped — the contract used by REPL cancel handling and
@@ -570,8 +462,7 @@ class RichTransport:
         """Format a count/cap pair for the status header cap strip.
 
         ``cap > 0`` → ``<count>/<cap> <label>`` (the faithful ratio). ``cap <= 0``
-        (unset/unlimited) → ``N<count> <label>`` (the compact counter, matching
-        the existing ``_pip_counter`` convention for unlimited caps).
+        (unset/unlimited) → ``N<count> <label>`` (the compact counter).
         """
         if cap > 0:
             return f"{count}/{cap} {label}"
@@ -648,19 +539,13 @@ class RichTransport:
     def _row_line(self, row: _Row) -> Text:
         """Render one transcript row.
 
-        Tool/model/transition/fork rows render as ``<graphic>  <text>`` (graphic
-        on power/debug). Thinking rows render collapsed (a compact summary) or
-        expanded (the full dimmed segment body) per the row's expand flag.
+        Tool/model/transition/fork rows render as ``<text>``. Thinking rows
+        render collapsed (a compact summary) or expanded (the full dimmed
+        segment body) per the row's expand flag.
         """
         if row.kind == "thinking":
             return self._render_thinking_row(row)
-        line = Text()
-        graphic = row.graphic if self._detail in ("power", "debug") else ""
-        if graphic:
-            line.append(graphic, style=STYLE_GRAPHIC)
-            line.append("  ")
-        line.append(row.text, style=self._row_style(row.kind))
-        return line
+        return Text(row.text, style=self._row_style(row.kind))
 
     def _render_thinking_row(self, row: _Row) -> Text:
         """Render one thinking segment: collapsed summary or expanded body."""
@@ -689,11 +574,6 @@ class RichTransport:
         """
         return sum(1 for r in self._rows if r.kind == "thinking" and r.text)
 
-    @property
-    def detail(self) -> Literal["clean", "power", "debug"]:
-        """Current detail tier (read-only accessor for the REPL toolbar/tests)."""
-        return self._detail
-
     def toggle_thinking(self) -> None:
         """Collapse/expand ALL thinking rows together (Ctrl+Y).
 
@@ -714,29 +594,13 @@ class RichTransport:
                 row.thinking_expanded = not self.thinking_collapsed
         self._redraw_live()
 
-    def toggle_detail(self) -> None:
-        """Toggle the detail tier between ``clean`` and ``power`` (Ctrl+O).
-
-        ``power`` re-renders rows with their graphic column (pip counters,
-        sparklines, token suffixes). No-op on the construction-only ``debug``
-        tier, which already shows everything.
-
-        Between turns (Live region inactive) the toggle is state-only — no
-        transcript reprint, so no spurious row leaks into the input area. The
-        bottom toolbar reflects the new tier.
-        """
-        if self._detail == "debug":
-            return
-        self._detail = "power" if self._detail == "clean" else "clean"
-        self._redraw_live()
-
     def _redraw_live(self) -> None:
         """Re-render the Live region if active; otherwise do nothing.
 
-        Used by the detail/thinking toggles: between turns the Live region is
-        down and reprinting the last transcript row would pollute the input
-        area with a stale call line. The toggle's feedback surface is the
-        bottom toolbar, not the transcript.
+        Used by the thinking toggle: between turns the Live region is down and
+        reprinting the last transcript row would pollute the input area with a
+        stale call line. The toggle's feedback surface is the bottom toolbar,
+        not the transcript.
         """
         if self._live is not None:
             try:
@@ -867,12 +731,10 @@ class RichTransport:
             # raise it; keep the max seen so the cap never appears to shrink.
             if max_calls > self._max_tool_calls:
                 self._max_tool_calls = max(self._max_tool_calls, max_calls)
-            graphic = _pip_counter(self._tool_call_count, max_calls)
             self._append_row(
                 _Row(
                     kind="tool",
                     text=self._render_tool_dispatch(data),
-                    graphic=graphic,
                     data=data,
                 )
             )
@@ -881,15 +743,10 @@ class RichTransport:
             self._complete_tool_row(data)
             return
 
-        # ── Catch-all (debug tier only) ──────────────────────────────
-        if self._detail == "debug":
-            self._append_row(
-                _Row(kind="stage", text=self._render_status_line(label, data), data=data)
-            )
-        else:
-            # Bookkeeping events update counters but render no row on clean/power.
-            self._mark_last_active()
-            self._refresh_live()
+        # ── Catch-all (bookkeeping) ─────────────────────────────────
+        # Bookkeeping events update counters but render no row.
+        self._mark_last_active()
+        self._refresh_live()
 
     def _append_row(self, row: _Row) -> None:
         """Append ``row`` to the transcript, mark it active, and refresh."""
@@ -906,19 +763,17 @@ class RichTransport:
             self._rows[-1].active = True
 
     def _append_transition(self, from_mode: str, to_mode: str, data: dict[str, Any]) -> None:
-        """Append a mode-transition row (power/debug carry a handoff pip)."""
+        """Append a mode-transition row."""
         arrow = "→" if from_mode else "⇥"
         text = f"[{to_mode}] handoff: {from_mode or 'start'} {arrow} {to_mode}"
         max_handoffs = int(data.get("max_handoffs") or 0)
         # Track the cap for the always-on status header and aggregate progress.
         if max_handoffs > self._max_handoffs:
             self._max_handoffs = max(self._max_handoffs, max_handoffs)
-        graphic = _pip_counter(self._handoff_count, max_handoffs)
         self._append_row(
             _Row(
                 kind="transition",
                 text=text,
-                graphic=graphic,
                 data={**data, "from_mode": from_mode, "to_mode": to_mode},
             )
         )
@@ -956,13 +811,11 @@ class RichTransport:
 
         if label == "model_call":
             self._model_call_count += 1
-            graphic = _pip_counter(iter_count, max_iter)
             self._open_model_row = len(self._rows)
             self._append_row(
                 _Row(
                     kind="model",
                     text=self._render_model_call(data),
-                    graphic=graphic,
                     data=data,
                 )
             )
@@ -970,14 +823,7 @@ class RichTransport:
 
         # model_call_complete or model_call_failed — update the open row in place.
         status_glyph = "✗" if label == "model_call_failed" else "✓"
-        graphic = _pip_counter(iter_count, max_iter)
         if label == "model_call_complete":
-            spark = _sparkline(self._iteration_durations)
-            dur_raw = data.get("duration_ms")
-            if dur_raw not in (None, "", 0):
-                graphic = (
-                    f"{graphic}  {spark or _block_bar(float(dur_raw))} {round(float(dur_raw), 3)}ms"
-                )
             # Accumulate the model call's token usage into the live header so
             # the running total updates instantly and guards runaway sessions.
             total_raw = data.get("_state.total_tokens") or data.get("total_tokens")
@@ -989,14 +835,12 @@ class RichTransport:
         if idx is not None and idx < len(self._rows):
             row = self._rows[idx]
             row.text = self._render_model_call(row.data, status_glyph=status_glyph, complete=data)
-            row.graphic = graphic
             row.data = {**row.data, **data}
         else:
             self._append_row(
                 _Row(
                     kind="model",
                     text=self._render_model_call(data, status_glyph=status_glyph, complete=data),
-                    graphic=graphic,
                     data=data,
                 )
             )
@@ -1015,8 +859,6 @@ class RichTransport:
 
         ``[mode] stage: model_call haiku #1 ✓ 340ms``. On completion
         (``status_glyph`` set) the status and duration are appended.
-        Metadata suffixes (provider, tokens) render only on the power/debug
-        tiers.
         """
         prefix = f"[{self._current_mode}] " if self._current_mode else ""
         body = "stage: model_call"
@@ -1039,11 +881,7 @@ class RichTransport:
             total_tokens = data.get("_state.total_tokens") or data.get("total_tokens")
         if status_glyph and total_tokens not in (None, "", 0):
             body += f" {total_tokens} tok"
-        metadata = {**data, **completion_data}
-        if metadata.get("_state.total_tokens") and not metadata.get("total_tokens"):
-            metadata["total_tokens"] = metadata["_state.total_tokens"]
-        suffix = self._render_stage_suffix(metadata) if self._detail in ("power", "debug") else ""
-        return f"{prefix}{body}{suffix}"
+        return f"{prefix}{body}"
 
     def _complete_tool_row(self, data: dict[str, Any]) -> None:
         """Update the in-flight tool row in place with its status + duration."""
@@ -1070,42 +908,12 @@ class RichTransport:
     def _render_status_line(self, label: str, data: dict[str, Any] | None = None) -> str:
         """Render one status line, prefixed with the active mode.
 
-        ``[mode] stage: <label> (…meta…)``. The mode prefix updates live on
-        mid-turn handoff. Meta suffixes render only on the power/debug tiers.
+        ``[mode] stage: <label>``. The mode prefix updates live on mid-turn
+        handoff.
         """
         data = data or {}
         prefix = f"[{self._current_mode}] " if self._current_mode else ""
-        suffix = self._render_stage_suffix(data) if self._detail in ("power", "debug") else ""
-        return f"{prefix}stage: {label}{suffix}"
-
-    def _render_stage_suffix(self, data: dict[str, Any]) -> str:
-        """Compact one-line rendering of textual stage metadata (power/debug tiers).
-
-        Uses visual glyphs instead of ``key=value``: provider/stage_id/turn_count
-        as bare values, model_id bare, ``⟁`` for reasoning models, and token
-        flow arrows (``↑``/``↓``/``Σ``).
-        """
-        parts: list[str] = []
-        for key in ("provider", "stage_id", "turn_count"):
-            value = data.get(key)
-            if value in (None, "", 0):
-                continue
-            parts.append(str(value))
-        model_id = data.get("model_id")
-        if model_id not in (None, "", 0):
-            parts.append(str(model_id))
-        if data.get("reasoning_model"):
-            parts.append("⟁")
-        prompt = data.get("prompt_tokens")
-        if prompt:
-            parts.append(f"↑{prompt}")
-        completion = data.get("completion_tokens")
-        if completion:
-            parts.append(f"↓{completion}")
-        total = data.get("total_tokens")
-        if total:
-            parts.append(f"Σ{total}")
-        return f" ({' '.join(parts)})" if parts else ""
+        return f"{prefix}stage: {label}"
 
     # ── tool_dispatch legible rendering ──────────────────────────────
     _TOOL_KIND_GLYPH: ClassVar[dict[str, str]] = {
@@ -1202,7 +1010,6 @@ class RichTransport:
         from rich.table import Table
 
         tools = [r for r in self._rows if r.kind == "tool"]
-        models = [r for r in self._rows if r.kind == "model"]
         transitions = [r for r in self._rows if r.kind == "transition"]
         forks = [r for r in self._rows if r.kind == "fork"]
 
@@ -1249,34 +1056,6 @@ class RichTransport:
         if forks:
             summary.add_row("Fork", Text(forks[-1].text.splitlines()[0]))
         self.console.print(Panel(summary, title="Workflow", border_style=STYLE_BORDER_RESPONSE))
-
-        if self._detail == "debug":
-            self._render_call_summary_debug(tools, models, transitions)
-
-    def _render_call_summary_debug(
-        self, tools: list[_Row], models: list[_Row], transitions: list[_Row]
-    ) -> None:
-        """Debug-tier call summary: a per-row breakdown in a bordered panel."""
-        from rich.table import Table
-
-        table = Table(title="Turn Trajectory", border_style=STYLE_BORDER_CONTEXT, show_lines=False)
-        table.add_column("#", style=STYLE_TEXT_MUTED)
-        table.add_column("Kind")
-        table.add_column("Detail")
-        table.add_column("Meta", style=STYLE_TEXT_MUTED)
-        idx = 0
-        for r in tools:
-            idx += 1
-            meta = r.graphic if self._detail in ("power", "debug") else ""
-            table.add_row(str(idx), "tool", r.text, meta)
-        for r in models:
-            idx += 1
-            meta = r.graphic if self._detail in ("power", "debug") else ""
-            table.add_row(str(idx), "model", r.text, meta)
-        for r in transitions:
-            idx += 1
-            table.add_row(str(idx), "handoff", r.text, "")
-        self.console.print(table)
 
     async def on_text_chunk(self, text: str, reasoning: str = "") -> None:
         """Route a streamed model delta.
@@ -1334,19 +1113,12 @@ class RichTransport:
         self._render_workflow_summary()
 
     async def on_debug_context(self, context: dict[str, Any]) -> None:
-        """Render turn context in a Rich Panel (only on the debug tier)."""
-        if not self.debug:
-            return
+        """No-op: the debug context panel was removed with the detail tiers.
 
-        from rich.pretty import Pretty
-
-        self.console.print(
-            Panel(
-                Pretty(context, expand_all=True),
-                title="Turn Context",
-                border_style=STYLE_BORDER_CONTEXT,
-            )
-        )
+        Kept to satisfy the ``TransportCallbacks`` protocol; the runtime only
+        invokes it when debug mode is active, which the CLI no longer exposes.
+        """
+        return
 
     async def on_error(self, message: str, exc: Exception | None = None) -> None:
         """Render an error in a red Rich Panel.

@@ -20,7 +20,7 @@ async def test_on_stage_renders_detailed_suffix() -> None:
     the power/debug tiers.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
 
     await transport.on_stage(
@@ -54,7 +54,7 @@ async def test_on_stage_fork_renders_one_line_per_child() -> None:
     keeps the per-child table visible.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
 
     await transport.on_stage("fork_start", {"children": 2})
@@ -94,7 +94,7 @@ async def test_on_stage_fork_renders_one_line_per_child() -> None:
 async def test_start_thinking_resets_fork_state() -> None:
     """start_thinking clears any stale fork tracking from a prior turn."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport._fork_total = 5
     transport._fork_children = {0: {"status": "running"}}
 
@@ -108,7 +108,7 @@ async def test_start_thinking_resets_fork_state() -> None:
 async def test_render_fork_stage_format() -> None:
     """The fork stage text is one header line plus one line per child."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport._fork_total = 2
     transport._fork_children = {
         0: {
@@ -139,7 +139,7 @@ async def test_render_fork_stage_format() -> None:
 async def test_on_stage_no_spinner_prints_inline() -> None:
     """When no Live region is active, on_stage prints the row inline without raising."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     assert transport._status is None
     await transport.on_stage("model_call", {"mode_id": "default", "iteration": 1})
 
@@ -148,7 +148,7 @@ async def test_on_stage_no_spinner_prints_inline() -> None:
 async def test_mode_prefix_tracked_from_model_call() -> None:
     """model_call seeds _current_mode and the [mode] prefix appears on rows."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
     assert transport._current_mode == ""
 
@@ -167,7 +167,7 @@ async def test_mode_prefix_tracked_from_model_call() -> None:
 async def test_mode_prefix_updates_on_mid_turn_handoff() -> None:
     """A mid-turn handoff updates _current_mode so the [mode] prefix reflects the new owner."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
 
     await transport.on_stage("model_call", {"mode_id": "default", "iteration": 1})
@@ -193,7 +193,7 @@ async def test_mode_prefix_updates_on_mid_turn_handoff() -> None:
 async def test_tool_dispatch_renders_legible_kind_glyphs() -> None:
     """tool_dispatch renders a glyph + tool name per tool_kind."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport._current_mode = ""
 
     line = transport._render_tool_dispatch({"tool": "write_file", "tool_kind": "operation"})
@@ -229,7 +229,7 @@ async def test_tool_row_updates_in_place_on_completion() -> None:
     status glyph and duration instead of appending a second row.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
 
     await transport.on_stage(
@@ -258,7 +258,7 @@ async def test_model_call_updates_in_place_on_completion() -> None:
     same in-place pattern as tool_dispatch_complete.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
 
     await transport.on_stage(
@@ -285,7 +285,7 @@ async def test_model_call_updates_in_place_on_completion() -> None:
 async def test_model_call_failed_marks_row_with_x() -> None:
     """model_call_failed updates the open model row in place with ✗."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
 
     await transport.on_stage(
@@ -305,7 +305,7 @@ async def test_model_call_failed_marks_row_with_x() -> None:
 async def test_fork_complete_keeps_per_child_table() -> None:
     """fork_complete keeps the per-child table with ok/failed totals in the header."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
 
     await transport.on_stage("fork_start", {"children": 2})
@@ -338,7 +338,7 @@ async def test_transcript_accumulates_play_by_play() -> None:
     turn trajectory, with the last row active.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
 
     await transport.on_stage(
@@ -368,7 +368,7 @@ async def test_start_thinking_clears_transcript() -> None:
     with the initial dispatch row.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
     await transport.on_stage("model_call", {"mode_id": "default", "iteration": 1})
     assert len(transport._rows) > 1
@@ -383,51 +383,13 @@ async def test_start_thinking_clears_transcript() -> None:
 async def test_stop_thinking_clears_status_sentinel() -> None:
     """stop_thinking leaves _status and _live as None."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
     assert transport._status is not None
 
     transport.stop_thinking()
     assert transport._status is None
     assert transport._live is None
-
-
-# ── detail-tier tests ────────────────────────────────────────────────
-
-
-def test_detail_tier_defaults_clean() -> None:
-    """Default detail tier is clean; --debug selects debug at construction."""
-    console = Console(quiet=True, force_terminal=False)
-    assert RichTransport(console=console, debug=False)._detail == "clean"
-    assert RichTransport(console=console, debug=True)._detail == "debug"
-
-
-def test_toggle_detail_switches_clean_and_power() -> None:
-    """toggle_detail flips clean ↔ power; it is a no-op on the debug tier."""
-    console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
-    assert transport._detail == "clean"
-    transport.toggle_detail()
-    assert transport._detail == "power"
-    transport.toggle_detail()
-    assert transport._detail == "clean"
-
-    debug_transport = RichTransport(console=console, debug=True)
-    debug_transport.toggle_detail()
-    assert debug_transport._detail == "debug"
-
-
-def test_row_line_hides_graphic_on_clean_shows_on_power() -> None:
-    """The graphic column renders only on power/debug tiers."""
-    console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
-    r = _Row(kind="model", text="stage: model_call", graphic="●●○")
-    clean_line = transport._row_line(r)
-    assert "●" not in clean_line.plain
-
-    transport._detail = "power"
-    power_line = transport._row_line(r)
-    assert "●●○" in power_line.plain
 
 
 # ── thinking segments + answer staging (on_text_chunk) ──────────────
@@ -437,7 +399,7 @@ def _make_stream_transport() -> RichTransport:
     """Build a RichTransport writing to a quiet StringIO console."""
     sink = io.StringIO()
     console = Console(file=sink, force_terminal=False, width=100)
-    return RichTransport(console=console, debug=False)
+    return RichTransport(console=console)
 
 
 @pytest.mark.asyncio
@@ -530,106 +492,7 @@ async def test_on_response_always_renders_clean_panel() -> None:
     assert "Response" in transport.console.file.getvalue()
 
 
-# ── pip counter scaling (detail tier) ─────────────────────────────────
-
-
-def test_pip_counter_scales_to_cap_not_width() -> None:
-    """The pip bar tracks the cap proportionally, not 1:1 to its width.
-
-    Regression: with a large cap (e.g. ``max_tool_iterations=300``) the bar
-    used to saturate at ``count == _PIP_MAX_WIDTH`` (16), filling up "way too
-    fast and showing overfull". The filled fraction must be ``count / cap``.
-    """
-    from hosts.cli.transport import _PIP_MAX_WIDTH, _pip_counter
-
-    # A 300-call budget at 16 calls (~5%) should show ~1 filled cell, not saturate.
-    bar = _pip_counter(16, 300)
-    assert "⁺" not in bar
-    # A filled cell is any shade denser than the empty ``░`` tail.
-    filled_cells = sum(1 for c in bar if c != "░")
-    assert filled_cells <= 1  # 16/300 * 16 ≈ 0.85 → 1 cell
-    assert bar.count("░") >= _PIP_MAX_WIDTH - 1
-
-    # Halfway through a 100-call budget: ~half the bar filled, no saturation.
-    half = _pip_counter(50, 100)
-    assert "⁺" not in half
-    assert sum(1 for c in half if c != "░") == _PIP_MAX_WIDTH // 2
-
-    # Exactly at the cap: full block bar, no plus (count == cap).
-    at_cap = _pip_counter(100, 100)
-    assert at_cap == "█" * _PIP_MAX_WIDTH
-
-    # Over the cap: full bar plus the saturation glyph.
-    over = _pip_counter(101, 100)
-    assert over == "█" * _PIP_MAX_WIDTH + "⁺"
-
-
-def test_pip_counter_gradient_ramps_light_to_full() -> None:
-    """The filled portion graduates left-to-right from ``░`` through ``▒``/``▓``
-    to ``█`` so the bar reads as a filling gradient, not a hard edge."""
-    from hosts.cli.transport import _PIP_GRADIENT, _PIP_MAX_WIDTH, _pip_counter
-
-    # A full-width fill on a cap of width: the first cell ramps from the
-    # lightest fill shade and the last cell is the full block.
-    bar = _pip_counter(_PIP_MAX_WIDTH, _PIP_MAX_WIDTH)
-    assert bar == "█" * _PIP_MAX_WIDTH
-
-    # Half fill: the filled half graduates, the unfilled tail is all ``░``.
-    half = _pip_counter(8, 16)
-    assert half.endswith("░" * 8)  # unfilled tail
-    filled = half[:8]
-    # The last filled cell is the full block; earlier cells use lighter shades.
-    assert filled[-1] == "█"
-    # The gradient shades (▒/▓) appear somewhere in the fill (not all █).
-    assert any(c in "▒▓" for c in filled[:-1])
-    # No empty ``●``/``○`` glyphs remain — we use block shades now.
-    assert "●" not in half and "○" not in half
-
-    # A single filled cell: always the full block (no lighter shade at low
-    # counts, so a single-cell fill is still clearly "on").
-    one = _pip_counter(1, 16)
-    assert one == "█" + "░" * (_PIP_MAX_WIDTH - 1)
-
-    # Zero count: the whole bar is the empty shade.
-    zero = _pip_counter(0, 16)
-    assert zero == "░" * _PIP_MAX_WIDTH
-    # The gradient ramp is the canonical light → full sequence.
-    assert _PIP_GRADIENT == "░▒▓█"
-
-
-def test_pip_counter_unlimited_uses_compact_counter() -> None:
-    """``cap <= 0`` (unlimited) renders a compact N{count} counter — a
-    saturating bar against infinity is meaningless."""
-    from hosts.cli.transport import _pip_counter
-
-    assert _pip_counter(0, 0) == "N0"
-    assert _pip_counter(42, 0) == "N42"
-
-
 # ── toggle no-leak between turns (Issue 3) ────────────────────────────
-
-
-def test_toggle_detail_between_turns_does_not_print_into_input_area() -> None:
-    """Toggling detail with the Live region down must NOT print a stale
-    transcript row into the input area — only the toolbar should change.
-    """
-    sink = io.StringIO()
-    console = Console(file=sink, force_terminal=False, width=100)
-    transport = RichTransport(console=console, debug=False)
-    # Seed a prior turn's transcript, then tear down the Live region (the
-    # state the REPL is in between turns: rows persist, _live is None).
-    transport.start_thinking("model_call")
-    transport._rows.append(_Row(kind="tool", text="→ search ✓ 10ms"))
-    transport.stop_thinking()
-
-    out_before = sink.getvalue()
-    transport.toggle_detail()  # clean → power
-    transport.toggle_detail()  # power → clean
-    out_after = sink.getvalue()
-
-    # Nothing was printed by the toggles — the toolbar is the feedback surface.
-    assert out_after == out_before
-    assert transport.detail == "clean"
 
 
 def test_toggle_thinking_between_turns_does_not_print_into_input_area() -> None:
@@ -637,7 +500,7 @@ def test_toggle_thinking_between_turns_does_not_print_into_input_area() -> None:
     transcript; only the toolbar reflects the new state."""
     sink = io.StringIO()
     console = Console(file=sink, force_terminal=False, width=100)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call")
     transport._rows.append(_Row(kind="thinking", text="a reasoning segment"))
     transport.stop_thinking()
@@ -698,23 +561,6 @@ async def test_on_response_renders_workflow_summary() -> None:
     assert "1 succeeded, 0 failed" in out_after
     assert "ok search 200ms" in out_after
     assert "internal activity" not in out_after
-
-
-@pytest.mark.asyncio
-async def test_on_response_debug_tier_renders_trajectory_table() -> None:
-    """On the debug tier the call summary is a per-row trajectory table."""
-    sink = io.StringIO()
-    console = Console(file=sink, force_terminal=False, width=100)
-    transport = RichTransport(console=console, debug=True)
-    transport.start_thinking("model_call")
-    await transport.on_stage("tool_dispatch", {"tool": "search", "tool_kind": "mcp_tool"})
-    await transport.on_stage(
-        "tool_dispatch_complete", {"tool": "search", "ok": True, "duration_ms": 200}
-    )
-
-    await transport.on_response("answer")
-
-    assert "Turn Trajectory" in sink.getvalue()
 
 
 @pytest.mark.asyncio
@@ -794,7 +640,7 @@ async def test_toggle_thinking_expands_and_collapses_all_segments() -> None:
 def test_live_height_floor_and_reserve() -> None:
     """Live height is terminal height minus the reserve, floored at the minimum."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.console.size = (80, 24)
     assert transport._live_height() == 24 - 4
     transport.console.size = (80, 5)
@@ -812,7 +658,7 @@ def test_status_header_renders_mode_model_caps() -> None:
     compact ``N<count>`` form is used for each dimension.
     """
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch", session_tokens=500)
     transport._current_mode = "coding"
     transport._status_current_model = "haiku"
@@ -835,7 +681,7 @@ def test_status_header_renders_mode_model_caps() -> None:
 def test_status_header_renders_caps_with_limits() -> None:
     """The cap strip shows count/cap ratios when caps are set (ask 3)."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch", session_tokens=19500)
     transport._current_mode = "coding"
     transport._status_current_model = "haiku"
@@ -854,7 +700,7 @@ def test_status_header_renders_caps_with_limits() -> None:
 def test_status_header_session_seeded_from_baseline() -> None:
     """start_thinking(session_tokens=...) seeds the cumulative session total."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch", session_tokens=1234)
     assert transport._status_session_tokens == 1234
     assert transport._status_turn_tokens == 0
@@ -865,7 +711,7 @@ def test_status_header_session_seeded_from_baseline() -> None:
 async def test_model_call_updates_live_status_header() -> None:
     """model_call sets the active model; model_call_complete adds token totals."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("model_call", session_tokens=100)
 
     await transport.on_stage(
@@ -894,7 +740,7 @@ async def test_model_call_updates_live_status_header() -> None:
 def test_aggregate_progress_blends_caps() -> None:
     """_aggregate_progress returns the max of consumed-cap ratios (ask 2)."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
     # No caps set -> None (bar suppressed).
     assert transport._aggregate_progress() is None
@@ -915,7 +761,7 @@ def test_aggregate_progress_blends_caps() -> None:
 def test_progress_bar_gradient_fill() -> None:
     """_progress_bar fills left-to-right using the block ramp (ask 2)."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
     assert transport._progress_bar(0.0) == "        "  # 8 empty cells
     assert transport._progress_bar(1.0) == "████████"  # 8 full cells
@@ -927,7 +773,7 @@ def test_progress_bar_gradient_fill() -> None:
 def test_prompt_banner_pinned_when_message_supplied() -> None:
     """The prompt banner renders the submitted message (ask 1)."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch", message="restart the webapp")
     banner = transport._render_prompt_banner()
     assert "restart the webapp" in banner.plain
@@ -937,7 +783,7 @@ def test_prompt_banner_pinned_when_message_supplied() -> None:
 def test_prompt_banner_empty_when_no_message() -> None:
     """No banner when start_thinking is called without a message (ask 1)."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch")
     banner = transport._render_prompt_banner()
     assert banner.plain == ""
@@ -946,7 +792,7 @@ def test_prompt_banner_empty_when_no_message() -> None:
 def test_live_display_includes_prompt_banner_and_header() -> None:
     """The Live display leads with the prompt banner then the status header (ask 1)."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch", session_tokens=10, message="hello")
     group = transport._render_live_display()
     # Group.renderables[0] is the banner, [1] is the status header.
@@ -959,7 +805,7 @@ def test_live_display_includes_prompt_banner_and_header() -> None:
 async def test_live_display_includes_status_header() -> None:
     """The Live display leads with the status header renderable."""
     console = Console(quiet=True, force_terminal=False)
-    transport = RichTransport(console=console, debug=False)
+    transport = RichTransport(console=console)
     transport.start_thinking("dispatch", session_tokens=10)
     transport._current_mode = "default"
 

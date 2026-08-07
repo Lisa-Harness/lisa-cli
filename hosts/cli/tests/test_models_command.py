@@ -75,7 +75,6 @@ def _invoke_models(
                 cli_main._models_command(
                     action=action,
                     force=force,
-                    debug=False,
                     log_level="",
                     log="",
                     no_log=False,
@@ -93,7 +92,6 @@ def _invoke_models(
             cli_main._models_command(
                 action=action,
                 force=force,
-                debug=False,
                 log_level="",
                 log="",
                 no_log=False,
@@ -184,7 +182,6 @@ def _invoke_rejected_models(
         cli_main._models_command(
             action=action,
             force=False,
-            debug=False,
             log_level="",
             log="",
             no_log=False,
@@ -249,7 +246,6 @@ def test_models_show_renders_table_when_manifest_present(
         cli_main._models_command(
             action="show",
             force=False,
-            debug=False,
             log_level="",
             log="",
             no_log=False,
