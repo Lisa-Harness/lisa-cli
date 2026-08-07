@@ -643,7 +643,7 @@ def _build_repl_prompt_session(
         history=_SurrogateSafeFileHistory(str(history_path)),
         auto_suggest=AutoSuggestFromHistory() if AutoSuggestFromHistory is not None else None,
         completer=WordCompleter(list(_repl_command_hints()), ignore_case=True),
-        complete_while_typing=True,
+        complete_while_typing=False,
         multiline=True,
         key_bindings=bindings,
         prompt_continuation=[("class:prompt-continuation", "… ")],
