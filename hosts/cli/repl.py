@@ -84,15 +84,19 @@ _HOST_REPL_SHORTCUTS: tuple[str, ...] = (
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-    from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.completion import Completer, Completion, WordCompleter
     from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
+    from prompt_toolkit.document import Document
     from prompt_toolkit.history import FileHistory, History
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.styles import Style
 except ImportError:  # pragma: no cover - optional dependency
     PromptSession = None
     AutoSuggestFromHistory = None
+    Completer = None
+    Completion = None
     WordCompleter = None
+    Document = None
     FileHistory = None
     History = None
     KeyBindings = None
@@ -623,6 +627,25 @@ def _render_session_exit_summary(runtime: HostRuntime, console: Console) -> None
     )
 
 
+class _SlashCommandCompleter(Completer):
+    """Tab-complete slash commands, but only when the input starts with ``/``.
+
+    When the buffer does not start with ``/``, Tab is a no-op (no dropdown,
+    no suggestions). This keeps Tab useful for slash-command discovery
+    without polluting free-form chat input.
+    """
+
+    def __init__(self, words: list[str]) -> None:
+        self._inner = WordCompleter(words, ignore_case=True)
+
+    def get_completions(
+        self, document: Document, complete_event: Any
+    ) -> Any:
+        if not document.text_before_cursor.lstrip().startswith("/"):
+            return
+        yield from self._inner.get_completions(document, complete_event)
+
+
 def _build_repl_prompt_session(
     runtime: HostRuntime, console: Console, transport: RichTransport
 ) -> Any:
@@ -634,7 +657,7 @@ def _build_repl_prompt_session(
     name, live char/line count, and control hints while the prompt is
     active.
     """
-    if PromptSession is None or FileHistory is None or WordCompleter is None:
+    if PromptSession is None or FileHistory is None or Completer is None or Document is None:
         return None
     history_path = runtime.data_dir / _REPL_HISTORY_FILE_NAME
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -642,7 +665,7 @@ def _build_repl_prompt_session(
     return PromptSession(
         history=_SurrogateSafeFileHistory(str(history_path)),
         auto_suggest=AutoSuggestFromHistory() if AutoSuggestFromHistory is not None else None,
-        completer=WordCompleter(list(_repl_command_hints()), ignore_case=True),
+        completer=_SlashCommandCompleter(list(_repl_command_hints())),
         complete_while_typing=False,
         multiline=True,
         key_bindings=bindings,
