@@ -14,6 +14,18 @@ dev = [
     "ruff>=0.8.0",
     "types-PyYAML>=6.0",
 ]
+coding = [
+    "lisa-pack-coding",
+    "lisa-pack-github",
+]
+search = [
+    "lisa-pack-brave-search",
+    "lisa-pack-search",
+]
+text = [
+    "lisa-pack-markdown",
+    "lisa-pack-okf",
+]
 
 [tool.uv]
 package = false
@@ -23,11 +35,6 @@ members = ["hosts/cli"]
 
 [tool.uv.sources]
 lisa-host-cli = { workspace = true }
-# Framework packages resolve from the sibling ../../lisa checkout as editable
-# path deps. This enables `uv run lisa` with a local framework checkout
-# alongside this repo. Once the framework packages are published to PyPI,
-# these overrides can be removed so the CLI works as a standalone clone
-# with no sibling checkout required.
 lisa-host-runtime = { path = "../../lisa/host", editable = true }
 lisa-kernel = { path = "../../lisa/kernel", editable = true }
 lisa-sdk = { path = "../../lisa/sdk", editable = true }
@@ -37,6 +44,12 @@ lisa-pack-core = { path = "../../lisa/sdk/packs/core", editable = true }
 lisa-pack-introspect = { path = "../../lisa/sdk/packs/introspect", editable = true }
 lisa-pack-checkpoint = { path = "../../lisa/sdk/packs/checkpoint", editable = true }
 lisa-pack-recovery = { path = "../../lisa/sdk/packs/recovery", editable = true }
+lisa-pack-okf = { path = "../../lisa-packs/okf" }
+lisa-pack-brave-search = { path = "../../lisa-packs/brave_search" }
+lisa-pack-search = { path = "../../lisa-packs/search" }
+lisa-pack-markdown = { path = "../../lisa-packs/markdown" }
+lisa-pack-coding = { path = "../../lisa-packs-wip/coding" }
+lisa-pack-github = { path = "../../lisa-packs-wip/github" }
 
 [tool.ruff]
 line-length = 100
