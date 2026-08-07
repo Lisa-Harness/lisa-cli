@@ -25,6 +25,7 @@ venv/
 Thumbs.db
 
 # Environment
+artifacts
 .env
 !.env.example
 
