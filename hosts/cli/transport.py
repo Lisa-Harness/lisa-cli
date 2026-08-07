@@ -529,7 +529,9 @@ class RichTransport:
         progress = self._aggregate_progress()
         if progress is not None:
             pct = round(progress * 100)
-            parts.append(Text(f"{self._progress_bar(progress)} {pct}%", style="bold steel_blue3"))
+            parts.append(
+                Text(f"{self._progress_bar(progress)} {pct}%", style="bold steel_blue3")
+            )
         # Cap strip (ask 3): always-on counts/caps, all tiers.
         cap_parts: list[str] = []
         cap_parts.append(self._format_cap(self._tool_call_count, self._max_tool_calls, "tools"))
@@ -607,20 +609,16 @@ class RichTransport:
     def _context_gauge(self) -> Text | None:
         """Render the context-lane pressure gauge (ask 3).
 
-        ``ctx <bar> <pct>%`` where the fill is ``turn_tokens /
-        context_budget`` — the current turn's context consumption against the
-        per-turn context-lane budget. Using the cumulative session total here
-        would saturate the gauge to 100% red after the first turn, since the
-        session total accumulates across turns while the budget is a per-turn
-        window. The bar colors at the compaction thresholds: muted below
-        ``pressure_threshold``, ``gold3`` at the soft threshold, and
+        ``ctx <bar> <pct>%`` where the fill is ``session_total_tokens /
+        context_budget``. The bar colors at the compaction thresholds: muted
+        below ``pressure_threshold``, ``gold3`` at the soft threshold, and
         ``indian_red`` at the hard threshold. Returns ``None`` when the budget
         is unset or the fill ratio is zero (gauge suppressed until there's
         something to show).
         """
         if self._context_budget <= 0:
             return None
-        ratio = self._status_turn_tokens / self._context_budget
+        ratio = self._status_session_tokens / self._context_budget
         ratio = max(0.0, min(1.0, ratio))
         if ratio <= 0:
             return None
