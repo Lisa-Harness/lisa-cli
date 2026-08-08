@@ -208,8 +208,7 @@ async def run_repl(
     _print_startup_banner(console)
     console.print(
         Panel(
-            "Type /help, /help capabilities, /debug context, /mcp, "
-            "/pack list, /models discover, /search <query>, or /quit.",
+            _render_session_panel_text(runtime),
             title="Session",
             border_style=STYLE_BORDER_SESSION,
         )
@@ -432,6 +431,19 @@ async def _process_repl_turn(
     if result.text and not isinstance(transport, RichTransport):
         await transport.on_response(result.text)
 
+    # ── Operator exit indicator ────────────────────────────────────────
+    # Surface the pause/stop/terminate discriminator so the user knows the
+    # turn ended via an operator signal (or a cap that degraded to one).
+    # The kernel handles checkpoint stamping and WorkflowPosition marking;
+    # this is a visual indicator only.
+    _op_exit = getattr(result, "operator_exit", "")
+    if _op_exit == "paused":
+        console.print(f"[{STYLE_TEXT_MUTED}]⏸ turn paused — send input to resume[/]")
+    elif _op_exit == "stopped":
+        console.print(f"[{STYLE_TEXT_MUTED}]⏹ turn stopped — state preserved[/]")
+    elif _op_exit == "terminated":
+        console.print(f"[{STYLE_TEXT_MUTED}]⏹ workflow terminated[/]")
+
     # Compact turn-summary footer: mode · model · tokens · elapsed, plus a
     # handoff note when the model switched modes mid-turn. Sourced from
     # ``runtime.last_turn_context`` (populated by handle_message) and the
@@ -491,6 +503,26 @@ def _print_startup_banner(console: Console) -> None:
     title.append("interactive terminal host", style=STYLE_TEXT_MUTED)
     console.print(title)
     console.print()
+
+
+def _render_session_panel_text(runtime: HostRuntime) -> str:
+    """Build the informative Session panel shown at REPL startup.
+
+    Surfaces the resolved user context, start mode, default model alias,
+    and a pointer to the pack-aware /help overview, instead of a static
+    hint string. Keeps the CLI host free of host-layer command vocabulary
+    — it only reads runtime accessors.
+    """
+    from host.commands import model_alias_for_mode
+
+    start_mode = runtime.start_mode_id or "default"
+    model_alias = model_alias_for_mode(start_mode, manifest=runtime.manifest) or "default"
+    user = runtime.config.user_slug or "(unset)"
+    return (
+        f"User: {user}  |  Start mode: {start_mode}  |  Model: {model_alias}\n"
+        "Type /help for the command overview, /help <command> for per-command "
+        "guidance, /help capabilities for the live inventory, or /quit to exit."
+    )
 
 
 def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Error") -> None:
@@ -610,6 +642,13 @@ class _SlashCommandCompleter(Completer):
         yield from self._inner.get_completions(document, complete_event)
 
 
+# Minimum visible height (in terminal rows) of the multi-line input area.
+# The REPL is a chat box: reserving at least this many rows keeps the prompt
+# from collapsing to a single line when empty, so multi-line paste and the
+# newline continuation glyph (…) have room to breathe.
+_REPL_MIN_INPUT_HEIGHT = 3
+
+
 def _build_repl_prompt_session(
     runtime: HostRuntime, console: Console, transport: RichTransport
 ) -> Any:
@@ -620,13 +659,16 @@ def _build_repl_prompt_session(
     a newline (chat-box semantics). A bottom toolbar shows the session
     name, live char/line count, and control hints while the prompt is
     active.
+
+    The input area reserves at least ``_REPL_MIN_INPUT_HEIGHT`` rows so the
+    prompt never collapses to a single line (ask: chat-box minimum height).
     """
     if PromptSession is None or FileHistory is None or Completer is None or Document is None:
         return None
     history_path = runtime.data_dir / _REPL_HISTORY_FILE_NAME
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    bindings = _build_repl_key_bindings(transport) if KeyBindings is not None else None
-    return PromptSession(
+    bindings = _build_repl_key_bindings(transport, runtime) if KeyBindings is not None else None
+    return _ReplPromptSession(
         history=_SurrogateSafeFileHistory(str(history_path)),
         auto_suggest=AutoSuggestFromHistory() if AutoSuggestFromHistory is not None else None,
         completer=_SlashCommandCompleter(list(_repl_command_hints())),
@@ -641,6 +683,30 @@ def _build_repl_prompt_session(
         ),
         style=Style.from_dict(_REPL_PROMPT_STYLE) if Style is not None else None,
     )
+
+
+class _ReplPromptSession(PromptSession):  # type: ignore[misc]
+    """``PromptSession`` with a minimum input-area height for the REPL chat box.
+
+    prompt_toolkit's default ``_get_default_buffer_control_height`` returns
+    ``Dimension()`` (min=1) when no completion menu is due, so a
+    ``multiline=True`` prompt collapses to a single row when empty. This
+    subclass raises the floor to ``_REPL_MIN_INPUT_HEIGHT`` rows while
+    preserving the autocompletion-menu space reservation from the base
+    implementation.
+    """
+
+    def _get_default_buffer_control_height(self) -> Any:  # noqa: D401
+        """Return the buffer-control window height with a 3-row minimum."""
+        base = super()._get_default_buffer_control_height()
+        # Preserve completion-menu reservation, but never below the REPL floor.
+        from prompt_toolkit.layout import Dimension
+
+        return Dimension(
+            min=max(base.min or 1, _REPL_MIN_INPUT_HEIGHT),
+            max=base.max,
+            preferred=base.preferred,
+        )
 
 
 # prompt_toolkit style: maps the class: names used in the prompt and
@@ -717,11 +783,13 @@ def _repl_bottom_toolbar(
                 "class:bottom-toolbar.metric",
                 f"{line_count} line{'s' if line_count != 1 else ''}, {char_count} char{'s' if char_count != 1 else ''}",
             ),
+            ("class:bottom-toolbar.text", " · "),
+            ("class:bottom-toolbar.hint", "^P pause · ^. stop · ^\\ end"),
         ]
     )
 
 
-def _build_repl_key_bindings(transport: RichTransport) -> Any:
+def _build_repl_key_bindings(transport: RichTransport, runtime: HostRuntime) -> Any:
     """Build chat-box key bindings for the multi-line REPL prompt.
 
     - Enter: submit the current buffer (chat-box semantics).
@@ -743,6 +811,17 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
       the tool calls (a tool/model event closes the current segment). The
       toggle flips every thinking row at once so the user can inspect the
       model's reasoning across the whole turn without hunting for each segment.
+    - Ctrl+P: pause the in-flight turn. The turn freezes in place (no prompt
+      returned); the kernel writes a ``paused`` checkpoint and the transport
+      holds the turn open. Resume by sending any input or pressing Ctrl+P
+      again. The signal is polled by the kernel at the next iteration boundary.
+    - Ctrl+. (stop): return the prompt but keep the workflow state. Same
+      ``paused`` checkpoint as pause; the difference is the transport returns
+      the prompt so the next message is a fresh turn against the preserved
+      position.
+    - Ctrl+\\ (terminate): kill the workflow. The kernel marks the
+      WorkflowPosition complete, writes a ``terminated`` checkpoint for
+      audit/``/undo`` only, and returns the prompt. No resume.
 
     Without these bindings, prompt_toolkit's default ``multiline=True``
     behaviour is the reverse (Enter inserts a newline; Esc→Enter submits),
@@ -780,6 +859,28 @@ def _build_repl_key_bindings(transport: RichTransport) -> Any:
     @bindings.add("c-y")
     def _toggle_thinking(event: Any) -> None:
         transport.toggle_thinking()
+        _invalidate_repl_toolbar(event)
+
+    # ── Operator signals (pause / stop / terminate) ──────────────────
+    # These set ``runtime.operator_signal_value``; the kernel polls it once
+    # per iteration via ``TurnHooks.operator_signal``. The signal is terminal:
+    # the resolver produces a PauseAction / StopAction / TerminateAction on
+    # the next iteration boundary, the loop breaks before the model call, and
+    # the checkpoint is stamped ``paused`` (pause/stop) or ``terminated``
+    # (terminate). The host clears the signal after the turn ends.
+    @bindings.add("c-p")
+    def _pause_turn(event: Any) -> None:
+        runtime.operator_signal_value = "pause"
+        _invalidate_repl_toolbar(event)
+
+    @bindings.add("c-.")
+    def _stop_turn(event: Any) -> None:
+        runtime.operator_signal_value = "stop"
+        _invalidate_repl_toolbar(event)
+
+    @bindings.add("c-\\")
+    def _terminate_turn(event: Any) -> None:
+        runtime.operator_signal_value = "terminate"
         _invalidate_repl_toolbar(event)
 
     return bindings
