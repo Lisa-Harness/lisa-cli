@@ -784,7 +784,7 @@ def _repl_bottom_toolbar(
                 f"{line_count} line{'s' if line_count != 1 else ''}, {char_count} char{'s' if char_count != 1 else ''}",
             ),
             ("class:bottom-toolbar.text", " · "),
-            ("class:bottom-toolbar.hint", "^P pause · ^. stop · ^\\ end"),
+            ("class:bottom-toolbar.hint", "^P pause · ^O stop · ^\\ end"),
         ]
     )
 
@@ -815,10 +815,11 @@ def _build_repl_key_bindings(transport: RichTransport, runtime: HostRuntime) -> 
       returned); the kernel writes a ``paused`` checkpoint and the transport
       holds the turn open. Resume by sending any input or pressing Ctrl+P
       again. The signal is polled by the kernel at the next iteration boundary.
-    - Ctrl+. (stop): return the prompt but keep the workflow state. Same
+    - Ctrl+O (stop): return the prompt but keep the workflow state. Same
       ``paused`` checkpoint as pause; the difference is the transport returns
       the prompt so the next message is a fresh turn against the preserved
-      position.
+      position. (The intuitive Ctrl+. is not a valid prompt_toolkit control
+      binding — ``c-.`` raises at construction time — so Ctrl+O stands in.)
     - Ctrl+\\ (terminate): kill the workflow. The kernel marks the
       WorkflowPosition complete, writes a ``terminated`` checkpoint for
       audit/``/undo`` only, and returns the prompt. No resume.
@@ -873,7 +874,11 @@ def _build_repl_key_bindings(transport: RichTransport, runtime: HostRuntime) -> 
         runtime.operator_signal_value = "pause"
         _invalidate_repl_toolbar(event)
 
-    @bindings.add("c-.")
+    # Ctrl+. would be the intuitive mnemonic, but prompt_toolkit's key parser
+    # rejects ``c-.`` (the ``c-`` prefix only parses control-letter sequences,
+    # not punctuation), raising ValueError at binding-construction time and
+    # crashing REPL startup. Ctrl+O is the closest free control-letter slot.
+    @bindings.add("c-o")
     def _stop_turn(event: Any) -> None:
         runtime.operator_signal_value = "stop"
         _invalidate_repl_toolbar(event)

@@ -163,12 +163,19 @@ def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
 
     monkeypatch.setattr(cli_repl, "KeyBindings", _BindingsRejectingShiftEnter)
     transport = RichTransport(console=_make_console())
+    # The operator-signal bindings only write ``runtime.operator_signal_value``;
+    # a SimpleNamespace stand-in is sufficient and avoids a full runtime build.
+    runtime = SimpleNamespace(operator_signal_value="")
 
-    bindings = cli_repl._build_repl_key_bindings(transport)
+    bindings = cli_repl._build_repl_key_bindings(transport, runtime)
 
     assert bindings is not None
     assert "enter" in registered_keys
     assert "c-j" in registered_keys
+    # Operator-signal key bindings register alongside the chat-box bindings.
+    assert "c-p" in registered_keys
+    assert "c-o" in registered_keys
+    assert "c-\\" in registered_keys
     assert transport.shift_enter_supported is False
 
 

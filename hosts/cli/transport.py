@@ -494,18 +494,26 @@ class RichTransport:
     def _render_prompt_banner(self) -> Text:
         """Render the pinned submitted-prompt banner (ask 1).
 
-        One line at the very top of the Live region: ``❯ <message>`` in bold
-        bright_white, truncated to terminal width so it never wraps. Empty
-        (returns a blank Text) when no prompt was supplied — slash-command
-        turns that call ``start_thinking`` without a message show no banner.
+        The user's submitted message pinned to the top of the Live region
+        for the duration of the turn, with newlines preserved so multi-line
+        prompts stay multi-line. Each line is truncated to terminal width
+        so it never wraps. Empty (returns a blank Text) when no prompt was
+        supplied — slash-command turns that call ``start_thinking`` without
+        a message show no banner.
         """
         if not self._turn_prompt:
             return Text("")
         width = self.console.size.width or 80
-        body = _truncate(self._turn_prompt.replace("\n", " ").strip(), max(0, width - 4))
+        prompt_text = self._turn_prompt.strip()
         line = Text()
         line.append("❯ ", style="bold steel_blue3")
-        line.append(body, style="bold " + STYLE_TEXT_PRIMARY)
+        first = True
+        for raw_line in prompt_text.split("\n"):
+            body = _truncate(raw_line.strip(), max(0, width - 4))
+            if not first:
+                line.append("\n… ", style="bold steel_blue3")
+            line.append(body, style="bold " + STYLE_TEXT_PRIMARY)
+            first = False
         return line
 
     def _render_live_display(self) -> Group:
