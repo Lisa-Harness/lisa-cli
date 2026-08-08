@@ -365,6 +365,22 @@ async def _process_repl_turn(
             session_tokens=runtime.tokens.session_total_tokens,
             message=message,
         )
+    # ── Clear stale operator signals ───────────────────────────────────
+    # The kernel's ``TurnHooks.operator_signal`` polls
+    # ``runtime.operator_signal_value`` once per iteration. A pause/stop/
+    # terminate signal is terminal for the turn it was set in, but the
+    # kernel only *reads* it — nothing ever clears it. Without this reset,
+    # a single pause (manual Ctrl+P or the kernel's own iteration-cap
+    # auto-pause) leaves ``operator_signal_value == "pause"`` permanently,
+    # so every subsequent turn — including "continue"/"resume" — re-pauses
+    # at iteration 1 with reason "operator pause". This is the host's
+    # responsibility per the key-binding contract (see
+    # _build_repl_key_bindings): "The host clears the signal after the
+    # turn ends." Clear it at the *start* of each turn so the slate is
+    # clean regardless of how the previous one exited (pause, stop,
+    # cancel, error, or normal completion).
+    runtime.operator_signal_value = ""
+
     try:
         result = await handle_message(runtime, message, transport)
     except (asyncio.CancelledError, KeyboardInterrupt):
