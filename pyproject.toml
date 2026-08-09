@@ -26,6 +26,9 @@ text = [
     "lisa-pack-markdown",
     "lisa-pack-okf",
 ]
+personas = [
+    "lisa-pack-personas",
+]
 
 [tool.uv]
 package = false
@@ -50,6 +53,7 @@ lisa-pack-search = { path = "../../lisa-packs/search" }
 lisa-pack-markdown = { path = "../../lisa-packs/markdown" }
 lisa-pack-coding = { path = "../../lisa-packs-wip/coding" }
 lisa-pack-github = { path = "../../lisa-packs-wip/github" }
+lisa-pack-personas = { path = "../../lisa-packs/personas" }
 
 [tool.ruff]
 line-length = 100
