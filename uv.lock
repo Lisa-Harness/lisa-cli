@@ -702,13 +702,13 @@ text = [
 [package.metadata]
 requires-dist = [
     { name = "lisa-host-cli", editable = "hosts/cli" },
-    { name = "lisa-pack-brave-search", marker = "extra == 'search'", directory = "../../lisa-packs/brave_search" },
-    { name = "lisa-pack-coding", marker = "extra == 'coding'", directory = "../../lisa-packs-wip/coding" },
-    { name = "lisa-pack-github", marker = "extra == 'coding'", directory = "../../lisa-packs-wip/github" },
-    { name = "lisa-pack-markdown", marker = "extra == 'text'", directory = "../../lisa-packs/markdown" },
-    { name = "lisa-pack-okf", marker = "extra == 'text'", directory = "../../lisa-packs/okf" },
-    { name = "lisa-pack-personas", marker = "extra == 'personas'", directory = "../../lisa-packs/personas" },
-    { name = "lisa-pack-search", marker = "extra == 'search'", directory = "../../lisa-packs/search" },
+    { name = "lisa-pack-brave-search", marker = "extra == 'search'", editable = "../../lisa-packs/brave_search" },
+    { name = "lisa-pack-coding", marker = "extra == 'coding'", editable = "../../lisa-packs-wip/coding" },
+    { name = "lisa-pack-github", marker = "extra == 'coding'", editable = "../../lisa-packs-wip/github" },
+    { name = "lisa-pack-markdown", marker = "extra == 'text'", editable = "../../lisa-packs/markdown" },
+    { name = "lisa-pack-okf", marker = "extra == 'text'", editable = "../../lisa-packs/okf" },
+    { name = "lisa-pack-personas", marker = "extra == 'personas'", editable = "../../lisa-packs/personas" },
+    { name = "lisa-pack-search", marker = "extra == 'search'", editable = "../../lisa-packs/search" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
@@ -819,7 +819,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-brave-search"
 version = "0.1.0"
-source = { directory = "../../lisa-packs/brave_search" }
+source = { editable = "../../lisa-packs/brave_search" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -853,7 +853,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-coding"
 version = "0.1.0"
-source = { directory = "../../lisa-packs-wip/coding" }
+source = { editable = "../../lisa-packs-wip/coding" }
 dependencies = [
     { name = "lisa-kernel" },
     { name = "lisa-sdk" },
@@ -887,7 +887,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-github"
 version = "0.1.0"
-source = { directory = "../../lisa-packs-wip/github" }
+source = { editable = "../../lisa-packs-wip/github" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -922,7 +922,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-markdown"
 version = "0.1.0"
-source = { directory = "../../lisa-packs/markdown" }
+source = { editable = "../../lisa-packs/markdown" }
 dependencies = [
     { name = "lisa-kernel" },
     { name = "lisa-sdk" },
@@ -960,7 +960,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-okf"
 version = "0.1.0"
-source = { directory = "../../lisa-packs/okf" }
+source = { editable = "../../lisa-packs/okf" }
 dependencies = [
     { name = "pyyaml" },
 ]
@@ -977,7 +977,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-personas"
 version = "0.1.0"
-source = { directory = "../../lisa-packs/personas" }
+source = { editable = "../../lisa-packs/personas" }
 dependencies = [
     { name = "lisa-sdk" },
 ]
@@ -1005,7 +1005,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "lisa-pack-search"
 version = "0.1.0"
-source = { directory = "../../lisa-packs/search" }
+source = { editable = "../../lisa-packs/search" }
 
 [package.metadata]
 requires-dist = [
