@@ -14,21 +14,11 @@ dev = [
     "ruff>=0.8.0",
     "types-PyYAML>=6.0",
 ]
-coding = [
-    "lisa-pack-coding",
-    "lisa-pack-github",
-]
-search = [
-    "lisa-pack-brave-search",
-    "lisa-pack-search",
-]
-text = [
-    "lisa-pack-markdown",
-    "lisa-pack-okf",
-]
-personas = [
-    "lisa-pack-personas",
-]
+coding = ["lisa-pack-coding"]
+markdown = ["lisa-pack-markdown"]
+personas = ["lisa-pack-personas"]
+okf = ["lisa-pack-okf"]
+search = ["lisa-pack-brave", "lisa-pack-search"]
 
 [tool.uv]
 package = false
@@ -48,7 +38,7 @@ lisa-pack-introspect = { path = "../../lisa/sdk/packs/introspect", editable = tr
 lisa-pack-checkpoint = { path = "../../lisa/sdk/packs/checkpoint", editable = true }
 lisa-pack-recovery = { path = "../../lisa/sdk/packs/recovery", editable = true }
 lisa-pack-okf = { path = "../../lisa-packs/okf", editable = true }
-lisa-pack-brave-search = { path = "../../lisa-packs/brave_search", editable = true }
+lisa-pack-brave = { path = "../../lisa-packs/brave", editable = true }
 lisa-pack-search = { path = "../../lisa-packs/search", editable = true }
 lisa-pack-markdown = { path = "../../lisa-packs/markdown", editable = true }
 lisa-pack-coding = { path = "../../lisa-packs-wip/coding", editable = true }
