@@ -18,7 +18,7 @@ coding = ["lisa-pack-coding"]
 markdown = ["lisa-pack-markdown"]
 personas = ["lisa-pack-personas"]
 okf = ["lisa-pack-okf"]
-search = ["lisa-pack-brave", "lisa-pack-search"]
+search = ["lisa-pack-serper", "lisa-pack-search"]
 
 [tool.uv]
 package = false
@@ -39,6 +39,8 @@ lisa-pack-checkpoint = { path = "../../lisa/sdk/packs/checkpoint", editable = tr
 lisa-pack-recovery = { path = "../../lisa/sdk/packs/recovery", editable = true }
 lisa-pack-okf = { path = "../../lisa-packs/okf", editable = true }
 lisa-pack-brave = { path = "../../lisa-packs/brave", editable = true }
+lisa-pack-serper = { path = "../../lisa-packs/serper", editable = true }
+lisa-pack-tavily = { path = "../../lisa-packs/tavily", editable = true }
 lisa-pack-search = { path = "../../lisa-packs/search", editable = true }
 lisa-pack-markdown = { path = "../../lisa-packs/markdown", editable = true }
 lisa-pack-coding = { path = "../../lisa-packs-wip/coding", editable = true }
