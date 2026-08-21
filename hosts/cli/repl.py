@@ -298,7 +298,7 @@ async def _run_repl_loop(
             _render_session_exit_summary(runtime, console)
             console.print(f"[{STYLE_TEXT_MUTED}]Session closed.[/]")
             return False
-        await _process_repl_turn(runtime, transport, console, message)
+        await _process_repl_turn(runtime, transport, console, message, dispatcher)
         if runtime.restart_required:
             _render_restart_required_notice_if_needed(runtime, console)
             if not _confirm_restart(runtime, console):
