@@ -27,6 +27,7 @@ from typing import Any
 
 from host.callbacks import TransportCallbacks
 from host.handle_message import handle_message
+from host.operator_signal import OperatorSignal
 from host.runtime import HostRuntime
 from rich.console import Console
 from rich.markdown import Markdown
@@ -35,6 +36,12 @@ from rich.prompt import Confirm
 from rich.rule import Rule
 from rich.text import Text
 
+from hosts.cli.keys import (
+    TerminalSignalDispatcher,
+    async_read_input,
+    build_repl_key_bindings,
+    install_loop_signal_handlers,
+)
 from hosts.cli.transport import RichTransport
 
 logger = logging.getLogger(__name__)
@@ -177,6 +184,15 @@ async def run_repl(
     console._lisa_runtime = runtime  # type: ignore[attr-defined]
     transport = RichTransport(console=console)
 
+    # ── Signal dispatcher ──────────────────────────────────────────
+    # Constructed once and threaded through the REPL: key bindings,
+    # input reader, turn processor, and loop-level signal handlers all
+    # share this one instance.
+    dispatcher = TerminalSignalDispatcher(runtime, transport, console)
+
+    # ── Process-level signal handlers (POSIX backstop) ─────────────
+    install_loop_signal_handlers(asyncio.get_running_loop(), dispatcher)
+
     # Set the initial route preview so the status line shows the
     # resolved model before the first turn is executed. When start_mode
     # is set in the session context, use it instead of "default".
@@ -214,7 +230,7 @@ async def run_repl(
         )
     )
 
-    prompt_session = _build_repl_prompt_session(runtime, console, transport)
+    prompt_session = _build_repl_prompt_session(runtime, console, transport, dispatcher)
     if prompt_session is None:
         console.print(f"[{STYLE_TEXT_MUTED}]prompt_toolkit unavailable; using basic input mode.[/]")
 
@@ -234,7 +250,7 @@ async def run_repl(
                     border_style=STYLE_BORDER_SESSION,
                 )
             )
-            await _process_repl_turn(runtime, transport, console, pending_resume)
+            await _process_repl_turn(runtime, transport, console, pending_resume, dispatcher)
             if runtime.restart_required:
                 _render_restart_required_notice_if_needed(runtime, console)
                 if not _confirm_restart(runtime, console):
@@ -248,7 +264,7 @@ async def run_repl(
                     _render_session_exit_summary(runtime, console)
                     console.print(f"[{STYLE_TEXT_MUTED}]Applying restart now...[/]")
                     return True
-        restart_requested = await _run_repl_loop(runtime, transport, console, prompt_session)
+        restart_requested = await _run_repl_loop(runtime, transport, console, prompt_session, dispatcher)
     finally:
         # Close the MCP pool. aclose() handles the anyio cross-task rule
         # internally: when the pool was started via start_pool_deferred(),
@@ -268,10 +284,11 @@ async def _run_repl_loop(
     transport: TransportCallbacks,
     console: Console,
     prompt_session: Any,
+    dispatcher: TerminalSignalDispatcher,
 ) -> bool:
     """Process REPL turns until the user quits or sends EOF."""
     while True:
-        message = await _read_repl_input(console, prompt_session)
+        message = await async_read_input(console, prompt_session, dispatcher)
         if message is None:
             _render_session_exit_summary(runtime, console)
             return False
@@ -307,38 +324,6 @@ async def _run_repl_loop(
             return True
 
 
-async def _read_repl_input(console: Console, prompt_session: Any) -> str | None:
-    """Read one line of REPL input, returning None on EOF or Ctrl+C.
-
-    A Ctrl+C at the input prompt (not mid-turn) is treated as an exit
-    request, mirroring EOF (Ctrl+D). This prevents the infinite loop
-    where repeated Ctrl+C on an empty prompt returns ``""`` and
-    ``_run_repl_loop``'s ``if not message: continue`` loops forever.
-    Mid-turn Ctrl+C is handled separately by ``_process_repl_turn``'s
-    ``CancelledError``/``KeyboardInterrupt`` handler, which cancels the
-    turn and returns to the prompt — that path never reaches here.
-    """
-    try:
-        if prompt_session is not None:
-            cursor = ModalCursorShapeConfig() if ModalCursorShapeConfig is not None else None
-            return (
-                await prompt_session.prompt_async(
-                    [("class:prompt", "❯ ")],
-                    cursor=cursor,
-                )
-            ).strip()
-        return console.input(f"[{STYLE_PROMPT}]❯ [/]").strip()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        # Ctrl+C at the prompt → exit the session (same as EOF). Do NOT
-        # return "" — that makes _run_repl_loop loop forever on an empty
-        # prompt with no way out except /quit.
-        console.print(Rule(style=STYLE_RULE))
-        return None
-    except EOFError:
-        console.print(Rule(style=STYLE_RULE))
-        return None
-
-
 def _is_repl_quit_command(message: str) -> bool:
     """Return True if the message is a quit/exit command."""
     return message.lower() in {"exit", "quit", "/exit", "/quit"}
@@ -349,6 +334,7 @@ async def _process_repl_turn(
     transport: TransportCallbacks,
     console: Console,
     message: str,
+    dispatcher: TerminalSignalDispatcher,
 ) -> None:
     """Execute one REPL turn via handle_message and render the response."""
     turn_start = time.perf_counter()
@@ -366,20 +352,7 @@ async def _process_repl_turn(
             message=message,
         )
     # ── Clear stale operator signals ───────────────────────────────────
-    # The kernel's ``TurnHooks.operator_signal`` polls
-    # ``runtime.operator_signal_value`` once per iteration. A pause/stop/
-    # terminate signal is terminal for the turn it was set in, but the
-    # kernel only *reads* it — nothing ever clears it. Without this reset,
-    # a single pause (manual Ctrl+P or the kernel's own iteration-cap
-    # auto-pause) leaves ``operator_signal_value == "pause"`` permanently,
-    # so every subsequent turn — including "continue"/"resume" — re-pauses
-    # at iteration 1 with reason "operator pause". This is the host's
-    # responsibility per the key-binding contract (see
-    # _build_repl_key_bindings): "The host clears the signal after the
-    # turn ends." Clear it at the *start* of each turn so the slate is
-    # clean regardless of how the previous one exited (pause, stop,
-    # cancel, error, or normal completion).
-    runtime.operator_signal_value = ""
+    dispatcher.clear()
 
     try:
         result = await handle_message(runtime, message, transport)
@@ -412,6 +385,7 @@ async def _process_repl_turn(
         console.file.write("\n")
         console.print(f"[{STYLE_TEXT_MUTED}]⌧ turn cancelled[/]")
         logger.info("REPL turn cancelled by user (Ctrl+C)")
+        dispatcher.note_interrupt()
         _reset_runtime_after_cancelled_turn(runtime)
         runtime.tokens.session_turn_count += 1
         runtime.tokens.session_cancelled_count += 1
@@ -666,7 +640,10 @@ _REPL_MIN_INPUT_HEIGHT = 3
 
 
 def _build_repl_prompt_session(
-    runtime: HostRuntime, console: Console, transport: RichTransport
+    runtime: HostRuntime,
+    console: Console,
+    transport: RichTransport,
+    dispatcher: TerminalSignalDispatcher,
 ) -> Any:
     """Build a prompt_toolkit PromptSession with history + completion.
 
@@ -683,7 +660,7 @@ def _build_repl_prompt_session(
         return None
     history_path = runtime.data_dir / _REPL_HISTORY_FILE_NAME
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    bindings = _build_repl_key_bindings(transport, runtime) if KeyBindings is not None else None
+    bindings = build_repl_key_bindings(transport, dispatcher) if KeyBindings is not None else None
     return _ReplPromptSession(
         history=_SurrogateSafeFileHistory(str(history_path)),
         auto_suggest=AutoSuggestFromHistory() if AutoSuggestFromHistory is not None else None,
@@ -803,122 +780,6 @@ def _repl_bottom_toolbar(
             ("class:bottom-toolbar.hint", "^P pause · ^O stop · ^\\ end"),
         ]
     )
-
-
-def _build_repl_key_bindings(transport: RichTransport, runtime: HostRuntime) -> Any:
-    """Build chat-box key bindings for the multi-line REPL prompt.
-
-    - Enter: submit the current buffer (chat-box semantics).
-    - Shift+Enter: insert a newline (for multi-line input). On terminals that
-      speak the kitty/CSI-u keyboard protocol, Shift+Enter transmits a
-      distinguishable sequence and this binding fires. On a raw terminal
-      Shift+Enter and Enter transmit the same byte (CR / ``ControlM``), so
-      this binding never matches there; Ctrl+J (below) is the portable
-      fallback. The first time ``s-enter`` fires we set
-      ``transport.shift_enter_supported`` so the bottom toolbar can show the
-      newline chord that actually works on this terminal rather than a static
-      (and possibly lying) hint.
-    - Ctrl+J: insert a newline — the portable single-chord newline that works
-      on every terminal (including bare SSH, CI logs, and terminals that
-      collapse Shift+Enter into Enter). Kept even when Shift+Enter is bound so
-      no user is stranded.
-    - Ctrl+Y: expand/collapse ALL visible thinking segments in the transcript.
-      Thinking is rendered as multiple interspersed rows that interleave with
-      the tool calls (a tool/model event closes the current segment). The
-      toggle flips every thinking row at once so the user can inspect the
-      model's reasoning across the whole turn without hunting for each segment.
-    - Ctrl+P: pause the in-flight turn. The turn freezes in place (no prompt
-      returned); the kernel writes a ``paused`` checkpoint and the transport
-      holds the turn open. Resume by sending any input or pressing Ctrl+P
-      again. The signal is polled by the kernel at the next iteration boundary.
-    - Ctrl+O (stop): return the prompt but keep the workflow state. Same
-      ``paused`` checkpoint as pause; the difference is the transport returns
-      the prompt so the next message is a fresh turn against the preserved
-      position. (The intuitive Ctrl+. is not a valid prompt_toolkit control
-      binding — ``c-.`` raises at construction time — so Ctrl+O stands in.)
-    - Ctrl+\\ (terminate): kill the workflow. The kernel marks the
-      WorkflowPosition complete, writes a ``terminated`` checkpoint for
-      audit/``/undo`` only, and returns the prompt. No resume.
-
-    Without these bindings, prompt_toolkit's default ``multiline=True``
-    behaviour is the reverse (Enter inserts a newline; Esc→Enter submits),
-    which surprises chat users.
-    """
-    if KeyBindings is None:
-        return None
-    bindings = KeyBindings()
-
-    @bindings.add("enter")
-    def _submit(event: Any) -> None:
-        event.current_buffer.validate_and_handle()
-
-    # Shift+Enter — only fires on kitty/CSI-u terminals. Older prompt_toolkit
-    # versions (and some platforms) don't recognize ``s-enter`` as a valid key
-    # name and raise ValueError at binding-construction time. Wrap it so the
-    # binding is skipped gracefully on those builds; Ctrl+J below is the
-    # portable fallback that always works. The toolbar hint reflects whichever
-    # chord is actually bound via ``transport.shift_enter_supported``.
-    try:
-
-        @bindings.add("s-enter")
-        def _newline_shift_enter(event: Any) -> None:
-            # Set the flag so the bottom toolbar shows this chord as the
-            # working newline on this terminal.
-            transport.shift_enter_supported = True
-            event.current_buffer.insert_text("\n")
-    except ValueError:
-        pass
-
-    @bindings.add("c-j")
-    def _newline(event: Any) -> None:
-        event.current_buffer.insert_text("\n")
-
-    @bindings.add("c-y")
-    def _toggle_thinking(event: Any) -> None:
-        transport.toggle_thinking()
-        _invalidate_repl_toolbar(event)
-
-    # ── Operator signals (pause / stop / terminate) ──────────────────
-    # These set ``runtime.operator_signal_value``; the kernel polls it once
-    # per iteration via ``TurnHooks.operator_signal``. The signal is terminal:
-    # the resolver produces a PauseAction / StopAction / TerminateAction on
-    # the next iteration boundary, the loop breaks before the model call, and
-    # the checkpoint is stamped ``paused`` (pause/stop) or ``terminated``
-    # (terminate). The host clears the signal after the turn ends.
-    @bindings.add("c-p")
-    def _pause_turn(event: Any) -> None:
-        runtime.operator_signal_value = "pause"
-        _invalidate_repl_toolbar(event)
-
-    # Ctrl+. would be the intuitive mnemonic, but prompt_toolkit's key parser
-    # rejects ``c-.`` (the ``c-`` prefix only parses control-letter sequences,
-    # not punctuation), raising ValueError at binding-construction time and
-    # crashing REPL startup. Ctrl+O is the closest free control-letter slot.
-    @bindings.add("c-o")
-    def _stop_turn(event: Any) -> None:
-        runtime.operator_signal_value = "stop"
-        _invalidate_repl_toolbar(event)
-
-    @bindings.add("c-\\")
-    def _terminate_turn(event: Any) -> None:
-        runtime.operator_signal_value = "terminate"
-        _invalidate_repl_toolbar(event)
-
-    return bindings
-
-
-def _invalidate_repl_toolbar(event: Any) -> None:
-    """Force prompt_toolkit to re-render the bottom toolbar after a toggle.
-
-    The toolbar callback fires automatically only on buffer mutations; the
-    thinking toggle mutates transport state without touching the buffer, so
-    without an explicit invalidation the stale hint string stays on screen
-    until the user types again.
-    """
-    try:
-        event.app.invalidate()
-    except Exception:  # pylint: disable=broad-except
-        pass
 
 
 __all__ = ["run_repl"]

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from host.operator_signal import OperatorSignal
 from host.runtime import HostRuntime, TurnContext
 from hosts.cli.repl import _render_turn_footer
 from rich.console import Console
@@ -145,7 +146,7 @@ def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An older prompt_toolkit must not block REPL startup over ``s-enter``."""
-    from hosts.cli import repl as cli_repl
+    from hosts.cli import keys as cli_keys
     from hosts.cli.transport import RichTransport
 
     registered_keys: list[str] = []
@@ -161,17 +162,22 @@ def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
 
             return _decorate
 
-    monkeypatch.setattr(cli_repl, "KeyBindings", _BindingsRejectingShiftEnter)
+    monkeypatch.setattr(cli_keys, "_PTKeyBindings", _BindingsRejectingShiftEnter)
     transport = RichTransport(console=_make_console())
     # The operator-signal bindings only write ``runtime.operator_signal_value``;
     # a SimpleNamespace stand-in is sufficient and avoids a full runtime build.
-    runtime = SimpleNamespace(operator_signal_value="")
+    runtime = SimpleNamespace(operator_signal_value=OperatorSignal.NONE)
+    dispatcher = cli_keys.TerminalSignalDispatcher(runtime, transport, _make_console())
 
-    bindings = cli_repl._build_repl_key_bindings(transport, runtime)
+    bindings = cli_keys.build_repl_key_bindings(transport, dispatcher)
 
     assert bindings is not None
     assert "enter" in registered_keys
     assert "c-j" in registered_keys
+    # Terminal-signal key bindings register alongside chat-box bindings.
+    assert "c-c" in registered_keys
+    assert "c-d" in registered_keys
+    assert "c-z" in registered_keys
     # Operator-signal key bindings register alongside the chat-box bindings.
     assert "c-p" in registered_keys
     assert "c-o" in registered_keys
@@ -204,6 +210,9 @@ async def test_rich_turn_uses_transport_workflow_summary_not_footer(
     monkeypatch.setattr(cli_repl, "handle_message", _handle_message)
     monkeypatch.setattr(cli_repl, "_render_turn_footer", _record_footer)
 
-    await cli_repl._process_repl_turn(runtime, transport, console, "hello")
+    from hosts.cli.keys import TerminalSignalDispatcher
+
+    dispatcher = TerminalSignalDispatcher(runtime, transport, console)
+    await cli_repl._process_repl_turn(runtime, transport, console, "hello", dispatcher)
 
     assert footer_calls == []

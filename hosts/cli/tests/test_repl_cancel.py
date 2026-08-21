@@ -65,7 +65,10 @@ def test_process_repl_turn_keyboard_interrupt_returns_prompt(
     # Must not raise.
     import asyncio
 
-    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "typo msg"))
+    from hosts.cli.keys import TerminalSignalDispatcher
+
+    dispatcher = TerminalSignalDispatcher(runtime, transport, console)
+    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "typo msg", dispatcher))
 
     # Spinner was stopped.
     assert transport._status is None
@@ -113,7 +116,10 @@ def test_process_repl_turn_cancelled_error_returns_prompt(
 
     monkeypatch.setattr(cli_repl, "handle_message", _raise_cancelled)
 
-    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "typo msg"))
+    from hosts.cli.keys import TerminalSignalDispatcher
+
+    dispatcher = TerminalSignalDispatcher(runtime, transport, console)
+    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "typo msg", dispatcher))
 
     assert transport._status is None
     assert runtime.tokens.session_cancelled_count == 1
@@ -143,7 +149,10 @@ def test_process_repl_turn_keyboard_interrupt_stops_spinner(
 
     import asyncio
 
-    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "x"))
+    from hosts.cli.keys import TerminalSignalDispatcher
+
+    dispatcher = TerminalSignalDispatcher(runtime, transport, console)
+    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "x", dispatcher))
 
     assert transport._status is None
 
@@ -167,7 +176,10 @@ def test_process_repl_turn_normal_exception_still_errors(
 
     import asyncio
 
-    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "x"))
+    from hosts.cli.keys import TerminalSignalDispatcher
+
+    dispatcher = TerminalSignalDispatcher(runtime, transport, console)
+    asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "x", dispatcher))
 
     assert runtime.tokens.session_error_count == 1
     assert runtime.tokens.session_cancelled_count == 0
