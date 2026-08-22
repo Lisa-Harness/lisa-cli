@@ -19,8 +19,27 @@ pip install lisa-host-cli
 ```bash
 lisa            # start the REPL
 lisa verify     # run the diagnostic smoke check
+lisa once "summarize the thread"   # run a single turn non-interactively
 lisa --help     # show all commands
 ```
+
+### Lazy `once` routing
+
+Set `LISA_ONCE_UNKNOWN=1` (or pass `--once-unknown`) to let an unrecognized
+first positional become the `once` message, so you can skip typing
+`once` for ad-hoc one-shots:
+
+```bash
+LISA_ONCE_UNKNOWN=1 lisa continue
+LISA_ONCE_UNKNOWN=1 lisa "do something else"
+lisa --once-unknown continue          # one-shot, no env var
+```
+
+Registered subcommands (`verify`, `pack`, `models`, …) are never rerouted,
+so the flag is safe to leave on. Group-level options and their values
+(e.g. `--log-level debug`) are skipped when locating the subcommand
+position. The env var is the intended default; the flag is redundant and
+exists only for discoverability.
 
 ## Development
 

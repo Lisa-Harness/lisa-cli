@@ -112,6 +112,14 @@ _RESTART_REQUIRED_EXIT = 69
 # host.commands; consumed once on startup by the CLI host.
 _RESTART_RESUME_MESSAGE_ENV = "LISA_RESTART_RESUME_MESSAGE"
 
+# Env var (or --once-unknown flag) enabling lazy routing: an unrecognized
+# first positional is redirected to `lisa once <args...>` so users can run
+# `lisa continue` or `lisa "do something else"` without typing `once`. The
+# flag is redundant with the env var (people set it via env); it exists for
+# discoverability and is handled in pre-parse before Typer sees argv.
+_ONCE_UNKNOWN_ENV = "LISA_ONCE_UNKNOWN"
+_ONCE_UNKNOWN_FLAG = "--once-unknown"
+
 
 def _restart_current_process() -> None:
     """Restart the CLI process after a runtime change.
@@ -1341,9 +1349,104 @@ def _intake_command(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# once-unknown pre-parse routing
+# ---------------------------------------------------------------------------
+
+# Group-level callback options that consume the following token as their
+# value. Used by _first_positional_index to skip option values when locating
+# the subcommand position. Keep in sync with the options on _cli_callback.
+_VALUE_TAKING_GROUP_FLAGS = frozenset(
+    {
+        "--log-level",
+        "--log",
+        "--data-dir",
+        "--overlays-dir",
+        "--thread-dir",
+        "--session-context",
+        "--timezone",
+        "--state-snapshot",
+        "--streaming",
+        "--host-log",
+    }
+)
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _once_unknown_active(args: list[str]) -> bool:
+    """True if once-unknown routing is on (env var or --once-unknown flag)."""
+    if os.getenv(_ONCE_UNKNOWN_ENV, "").strip().lower() in _TRUTHY:
+        return True
+    return _ONCE_UNKNOWN_FLAG in args
+
+
+def _known_command_names() -> set[str]:
+    """Names of every registered Typer subcommand plus the auto `help`."""
+    names = {cmd.name for cmd in app.registered_commands if cmd.name}
+    names.add("help")
+    return names
+
+
+def _first_positional_index(args: list[str]) -> int:
+    """Index of the first positional (non-option) token.
+
+    Skips group-level options and their values so a value like `debug` in
+    `--log-level debug` is not mistaken for the subcommand. Returns -1 when
+    there is no positional token (e.g. bare `lisa` or only options).
+    """
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok == "--":
+            return i + 1 if i + 1 < n else -1
+        if tok.startswith("-") and tok != "-":
+            if "=" in tok:
+                i += 1
+                continue
+            if tok in _VALUE_TAKING_GROUP_FLAGS:
+                i += 2  # flag + its value
+                continue
+            i += 1  # bool flag or unknown flag
+            continue
+        return i
+    return -1
+
+
+def _maybe_route_to_once(args: list[str]) -> list[str]:
+    """Redirect an unrecognized first positional to the `once` subcommand.
+
+    When once-unknown routing is active (``LISA_ONCE_UNKNOWN=1`` or the
+    ``--once-unknown`` flag) and the first positional token is not a known
+    subcommand, inject ``once`` before it so the trailing tokens become the
+    one-shot message::
+
+        lisa continue                       -> lisa once continue
+        lisa "do something else"             -> lisa once "do something else"
+        lisa --log-level debug continue      -> lisa --log-level debug once continue
+
+    Known subcommands (e.g. `verify`, `pack`) are never rerouted, so the
+    flag is safe to leave on. The ``--once-unknown`` flag is stripped before
+    Typer sees argv (it is not a registered Typer option) so it never leaks
+    into a subcommand's option set.
+    """
+    active = _once_unknown_active(args)
+    # The flag is a pre-parse-only switch; strip it so Typer never sees it.
+    args = [a for a in args if a != _ONCE_UNKNOWN_FLAG]
+    if not active:
+        return args
+    idx = _first_positional_index(args)
+    if idx < 0:
+        return args
+    if args[idx] in _known_command_names():
+        return args
+    return [*args[:idx], "once", *args[idx:]]
+
+
 def main() -> None:
     """CLI entry point for the Lisa terminal host."""
-    app(args=sys.argv[1:])
+    app(args=_maybe_route_to_once(list(sys.argv[1:])))
 
 
 if __name__ == "__main__":
