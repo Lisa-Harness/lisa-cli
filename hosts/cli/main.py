@@ -1230,20 +1230,16 @@ def _pack_command(
 
 async def _run_pack_install(runtime: HostRuntime, spec: str) -> tuple[bool, str]:
     """Install a pack by spec (delegates to host pack management)."""
-    from host.commands import handle_pack_command
+    from host.commands import run_pack_install
 
-    result = await handle_pack_command(runtime, "/pack", f"/pack install {spec}")
-    # handle_pack_command returns a plain string; treat it as success unless
-    # it starts with a known failure prefix.
-    return (True, result)
+    return await run_pack_install(runtime, spec)
 
 
 async def _run_pack_uninstall(runtime: HostRuntime, package_name: str) -> tuple[bool, str]:
     """Uninstall a pack by package name."""
-    from host.commands import handle_pack_command
+    from host.commands import run_pack_uninstall
 
-    result = await handle_pack_command(runtime, "/pack", f"/pack uninstall {package_name}")
-    return (True, result)
+    return await run_pack_uninstall(runtime, package_name)
 
 
 # ---------------------------------------------------------------------------
