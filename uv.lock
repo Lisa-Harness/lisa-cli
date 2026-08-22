@@ -697,7 +697,7 @@ personas = [
 ]
 search = [
     { name = "lisa-pack-search" },
-    { name = "lisa-pack-tavily" },
+    { name = "lisa-pack-serper" },
 ]
 
 [package.metadata]
@@ -708,7 +708,7 @@ requires-dist = [
     { name = "lisa-pack-okf", marker = "extra == 'okf'", editable = "../../lisa-packs/okf" },
     { name = "lisa-pack-personas", marker = "extra == 'personas'", editable = "../../lisa-packs/personas" },
     { name = "lisa-pack-search", marker = "extra == 'search'", editable = "../../lisa-packs/search" },
-    { name = "lisa-pack-tavily", marker = "extra == 'search'", editable = "../../lisa-packs/tavily" },
+    { name = "lisa-pack-serper", marker = "extra == 'search'", editable = "../../lisa-packs/serper" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
@@ -983,9 +983,9 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "lisa-pack-tavily"
+name = "lisa-pack-serper"
 version = "0.1.0"
-source = { editable = "../../lisa-packs/tavily" }
+source = { editable = "../../lisa-packs/serper" }
 dependencies = [
     { name = "httpx" },
 ]
