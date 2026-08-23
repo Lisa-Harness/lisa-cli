@@ -35,7 +35,6 @@ lisa-mcp-servers = { path = "../../lisa/mcp_server", editable = true }
 lisa-pack-memory = { path = "../../lisa/sdk/packs/memory", editable = true }
 lisa-pack-core = { path = "../../lisa/sdk/packs/core", editable = true }
 lisa-pack-introspect = { path = "../../lisa/sdk/packs/introspect", editable = true }
-lisa-pack-checkpoint = { path = "../../lisa/sdk/packs/checkpoint", editable = true }
 lisa-pack-recovery = { path = "../../lisa/sdk/packs/recovery", editable = true }
 lisa-pack-okf = { path = "../../lisa-packs/okf", editable = true }
 lisa-pack-brave = { path = "../../lisa-packs/brave", editable = true }
