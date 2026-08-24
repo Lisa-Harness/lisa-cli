@@ -37,6 +37,7 @@ from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderR
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.text import Text
 
@@ -1105,19 +1106,26 @@ class RichTransport:
             self._refresh_live()
 
     async def on_response(self, text: str, data: dict[str, Any] | None = None) -> None:
-        """Render the final response as a clean Markdown Panel.
+        """Render the final response as clean Markdown (no vertical borders).
 
         Tears down the transient Live region without flushing raw reasoning or
         tool activity to scrollback, then renders the fully formatted answer
         and a clear workflow summary. The streamed answer is NOT reused:
         rendering the complete ``text`` keeps the final response readable.
+
+        The answer is printed as bare ``Markdown`` beneath a horizontal ``Rule``
+        header rather than inside a bordered ``Panel``. A Panel draws vertical
+        box-drawing characters down both sides of every line, which makes
+        copy/pasting the answer pull in those border glyphs. The Rule gives a
+        clear visual separator (so the user still sees where the response
+        begins) while leaving the content itself border-free and cleanly
+        selectable.
         """
         self.stop_thinking(flush_transcript=False)
         self._answer_staging = Text()
         if text:
-            self.console.print(
-                Panel(Markdown(text), title="Response", border_style=STYLE_BORDER_RESPONSE)
-            )
+            self.console.print(Rule(title="Response", style=STYLE_BORDER_RESPONSE))
+            self.console.print(Markdown(text))
         self._render_workflow_summary()
 
     async def on_debug_context(self, context: dict[str, Any]) -> None:
