@@ -356,7 +356,7 @@ def _initialize_runtime_or_exit(**kwargs: Any) -> HostRuntime | None:
     """
     try:
         return _initialize_runtime(**kwargs)
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
         from hosts.cli.repl import _render_runtime_error
 
         _render_runtime_error(console, exc, title="Startup Error")
