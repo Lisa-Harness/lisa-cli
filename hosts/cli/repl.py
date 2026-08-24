@@ -59,29 +59,21 @@ _REPL_HISTORY_FILE_NAME = "repl_history.txt"
 
 # ── Host-only REPL shortcuts (not catalog modes) ────────────────────
 _HOST_REPL_SHORTCUTS: tuple[str, ...] = (
+    "/debug context",
+    "/debug router",
     "/help",
     "/help capabilities",
+    "/intake",
+    "/mcp",
+    "/models show",
+    "/models discover",
+    "/models apply",
     "/pack list",
     "/pack enable ",
     "/pack disable ",
     "/pack install ",
     "/pack uninstall ",
-    "/models show",
-    "/models discover",
-    "/models apply",
-    "/models reload",
-    "/models edit",
-    "/settings",
     "/tokens",
-    "/mcp",
-    "/mcp ",
-    "/debug context",
-    "/debug router",
-    "/consolidate",
-    "/intake",
-    "/checkpoint",
-    "/restore",
-    "/checkpoints",
     "/quit",
 )
 
@@ -424,8 +416,6 @@ async def _process_repl_turn(
     # ── Operator exit indicator ────────────────────────────────────────
     # Surface the pause/stop/terminate discriminator so the user knows the
     # turn ended via an operator signal (or a cap that degraded to one).
-    # The kernel handles checkpoint stamping and WorkflowPosition marking;
-    # this is a visual indicator only.
     _op_exit = getattr(result, "operator_exit", "")
     if _op_exit == "paused":
         console.print(f"[{STYLE_TEXT_MUTED}]⏸ turn paused — send input to resume[/]")
