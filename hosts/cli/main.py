@@ -666,8 +666,7 @@ def _verify_check_provider_keys() -> tuple[str, str]:
 
     parts: list[str] = []
     # Check LISA_* vars first (the new host's env vars), then fall back to
-    # the bare AZURE_OPENAI_* / OPENAI_* / ANTHROPIC_* / GOOGLE_* vars that
-    # the providers module also accepts.
+    # the bare provider variables accepted by the host gateway provider.
     azure_key = (
         os.getenv("LISA_AZURE_OPENAI_API_KEY", "").strip()
         or os.getenv("AZURE_OPENAI_API_KEY", "").strip()
@@ -710,6 +709,24 @@ def _verify_check_provider_keys() -> tuple[str, str]:
     )
     if openrouter_key:
         parts.append(f"OpenRouter: {_redact_key(openrouter_key)}")
+
+    aws_access_key = (
+        os.getenv("LISA_AWS_ACCESS_KEY_ID", "").strip()
+        or os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+    )
+    aws_secret_key = (
+        os.getenv("LISA_AWS_SECRET_ACCESS_KEY", "").strip()
+        or os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
+    )
+    aws_region = (
+        os.getenv("LISA_AWS_REGION", "").strip()
+        or os.getenv("AWS_REGION", "").strip()
+        or os.getenv("AWS_DEFAULT_REGION", "").strip()
+    )
+    if aws_access_key and aws_secret_key and aws_region:
+        parts.append(f"AWS Bedrock: {_redact_key(aws_access_key)} @ {aws_region}")
+    elif aws_access_key or aws_secret_key or aws_region:
+        parts.append("AWS Bedrock: partially configured")
 
     if not parts:
         return _VERIFY_WARN, "No provider keys configured"

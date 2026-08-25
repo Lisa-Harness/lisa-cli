@@ -304,6 +304,15 @@ def test_check_provider_keys_warns_when_none(monkeypatch: pytest.MonkeyPatch) ->
         "GOOGLE_API_KEY",
         "LISA_OLLAMA_HOST",
         "OLLAMA_HOST",
+        "LISA_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "LISA_AWS_ACCESS_KEY_ID",
+        "AWS_ACCESS_KEY_ID",
+        "LISA_AWS_SECRET_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "LISA_AWS_REGION",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
     ):
         monkeypatch.delenv(var, raising=False)
     status, detail = cli_main._verify_check_provider_keys()
@@ -323,6 +332,15 @@ def test_check_provider_keys_passes_with_openai(monkeypatch: pytest.MonkeyPatch)
         "GOOGLE_API_KEY",
         "LISA_OLLAMA_HOST",
         "OLLAMA_HOST",
+        "LISA_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "LISA_AWS_ACCESS_KEY_ID",
+        "AWS_ACCESS_KEY_ID",
+        "LISA_AWS_SECRET_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "LISA_AWS_REGION",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LISA_OPENAI_API_KEY", "sk-test1234567890")
@@ -347,6 +365,15 @@ def test_check_provider_keys_reports_azure_endpoint(monkeypatch: pytest.MonkeyPa
         "GOOGLE_API_KEY",
         "LISA_OLLAMA_HOST",
         "OLLAMA_HOST",
+        "LISA_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "LISA_AWS_ACCESS_KEY_ID",
+        "AWS_ACCESS_KEY_ID",
+        "LISA_AWS_SECRET_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "LISA_AWS_REGION",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
     ):
         monkeypatch.delenv(var, raising=False)
     status, detail = cli_main._verify_check_provider_keys()
@@ -368,12 +395,53 @@ def test_check_provider_keys_reports_ollama_host(monkeypatch: pytest.MonkeyPatch
         "ANTHROPIC_API_KEY",
         "LISA_GOOGLE_API_KEY",
         "GOOGLE_API_KEY",
+        "LISA_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "LISA_AWS_ACCESS_KEY_ID",
+        "AWS_ACCESS_KEY_ID",
+        "LISA_AWS_SECRET_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "LISA_AWS_REGION",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
     ):
         monkeypatch.delenv(var, raising=False)
     status, detail = cli_main._verify_check_provider_keys()
     assert "PASS" in status
     assert "Ollama" in detail
     assert "localhost:11434" in detail
+
+
+def test_check_provider_keys_reports_aws_bedrock(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hosts.cli import main as cli_main
+
+    for var in (
+        "LISA_AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "LISA_AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_ENDPOINT",
+        "LISA_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "LISA_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "LISA_GOOGLE_API_KEY",
+        "GOOGLE_API_KEY",
+        "LISA_OLLAMA_HOST",
+        "OLLAMA_HOST",
+        "LISA_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("LISA_AWS_ACCESS_KEY_ID", "AKIATEST123456789")
+    monkeypatch.setenv("LISA_AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("LISA_AWS_REGION", "eu-west-1")
+
+    status, detail = cli_main._verify_check_provider_keys()
+
+    assert "PASS" in status
+    assert "AWS Bedrock" in detail
+    assert "eu-west-1" in detail
+    assert "AKIATEST123456789" not in detail
 
 
 # ── _verify_check_paths ───────────────────────────────────────────────
@@ -555,7 +623,16 @@ def test_verify_summary_reports_warnings(tmp_path: Path) -> None:
     """Warnings produce 'All mandatory checks passed (N warnings)' with exit 0."""
     # Clear all provider env vars so provider keys check warns.
     for var in list(os.environ):
-        if var.startswith(("LISA_", "OPENAI_", "AZURE_", "ANTHROPIC_", "GOOGLE_", "OLLAMA_")):
+        if var.startswith((
+            "LISA_",
+            "OPENAI_",
+            "AZURE_",
+            "ANTHROPIC_",
+            "GOOGLE_",
+            "OLLAMA_",
+            "OPENROUTER_",
+            "AWS_",
+        )):
             os.environ.pop(var, None)
     code, output = _invoke_verify(tmp_path)
     assert code == 0

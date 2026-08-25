@@ -36,7 +36,7 @@ Options:
   --repo-url URL          Git repository URL (default: \$LISA_REPO_URL or org repo)
   --install-dir PATH      Installation directory (default: \$LISA_INSTALL_DIR or ~/lisa-framework)
   --branch NAME           Git branch to clone (default: \$LISA_BRANCH or main)
-  --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,anthropic,google
+    --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,anthropic,google,openrouter,aws
                           (default: \$LISA_PROVIDER or ollama)
   --skip-diagnostics      Skip running lisa verify after install
   --help, -h              Show this help
@@ -60,7 +60,7 @@ readonly MIN_PYTHON_MINOR=11
 # NOTE: env var names use the LISA_* prefix (renamed from LITTLE_LISA_*; no
 # compat aliases). The CLI host reads LISA_* with fallbacks to bare
 # OPENAI_API_KEY / ANTHROPIC_API_KEY / AZURE_OPENAI_* / GOOGLE_API_KEY /
-# OLLAMA_HOST. See host/providers.py and .env.example at the repo root.
+# OLLAMA_HOST / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION.
 declare -A _PROVIDER_LABEL
 _PROVIDER_LABEL[ollama]="Ollama"
 _PROVIDER_LABEL[openai]="OpenAI"
@@ -68,6 +68,7 @@ _PROVIDER_LABEL[azure_openai]="Azure OpenAI"
 _PROVIDER_LABEL[anthropic]="Anthropic"
 _PROVIDER_LABEL[google]="Google Gemini"
 _PROVIDER_LABEL[openrouter]="OpenRouter"
+_PROVIDER_LABEL[aws]="AWS Bedrock"
 
 declare -A _PROVIDER_KEYS
 _PROVIDER_KEYS[ollama]="LISA_OLLAMA_HOST"
@@ -76,6 +77,7 @@ _PROVIDER_KEYS[azure_openai]="LISA_AZURE_OPENAI_ENDPOINT,LISA_AZURE_OPENAI_API_K
 _PROVIDER_KEYS[anthropic]="LISA_ANTHROPIC_API_KEY,LISA_ANTHROPIC_BASE_URL,LISA_ANTHROPIC_VERSION"
 _PROVIDER_KEYS[google]="LISA_GOOGLE_API_KEY,LISA_GOOGLE_API_BASE_URL"
 _PROVIDER_KEYS[openrouter]="LISA_OPENROUTER_API_KEY,LISA_OPENROUTER_BASE_URL"
+_PROVIDER_KEYS[aws]="LISA_AWS_ACCESS_KEY_ID,LISA_AWS_SECRET_ACCESS_KEY,LISA_AWS_REGION"
 
 declare -A _PROVIDER_DEFAULTS
 _PROVIDER_DEFAULTS[ollama]="127.0.0.1:11434"
@@ -84,6 +86,7 @@ _PROVIDER_DEFAULTS[azure_openai]=",,2024-10-21"
 _PROVIDER_DEFAULTS[anthropic]=",https://api.anthropic.com,2023-06-01"
 _PROVIDER_DEFAULTS[google]=",https://generativelanguage.googleapis.com/v1beta/openai/"
 _PROVIDER_DEFAULTS[openrouter]=",https://openrouter.ai/api/v1"
+_PROVIDER_DEFAULTS[aws]=",,us-east-1"
 
 # --- Utility functions -------------------------------------------------------
 

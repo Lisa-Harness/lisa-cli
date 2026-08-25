@@ -73,7 +73,7 @@ param(
     ),
 
     [Parameter()]
-    [ValidateSet("ollama", "openai", "azure_openai", "anthropic", "google", "openrouter")]
+    [ValidateSet("ollama", "openai", "azure_openai", "anthropic", "google", "openrouter", "aws")]
     [string[]]$Provider = @(
         if ($env:LISA_PROVIDER) { $env:LISA_PROVIDER -split "," }
         else { "ollama" }
@@ -90,7 +90,7 @@ $ErrorActionPreference = "Stop"
 # NOTE: env var names use the LISA_* prefix (renamed from LITTLE_LISA_*; no
 # compat aliases). The CLI host reads LISA_* with fallbacks to bare
 # OPENAI_API_KEY / ANTHROPIC_API_KEY / AZURE_OPENAI_* / GOOGLE_API_KEY /
-# OLLAMA_HOST. See host/providers.py and .env.example at the repo root.
+# OLLAMA_HOST / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION.
 $ProviderMeta = @{
     ollama       = @{ Label = "Ollama";       EnvVars = @("LISA_OLLAMA_HOST");         Defaults = @("127.0.0.1:11434") }
     openai       = @{ Label = "OpenAI";       EnvVars = @("LISA_OPENAI_API_KEY");       Defaults = @("") }
@@ -98,6 +98,7 @@ $ProviderMeta = @{
     anthropic    = @{ Label = "Anthropic";    EnvVars = @("LISA_ANTHROPIC_API_KEY", "LISA_ANTHROPIC_BASE_URL", "LISA_ANTHROPIC_VERSION"); Defaults = @("", "https://api.anthropic.com", "2023-06-01") }
     google       = @{ Label = "Google Gemini"; EnvVars = @("LISA_GOOGLE_API_KEY", "LISA_GOOGLE_API_BASE_URL"); Defaults = @("", "https://generativelanguage.googleapis.com/v1beta/openai/") }
     openrouter   = @{ Label = "OpenRouter";   EnvVars = @("LISA_OPENROUTER_API_KEY", "LISA_OPENROUTER_BASE_URL"); Defaults = @("", "https://openrouter.ai/api/v1") }
+    aws          = @{ Label = "AWS Bedrock";  EnvVars = @("LISA_AWS_ACCESS_KEY_ID", "LISA_AWS_SECRET_ACCESS_KEY", "LISA_AWS_REGION"); Defaults = @("", "", "us-east-1") }
 }
 
 function Write-Step {
