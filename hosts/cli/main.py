@@ -704,6 +704,13 @@ def _verify_check_provider_keys() -> tuple[str, str]:
     if ollama_host:
         parts.append(f"Ollama: {ollama_host}")
 
+    openrouter_key = (
+        os.getenv("LISA_OPENROUTER_API_KEY", "").strip()
+        or os.getenv("OPENROUTER_API_KEY", "").strip()
+    )
+    if openrouter_key:
+        parts.append(f"OpenRouter: {_redact_key(openrouter_key)}")
+
     if not parts:
         return _VERIFY_WARN, "No provider keys configured"
     return _VERIFY_PASS, "; ".join(parts)

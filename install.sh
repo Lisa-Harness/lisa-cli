@@ -67,6 +67,7 @@ _PROVIDER_LABEL[openai]="OpenAI"
 _PROVIDER_LABEL[azure_openai]="Azure OpenAI"
 _PROVIDER_LABEL[anthropic]="Anthropic"
 _PROVIDER_LABEL[google]="Google Gemini"
+_PROVIDER_LABEL[openrouter]="OpenRouter"
 
 declare -A _PROVIDER_KEYS
 _PROVIDER_KEYS[ollama]="LISA_OLLAMA_HOST"
@@ -74,6 +75,7 @@ _PROVIDER_KEYS[openai]="LISA_OPENAI_API_KEY"
 _PROVIDER_KEYS[azure_openai]="LISA_AZURE_OPENAI_ENDPOINT,LISA_AZURE_OPENAI_API_KEY,LISA_AZURE_OPENAI_API_VERSION"
 _PROVIDER_KEYS[anthropic]="LISA_ANTHROPIC_API_KEY,LISA_ANTHROPIC_BASE_URL,LISA_ANTHROPIC_VERSION"
 _PROVIDER_KEYS[google]="LISA_GOOGLE_API_KEY,LISA_GOOGLE_API_BASE_URL"
+_PROVIDER_KEYS[openrouter]="LISA_OPENROUTER_API_KEY,LISA_OPENROUTER_BASE_URL"
 
 declare -A _PROVIDER_DEFAULTS
 _PROVIDER_DEFAULTS[ollama]="127.0.0.1:11434"
@@ -81,6 +83,7 @@ _PROVIDER_DEFAULTS[openai]=""
 _PROVIDER_DEFAULTS[azure_openai]=",,2024-10-21"
 _PROVIDER_DEFAULTS[anthropic]=",https://api.anthropic.com,2023-06-01"
 _PROVIDER_DEFAULTS[google]=",https://generativelanguage.googleapis.com/v1beta/openai/"
+_PROVIDER_DEFAULTS[openrouter]=",https://openrouter.ai/api/v1"
 
 # --- Utility functions -------------------------------------------------------
 

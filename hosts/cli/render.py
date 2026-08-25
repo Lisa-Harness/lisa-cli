@@ -28,6 +28,36 @@ if TYPE_CHECKING:
     # (~2s) at module load.
     from host.runtime import HostRuntime as HostRuntime
 
+
+def _format_tokens(tokens: int) -> str:
+    """Format a token budget compactly (e.g. ``256000`` → ``256k``)."""
+
+    tokens = int(tokens or 0)
+    if tokens <= 0:
+        return "—"
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:g}M"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:g}k"
+    return str(tokens)
+
+
+def _format_cost(model: object) -> str:
+    """Format a model's per-token price as $/M-tokens (in/out) when known.
+
+    Reads ``prompt_price`` / ``completion_price`` (per-token USD, the units
+    OpenRouter publishes). Falls back to the qualitative ``cost_tier`` label
+    so providers without pricing still show something, and a dash when
+    neither is present.
+    """
+
+    prompt_price = float(getattr(model, "prompt_price", 0.0) or 0.0)
+    completion_price = float(getattr(model, "completion_price", 0.0) or 0.0)
+    if prompt_price > 0.0 or completion_price > 0.0:
+        return f"${prompt_price * 1e6:g}/${completion_price * 1e6:g}"
+    cost_tier = str(getattr(model, "cost_tier", "") or "").strip()
+    return cost_tier or "—"
+
 # Heavy imports are deferred into the functions that use them so that
 # ``--version`` / ``modes`` / ``models`` / ``verify`` don't pay the cost of
 # ``rich.markdown`` (-> ``markdown_it`` + ``pygments`` ~= 1.4s) or
@@ -86,11 +116,19 @@ def render_models(runtime: HostRuntime, *, console: Console | None = None) -> Ta
     table.add_column("Provider")
     table.add_column("Aliases")
     table.add_column("Reasoning")
+    table.add_column("Context", justify="right")
+    table.add_column("Cost", justify="right")
+    table.add_column("Capabilities")
 
     for model in manifest.models:
         aliases = ", ".join(sorted(model.aliases)) or "—"
         reasoning = "yes" if model.reasoning_model else "no"
-        table.add_row(model.model_id, model.provider, aliases, reasoning)
+        context = _format_tokens(model.context_window)
+        cost = _format_cost(model)
+        capabilities = ", ".join(model.capabilities) or "—"
+        table.add_row(
+            model.model_id, model.provider, aliases, reasoning, context, cost, capabilities
+        )
 
     if console is not None:
         console.print(table)

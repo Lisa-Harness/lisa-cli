@@ -73,7 +73,7 @@ param(
     ),
 
     [Parameter()]
-    [ValidateSet("ollama", "openai", "azure_openai", "anthropic", "google")]
+    [ValidateSet("ollama", "openai", "azure_openai", "anthropic", "google", "openrouter")]
     [string[]]$Provider = @(
         if ($env:LISA_PROVIDER) { $env:LISA_PROVIDER -split "," }
         else { "ollama" }
@@ -97,6 +97,7 @@ $ProviderMeta = @{
     azure_openai = @{ Label = "Azure OpenAI"; EnvVars = @("LISA_AZURE_OPENAI_ENDPOINT", "LISA_AZURE_OPENAI_API_KEY", "LISA_AZURE_OPENAI_API_VERSION"); Defaults = @("", "", "2024-10-21") }
     anthropic    = @{ Label = "Anthropic";    EnvVars = @("LISA_ANTHROPIC_API_KEY", "LISA_ANTHROPIC_BASE_URL", "LISA_ANTHROPIC_VERSION"); Defaults = @("", "https://api.anthropic.com", "2023-06-01") }
     google       = @{ Label = "Google Gemini"; EnvVars = @("LISA_GOOGLE_API_KEY", "LISA_GOOGLE_API_BASE_URL"); Defaults = @("", "https://generativelanguage.googleapis.com/v1beta/openai/") }
+    openrouter   = @{ Label = "OpenRouter";   EnvVars = @("LISA_OPENROUTER_API_KEY", "LISA_OPENROUTER_BASE_URL"); Defaults = @("", "https://openrouter.ai/api/v1") }
 }
 
 function Write-Step {
