@@ -1,5 +1,5 @@
 [project]
-name = "lisa-host-cli"
+name = "lisa-host-cli-umbrella"
 version = "0.1.0"
 description = "Workspace for the Lisa terminal CLI host package"
 requires-python = ">=3.11"
