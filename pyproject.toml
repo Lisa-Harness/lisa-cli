@@ -1,5 +1,5 @@
 [project]
-name = "lisa-host-cli-git-alias"
+name = "lisa-host-cli"
 version = "0.1.0"
 description = "Workspace for the Lisa terminal CLI host package"
 requires-python = ">=3.11"
