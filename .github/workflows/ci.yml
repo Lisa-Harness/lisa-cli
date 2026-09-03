@@ -33,10 +33,10 @@ jobs:
         run: uv sync --extra dev
 
       - name: Format check (ruff)
-        run: uv run ruff format --check hosts
+        run: uv run ruff format --check hosts/cli/src
 
       - name: Lint (ruff)
-        run: uv run ruff check hosts
+        run: uv run ruff check hosts/cli/src
 
       - name: Unit tests (no live)
         run: uv run pytest -m "not live" --tb=short -v

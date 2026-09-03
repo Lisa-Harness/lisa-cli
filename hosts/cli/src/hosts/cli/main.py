@@ -41,12 +41,25 @@ try:
     _FRAMEWORK_ROOT = _framework_root()
     from host.config import default_data_dir as _default_data_dir
 
-    for _env_candidate in (
+    # Honor LISA_DATA_DIR here so tool-mode installs configured with a custom
+    # data dir find their .env before any HostRuntime exists to do the full
+    # config resolution. Falls back to the platform default (~/.lisa).
+    _data_dir_override = os.getenv("LISA_DATA_DIR", "").strip()
+    if _data_dir_override:
+        _default_env_dir = Path(_data_dir_override).expanduser()
+    else:
+        _default_env_dir = _default_data_dir()
+
+    # Module-level search order, shared with _verify_check_env (which reads
+    # this constant so monkeypatched tests and the loader stay in sync).
+    _ENV_SEARCH_CANDIDATES = (
         Path.cwd() / ".env",
-        _default_data_dir() / ".env",
+        _default_env_dir / ".env",
         _FRAMEWORK_ROOT / ".env",
         _FRAMEWORK_ROOT / "hosts" / "little_lisa" / ".env",
-    ):
+    )
+
+    for _env_candidate in _ENV_SEARCH_CANDIDATES:
         if _env_candidate.exists():
             load_dotenv(dotenv_path=_env_candidate, override=False)
             break
@@ -580,17 +593,11 @@ def _verify_check_python() -> tuple[str, str]:
 
 
 def _verify_check_env(runtime: HostRuntime) -> tuple[str, str]:
-    # Check for .env in the same search order as the startup loader:
-    # CWD → ~/.lisa/.env (tool mode) → framework root → hosts/little_lisa/.
-    from host.config import default_data_dir as _default_data_dir
-
-    _root = _framework_root()
-    for candidate in (
-        Path.cwd() / ".env",
-        _default_data_dir() / ".env",
-        _root / ".env",
-        _root / "hosts" / "little_lisa" / ".env",
-    ):
+    # Check for .env in the same search order as the startup loader. The
+    # loader's _ENV_SEARCH_CANDIDATES is module-level so it can be
+    # monkeypatched (tests); CWD still resolves dynamically because pytest's
+    # chdir affects it.
+    for candidate in _ENV_SEARCH_CANDIDATES:
         if candidate.exists():
             return _VERIFY_PASS, f".env found ({candidate})"
     return _VERIFY_WARN, ".env not found. Create one at ~/.lisa/.env with your model provider keys."

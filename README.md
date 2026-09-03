@@ -43,7 +43,8 @@ exists only for discoverability.
 
 ## Development
 
-This repo is a uv workspace whose only member is `hosts/cli/`. The default
+This repo is a uv workspace whose only member is `hosts/cli/` (src layout:
+`hosts/cli/src/hosts/cli/`), matching the framework packages in `../lisa`. The default
 install resolves all framework packages (`lisa-host-runtime`, `lisa-kernel`,
 `lisa-sdk`, `lisa-mcp-servers`, the bundled `lisa-pack-*` packs) from PyPI, so
 the CLI works as a standalone clone with no sibling framework checkout:
