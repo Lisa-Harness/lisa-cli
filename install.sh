@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
 # Lisa Framework installer for Linux/macOS
 #
-# Installs the `lisa` CLI as a uv tool (no repo clone needed), creates
-# ~/.lisa/.env for the selected model providers, and bootstraps the model
-# manifest via `lisa models discover` + `lisa models apply`.
+# Installs the `lisa` CLI as a uv tool, creates ~/.lisa/.env for the selected
+# model providers, and bootstraps the model manifest via `lisa models
+# discover` + `lisa models apply`. After this script, `lisa` works from any
+# directory — no checkout, no `uv run`.
 #
 # Usage examples:
 #   curl -fsSL https://raw.githubusercontent.com/Lisa-Framework/lisa-host-cli/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --provider ollama,openai
 #   curl -fsSL ... | bash -s -- --provider anthropic --skip-diagnostics
 #
-# Until lisa-host-cli is published on PyPI, pass a wheel bundle (a .tar.gz of
-# the release *.whl files, e.g. a GitHub release asset):
-#   curl -fsSL ... | bash -s -- --wheels https://github.com/Lisa-Framework/lisa-host-cli/releases/latest/download/lisa-wheels.tgz
+# Until the packages are published on PyPI, the installer resolves them
+# straight from git (default) or from local checkouts of both repos:
+#   curl -fsSL ... | bash -s --                          # git source (default)
+#   ./install.sh --source local --lisa-repo /home/me/Code/lisa
+#
+# Requires: git (for git-mode installs) and network access to
+# github.com/Lisa-Framework/{lisa-host-cli,lisa}.
 
 set -euo pipefail
 
 # --- Parameter parsing -------------------------------------------------------
 
-# Wheel bundle for pre-PyPI installs. Empty => install from PyPI.
-WHEELS_URL="${LISA_WHEELS_URL:-}"
+# Install source: "git" (resolve packages from GitHub) or "local" (use local
+# checkouts). Empty => git. Local mode needs --lisa-repo (or LISA_GIT_REPO)
+# for the framework repo; the CLI repo defaults to ../cli next to it.
+SOURCE="${LISA_SOURCE:-git}"
+LISA_REPO="${LISA_GIT_REPO:-}"
+CLI_REPO="${LISA_CLI_REPO:-}"
 
 # Default provider: ollama. Accepts comma-separated list.
 IFS=',' read -ra PROVIDERS <<< "${LISA_PROVIDER:-ollama}"
@@ -28,7 +37,9 @@ SKIP_DIAGNOSTICS=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --wheels)         WHEELS_URL="$2";     shift 2 ;;
+        --source)         SOURCE="$2";         shift 2 ;;
+        --lisa-repo)      LISA_REPO="$2";      shift 2 ;;
+        --cli-repo)       CLI_REPO="$2";       shift 2 ;;
         --provider)       IFS=',' read -ra PROVIDERS <<< "$2"; shift 2 ;;
         --skip-diagnostics) SKIP_DIAGNOSTICS=true; shift ;;
         --help|-h)
@@ -39,17 +50,21 @@ Install the Lisa CLI as a uv tool and configure model providers. After this
 script, \`lisa\` works from anywhere — no repo checkout, no \`uv run\`.
 
 Options:
-  --wheels URL            URL of a .tar.gz wheel bundle (pre-PyPI installs).
-                          Can also be set via \$LISA_WHEELS_URL. Supports
-                          file:// URLs for local bundles.
+  --source MODE           Install source: "git" (default) or "local".
+                          Also settable via \$LISA_SOURCE.
+  --lisa-repo DIR         Local checkout of the framework repo (lisa) for
+                          --source local. Also settable via \$LISA_GIT_REPO.
+  --cli-repo DIR          Local checkout of the CLI repo (defaults to
+                          DIR/../cli relative to --lisa-repo).
   --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,
                           anthropic,google,openrouter,aws (default: \$LISA_PROVIDER or ollama)
   --skip-diagnostics      Skip running lisa verify after install
   --help, -h              Show this help
 
 Examples:
-  install.sh --wheels https://github.com/.../lisa-wheels.tgz      # pre-PyPI
-  install.sh                                                       # PyPI (default)
+  install.sh                                   # git source (default)
+  install.sh --source git                      # same, explicit
+  install.sh --source local --lisa-repo ~/Code/lisa
   install.sh --provider ollama,openai
   install.sh --provider anthropic --skip-diagnostics
 HELP
@@ -59,6 +74,10 @@ HELP
 done
 
 # --- Constants ---------------------------------------------------------------
+
+# Package source repos (git mode).
+CLI_REPO_URL="https://github.com/Lisa-Framework/lisa-host-cli.git"
+LISA_REPO_URL="https://github.com/Lisa-Framework/lisa.git"
 
 # Data dir: tool-mode lisa loads .env from here (load order: CWD → ~/.lisa).
 LISA_HOME="${LISA_DATA_DIR:-$HOME/.lisa}"
@@ -124,26 +143,56 @@ install_lisa() {
     # Install (or upgrade) the lisa tool. uv manages the Python interpreter,
     # so no system Python >= 3.11 check is needed here.
     #
-    # NOTE on lisa-sdk: an unrelated "LISA" project owns the lisa-sdk name on
-    # PyPI (v0.2.x). Until that is resolved, pre-PyPI installs pin
-    # lisa-sdk==0.1.0 (our wheels) so the resolver can't grab the foreign
-    # package from the index while satisfying all other deps via --find-links.
-    if [[ -n "$WHEELS_URL" ]]; then
-        local wheels_dir
-        wheels_dir=$(mktemp -d)
-        printf "  Downloading wheel bundle...\n"
-        curl -fsSL "$WHEELS_URL" | tar -xz -C "$wheels_dir"
-        local whl_count
-        whl_count=$(find "$wheels_dir" -maxdepth 2 -name '*.whl' | wc -l)
-        if [[ "$whl_count" -eq 0 ]]; then
-            error_exit "No .whl files found in $WHEELS_URL"
+    # The framework packages (lisa-kernel, lisa-sdk, ...) are not on PyPI yet,
+    # so every install passes --no-sources (ignore the repos' path-based
+    # tool.uv.sources) and supplies each framework package as an explicit
+    # requirement. Git mode points them at GitHub; local mode at checkouts.
+    # The CLI repo is a uv workspace whose umbrella root is not a package;
+    # the installable member lives at hosts/cli (hence #subdirectory).
+    #
+    # Until lisa-sdk is published, the foreign PyPI package of the same name
+    # is irrelevant: the explicit requirement always wins over the index.
+    local -a git_withs=(
+        --with "lisa-host-runtime @ git+${LISA_REPO_URL}#subdirectory=host"
+        --with "lisa-kernel @ git+${LISA_REPO_URL}#subdirectory=kernel"
+        --with "lisa-sdk @ git+${LISA_REPO_URL}#subdirectory=sdk"
+        --with "lisa-mcp-servers @ git+${LISA_REPO_URL}#subdirectory=mcp_server"
+        --with "lisa-pack-core @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/core"
+        --with "lisa-pack-memory @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/memory"
+        --with "lisa-pack-introspect @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/introspect"
+        --with "lisa-pack-recovery @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/recovery"
+    )
+    local cli_requirement
+
+    if [[ "$SOURCE" == "local" ]]; then
+        [[ -n "$LISA_REPO" ]] || error_exit "--source local requires --lisa-repo (or \$LISA_GIT_REPO)"
+        [[ -d "$LISA_REPO" ]] || error_exit "framework repo not found: $LISA_REPO"
+        if [[ -z "$CLI_REPO" ]]; then
+            CLI_REPO="$(dirname "$LISA_REPO")/lisa-hosts/cli"
         fi
-        uv tool install --find-links "$wheels_dir" --with 'lisa-sdk<=0.1.0' lisa-host-cli \
-            || uv tool install --find-links "$wheels_dir" --with 'lisa-sdk<=0.1.0' --reinstall lisa-host-cli
+        [[ -d "$CLI_REPO" ]] || error_exit "CLI repo not found: $CLI_REPO (pass --cli-repo)"
+
+        local -a local_withs=(
+            --with "lisa-host-runtime @ $LISA_REPO/host"
+            --with "lisa-kernel @ $LISA_REPO/kernel"
+            --with "lisa-sdk @ $LISA_REPO/sdk"
+            --with "lisa-mcp-servers @ $LISA_REPO/mcp_server"
+            --with "lisa-pack-core @ $LISA_REPO/sdk/packs/core"
+            --with "lisa-pack-memory @ $LISA_REPO/sdk/packs/memory"
+            --with "lisa-pack-introspect @ $LISA_REPO/sdk/packs/introspect"
+            --with "lisa-pack-recovery @ $LISA_REPO/sdk/packs/recovery"
+        )
+        cli_requirement="lisa-host-cli @ $CLI_REPO/hosts/cli"
+        WITHS=("${local_withs[@]}")
     else
-        uv tool install lisa-host-cli \
-            || uv tool upgrade lisa-host-cli
+        cli_requirement="lisa-host-cli @ git+${CLI_REPO_URL}#subdirectory=hosts/cli"
+        WITHS=("${git_withs[@]}")
     fi
+
+    if ! uv tool install --no-sources "${cli_requirement}" "${WITHS[@]}" 2>/dev/null; then
+        uv tool install --no-sources --reinstall "${cli_requirement}" "${WITHS[@]}"
+    fi
+
     # Make bare `lisa` resolvable for the rest of this script (uv installs
     # executables into ~/.local/bin, which may not be on PATH yet).
     export PATH="$HOME/.local/bin:$PATH"
@@ -306,13 +355,16 @@ main() {
     printf "  ------------------------\n"
     printf "\n"
 
+    if ! have_cmd git; then
+        error_exit "git is required for the ${SOURCE} install source but was not found on PATH"
+    fi
     step 1 5 "Checking uv..."
     install_uv
     local uv_version
     uv_version=$(uv --version 2>/dev/null | cut -d' ' -f2 || echo "installed")
     printf "  OK: uv %s\n" "$uv_version"
 
-    step 2 5 "Installing lisa CLI (uv tool)..."
+    step 2 5 "Installing lisa CLI (uv tool, source: $SOURCE)..."
     install_lisa
     local lisa_version
     lisa_version=$(lisa --version 2>/dev/null | tail -1 || echo "installed")

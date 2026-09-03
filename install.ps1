@@ -8,14 +8,21 @@
     manifest via `lisa models discover` + `lisa models apply`. After this
     script, `lisa` works from any directory — no checkout, no `uv run`.
 
-    Until lisa-host-cli is published on PyPI, pass a wheel bundle (a .tar.gz
-    of the release *.whl files, e.g. a GitHub release asset) via -Wheels:
+    Until the packages are published on PyPI, the installer resolves them
+    straight from git (default) or from local checkouts of both repos:
 
-        .\install.ps1 -Wheels https://github.com/.../lisa-wheels.tgz
+        .\install.ps1 -Source local -LisaRepo C:\Code\lisa
 
-.PARAMETER Wheels
-    URL of a .tar.gz wheel bundle (pre-PyPI installs). Also settable via the
-    LISA_WHEELS_URL environment variable. file:// URLs work for local bundles.
+.PARAMETER Source
+    Install source: "git" (default) resolves the packages from GitHub;
+    "local" uses local checkouts (requires -LisaRepo). Also settable via the
+    LISA_SOURCE environment variable.
+
+.PARAMETER LisaRepo
+    Local checkout of the framework repo (lisa) for -Source local. Also
+    settable via the LISA_GIT_REPO environment variable. The CLI repo
+    defaults to ..\lisa-hosts\cli relative to it (override with
+    LISA_CLI_REPO).
 
 .PARAMETER Provider
     One or more model providers to enable at install time.
@@ -27,8 +34,12 @@
     Skip running lisa verify after installation.
 
 .EXAMPLE
-    # Pre-PyPI install from a wheel bundle
-    .\install.ps1 -Wheels https://github.com/Lisa-Framework/lisa-host-cli/releases/latest/download/lisa-wheels.tgz
+    # Git source (default), Ollama only
+    .\install.ps1
+
+.EXAMPLE
+    # Local checkouts of both repos
+    .\install.ps1 -Source local -LisaRepo C:\Code\lisa
 
 .EXAMPLE
     # PyPI install (default), Ollama only
@@ -49,8 +60,21 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$WheelsUrl = $(
-        if ($env:LISA_WHEELS_URL) { $env:LISA_WHEELS_URL }
+    [ValidateSet("git", "local")]
+    [string]$Source = $(
+        if ($env:LISA_SOURCE) { $env:LISA_SOURCE }
+        else { "git" }
+    ),
+
+    [Parameter()]
+    [string]$LisaRepo = $(
+        if ($env:LISA_GIT_REPO) { $env:LISA_GIT_REPO }
+        else { "" }
+    ),
+
+    [Parameter()]
+    [string]$CliRepo = $(
+        if ($env:LISA_CLI_REPO) { $env:LISA_CLI_REPO }
         else { "" }
     ),
 
@@ -141,62 +165,56 @@ function Install-LisaTool {
     # Install (or upgrade) the lisa tool. uv manages the Python interpreter,
     # so no system Python >= 3.11 check is needed here.
     #
-    # NOTE on lisa-sdk: an unrelated "LISA" project owns the lisa-sdk name on
-    # PyPI (v0.2.x). Until that is resolved, pre-PyPI installs pin lisa-sdk
-    # <=0.1.0 (our wheels) so the resolver can't grab the foreign package
-    # from the index while satisfying all other deps via --find-links.
+    # The framework packages (lisa-kernel, lisa-sdk, ...) are not on PyPI yet,
+    # so every install passes --no-sources (ignore the repos' path-based
+    # tool.uv.sources) and supplies each framework package as an explicit
+    # requirement. Git mode points them at GitHub; local mode at checkouts.
+    # The CLI repo is a uv workspace whose umbrella root is not a package;
+    # the installable member lives at hosts\cli (hence #subdirectory).
+    #
+    # Until lisa-sdk is published, the foreign PyPI package of the same name
+    # is irrelevant: the explicit requirement always wins over the index.
     [CmdletBinding()]
     param()
 
-    if ($WheelsUrl) {
-        $wheelsRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-wheels-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-        New-Item -ItemType Directory -Path $wheelsRoot -Force | Out-Null
+    $lisaRepoUrl = "https://github.com/Lisa-Framework/lisa.git"
+    $cliRepoUrl = "https://github.com/Lisa-Framework/lisa-host-cli.git"
+    $frameworkMembers = @{
+        "lisa-host-runtime" = "host"
+        "lisa-kernel"       = "kernel"
+        "lisa-sdk"          = "sdk"
+        "lisa-mcp-servers"  = "mcp_server"
+        "lisa-pack-core"    = "sdk/packs/core"
+        "lisa-pack-memory"  = "sdk/packs/memory"
+        "lisa-pack-introspect" = "sdk/packs/introspect"
+        "lisa-pack-recovery"   = "sdk/packs/recovery"
+    }
 
-        Write-Host "  Downloading wheel bundle..." -ForegroundColor Cyan
-        $tgzPath = Join-Path $wheelsRoot "wheels.tgz"
-        if ($WheelsUrl -like "file://*") {
-            # file:// URL — local or mounted bundle. Copy with filesystem APIs
-            # (Invoke-WebRequest does not support the file scheme).
-            $sourcePath = $WheelsUrl -replace '^file://', ''
-            if (-not (Test-Path $sourcePath)) {
-                throw "Wheel bundle not found: $sourcePath"
-            }
-            Copy-Item -Path $sourcePath -Destination $tgzPath -Force
+    if ($Source -eq "local") {
+        if (-not $LisaRepo) { throw "-Source local requires -LisaRepo (or `$env:LISA_GIT_REPO)" }
+        if (-not (Test-Path $LisaRepo)) { throw "framework repo not found: $LisaRepo" }
+        if (-not $CliRepo) {
+            $CliRepo = Join-Path (Split-Path $LisaRepo -Parent) "lisa-hosts\cli"
         }
-        else {
-            Invoke-WebRequest -Uri $WheelsUrl -OutFile $tgzPath -UseBasicParsing
-        }
+        if (-not (Test-Path $CliRepo)) { throw "CLI repo not found: $CliRepo (pass -CliRepo)" }
 
-        # Windows 10+ ships bsdtar, which handles .tar.gz natively.
-        tar -xzf $tgzPath -C $wheelsRoot
-        Remove-Item $tgzPath -Force
-
-        # If the archive nested everything under one directory, unwrap it.
-        $wheelsDir = $wheelsRoot
-        if (-not (Get-ChildItem -Path $wheelsRoot -Filter *.whl -ErrorAction SilentlyContinue)) {
-            $subDir = Get-ChildItem -Path $wheelsRoot -Directory |
-                Where-Object { Get-ChildItem $_.FullName -Filter *.whl -ErrorAction SilentlyContinue } |
-                Select-Object -First 1
-            if ($subDir) { $wheelsDir = $subDir.FullName }
-        }
-        if (-not (Get-ChildItem -Path $wheelsDir -Filter *.whl -ErrorAction SilentlyContinue)) {
-            throw "No .whl files found in $WheelsUrl"
-        }
-
-        Write-Host "  Installing lisa from wheel bundle..." -ForegroundColor Cyan
-        & uv tool install --find-links $wheelsDir --with "lisa-sdk<=0.1.0" lisa-host-cli
-        if ($LASTEXITCODE -ne 0) {
-            & uv tool install --find-links $wheelsDir --with "lisa-sdk<=0.1.0" --reinstall lisa-host-cli
-            if ($LASTEXITCODE -ne 0) { throw "uv tool install failed (exit $LASTEXITCODE)" }
-        }
-        Remove-Item -Recurse -Force $wheelsRoot -ErrorAction SilentlyContinue
+        $cliRequirement = "lisa-host-cli @ $(Join-Path $CliRepo "hosts\cli")"
+        $withArgs = @($frameworkMembers.Keys | ForEach-Object {
+            "--with", "$_ @ $(Join-Path $LisaRepo $frameworkMembers[$_])"
+        })
     }
     else {
-        & uv tool install lisa-host-cli
-        if ($LASTEXITCODE -ne 0) {
-            & uv tool upgrade lisa-host-cli
-            if ($LASTEXITCODE -ne 0) { throw "uv tool install/upgrade failed (exit $LASTEXITCODE)" }
-        }
+        $cliRequirement = "lisa-host-cli @ git+$cliRepoUrl#subdirectory=hosts/cli"
+        $withArgs = @($frameworkMembers.Keys | ForEach-Object {
+            "--with", "$_ @ git+$lisaRepoUrl#subdirectory=$($frameworkMembers[$_])"
+        })
+    }
+
+    Write-Host "  Installing lisa (uv tool, source: $Source)..." -ForegroundColor Cyan
+    & uv tool install --no-sources $cliRequirement @withArgs
+    if ($LASTEXITCODE -ne 0) {
+        & uv tool install --no-sources --reinstall $cliRequirement @withArgs
+        if ($LASTEXITCODE -ne 0) { throw "uv tool install failed (exit $LASTEXITCODE)" }
     }
 
     # Make bare `lisa` resolvable for the rest of this script (uv installs

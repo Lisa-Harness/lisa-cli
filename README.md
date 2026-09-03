@@ -4,13 +4,20 @@ Terminal CLI host for the [Lisa framework](https://github.com/Lisa-Framework/lis
 
 ## Install
 
+Run the installer (works pre-PyPI: it resolves the packages straight from
+git and wires up `~/.lisa/.env`):
+
 ```bash
-uv tool install lisa-host-cli
+curl -fsSL https://raw.githubusercontent.com/Lisa-Framework/lisa-host-cli/main/install.sh | bash
 ```
 
-Or with pip:
+The installer accepts the same options as a direct `uv tool install`
+(e.g. `--provider ollama,openai`, `--source local --lisa-repo ~/Code/lisa`).
+
+Or with pip / uv directly:
 
 ```bash
+uv tool install lisa-host-cli
 pip install lisa-host-cli
 ```
 
@@ -44,33 +51,26 @@ exists only for discoverability.
 ## Development
 
 This repo is a uv workspace whose only member is `hosts/cli/` (src layout:
-`hosts/cli/src/hosts/cli/`), matching the framework packages in `../lisa`. The default
-install resolves all framework packages (`lisa-host-runtime`, `lisa-kernel`,
-`lisa-sdk`, `lisa-mcp-servers`, the bundled `lisa-pack-*` packs) from PyPI, so
-the CLI works as a standalone clone with no sibling framework checkout:
-
-```bash
-git clone https://github.com/Lisa-Framework/lisa-host-cli.git
-cd lisa-host-cli
-uv sync --extra dev
-uv run lisa --help
-```
-
-### Developing against framework HEAD
-
-When a sibling `../lisa` framework checkout is present, uncomment the
-`[tool.uv.sources]` path overrides in `pyproject.toml` to resolve the
-framework packages as editable path deps instead of from PyPI:
+`hosts/cli/src/hosts/cli/`), matching the framework packages in the sibling
+`../lisa` checkout. The layout is:
 
 ```text
-c:\Code\
+Code/
 ├── lisa/              # framework (kernel, sdk, mcp_server, host)
-└── lisa-host-cli/     # this repo
+└── lisa-hosts/
+    └── cli/           # this repo
 ```
 
+Until the framework packages are published to PyPI, a clone needs the
+sibling framework checkout:
+
 ```bash
-cd lisa-host-cli
-# edit pyproject.toml: uncomment the lisa-* path sources
+git clone https://github.com/Lisa-Framework/lisa-hosts-cli.git lisa-hosts
+# (cli is the lisa-hosts repo; lisa is the framework repo)
+git clone https://github.com/Lisa-Framework/lisa.git
+
+cd lisa-hosts/cli
+# edit pyproject.toml: uncomment the lisa-* path sources (sibling ../lisa)
 uv sync --extra dev
 uv run pytest -m "not live"
 uv run lisa --help
