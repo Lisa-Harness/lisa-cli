@@ -327,6 +327,7 @@ def _initialize_runtime(
     state_snapshot_path: str,
     streaming: str = "",
     host_log_path: str = "",
+    in_process_mcp: bool = False,
 ) -> HostRuntime:
     """Build and wire a HostRuntime from CLI args + env vars.
 
@@ -357,6 +358,7 @@ def _initialize_runtime(
         state_snapshot_path=state_snapshot_path,
         streaming=streaming,
         host_log_path=host_log_path,
+        in_process_mcp=in_process_mcp,
     )
 
 
@@ -1315,6 +1317,7 @@ def _once_command(
         state_snapshot_path=state_snapshot,
         streaming=streaming,
         host_log_path=host_log,
+        in_process_mcp=True,
     )
     if runtime is None:
         return
