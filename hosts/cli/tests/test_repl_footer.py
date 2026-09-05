@@ -16,8 +16,9 @@ from typing import Any
 import pytest
 from host.operator_signal import OperatorSignal
 from host.runtime import HostRuntime, TurnContext
-from hosts.cli.repl import _render_turn_footer
 from rich.console import Console
+
+from hosts.cli.repl import _render_turn_footer
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
@@ -152,7 +153,7 @@ def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
     registered_keys: list[str] = []
 
     class _BindingsRejectingShiftEnter:
-        def add(self, key: str) -> Any:
+        def add(self, key: str, **_kwargs: Any) -> Any:
             if key == "s-enter":
                 raise ValueError("Invalid key: s-enter")
             registered_keys.append(key)

@@ -30,6 +30,27 @@ lisa once "summarize the thread"   # run a single turn non-interactively
 lisa --help     # show all commands
 ```
 
+### Approvals
+
+Commands execute without an approval prompt only when the bash pack reports a
+working, contained Bubblewrap sandbox. Missing, degraded, or unknown sandbox
+state fails closed and shows an approval panel instead. In the REPL, use `y` to
+approve, `n` to deny, `a` to approve and remember a command prefix, `v` to show
+the panel again, or `Esc` to dismiss it. Explicit commands remain available:
+
+```bash
+/approve <request-id>
+/deny <request-id>
+/approve <request-id> --remember [command-prefix]
+```
+
+The host reads `${LISA_DATA_DIR:-~/.lisa}/policy.yaml` for durable policy. The
+default is `mode: ask` with `sandbox_downgrade: true`. Rules are checked in the
+order `deny`, `ask`, then `allow`; a remembered rule is scoped to the tool and
+the command prefix, rather than granting broad shell access. `external_write`
+actions always require an explicit policy decision because they leave the
+sandbox boundary.
+
 ### Lazy `once` routing
 
 Set `LISA_ONCE_UNKNOWN=1` (or pass `--once-unknown`) to let an unrecognized

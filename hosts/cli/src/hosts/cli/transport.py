@@ -190,6 +190,11 @@ class RichTransport:
         self._fork_total: int = 0
         # The mode that currently owns the turn, tracked across stage events.
         self._current_mode: str = ""
+        # Pending approval payload captured from ``data["approval"]`` on the
+        # final response. When non-None the approval panel just rendered and the
+        # y/n/a/v keystroke bindings (keys.py) are armed to decide it without
+        # the operator retyping the request id. Cleared on the next turn start.
+        self.pending_approval: dict[str, Any] | None = None
         # ── The transcript: one ordered list of rows ────────────────────
         self._rows: list[_Row] = []
         # Per-iteration model-call durations for the current turn (sparkline).
@@ -275,6 +280,9 @@ class RichTransport:
         self._fork_children = {}
         self._fork_total = 0
         self._current_mode = ""
+        # A decision was made (or is about to be made) — disarm the approval
+        # keystrokes from the prior turn so a stale pending state can't fire.
+        self.pending_approval = None
         self._rows = []
         self._iteration_durations = []
         self._model_call_count = 0
@@ -1123,6 +1131,18 @@ class RichTransport:
         """
         self.stop_thinking(flush_transcript=False)
         self._answer_staging = Text()
+        # Capture a pending approval and render the keystroke panel. The host
+        # attaches ``data["approval"]`` when a turn paused on an action the
+        # policy engine decided still needs the operator; the panel shows the
+        # command + sandbox containment and arms the y/n/a/v bindings for a
+        # single-keypress decision instead of retyping ``/approve <uuid>``.
+        approval = (data or {}).get("approval")
+        if isinstance(approval, dict) and approval.get("request_id"):
+            from hosts.cli.render import render_approval_panel  # noqa: PLC0415
+
+            self.pending_approval = approval
+            render_approval_panel(approval, console=self.console)
+            return
         if text:
             self.console.print(Rule(title="Response", style=STYLE_BORDER_RESPONSE))
             self.console.print(Markdown(text))

@@ -41,6 +41,12 @@ from hosts.cli.transport import RichTransport
 
 logger = logging.getLogger(__name__)
 
+#: prompt_toolkit filter helper; imported lazily (optional dependency).
+try:
+    from prompt_toolkit.filters import Condition as _PTCondition
+except ImportError:  # pragma: no cover - optional dependency
+    _PTCondition = None  # type: ignore[assignment,misc]
+
 #: Window within which a second SIGINT/Ctrl+C constitutes a double-tap and
 #: escalates to TERMINATE (force-quit) instead of cooperative cancel.
 _DOUBLE_TAP_WINDOW_S = 2.0
@@ -115,6 +121,20 @@ class TerminalSignalDispatcher:
     def request_toggle_thinking(self) -> None:
         """Toggle thinking visibility in the transport."""
         self._transport.toggle_thinking()
+
+    def render_approval_view(self) -> None:
+        """Re-render the armed approval panel (the 'v' view binding).
+
+        Reads the pending payload from the transport and re-renders it here —
+        the dispatcher owns the console, so this keeps key bindings from
+        reaching private plumbing.
+        """
+        payload = self._transport.pending_approval
+        if payload is None:
+            return
+        from hosts.cli.render import render_approval_panel  # noqa: PLC0415
+
+        render_approval_panel(payload, console=self._console)
 
     def request_interrupt(self) -> None:
         """Request a cooperative cancel (first Ctrl+C) with double-tap escalation.
@@ -326,7 +346,70 @@ def build_repl_key_bindings(
         dispatcher.request_terminate()
         _invalidate_repl_toolbar(event)
 
+    _add_approval_bindings(bindings, transport, dispatcher)
+
     return bindings
+
+
+def _current_repl_input() -> str:
+    """Return the current REPL input buffer text ("" when unreadable)."""
+    try:
+        from prompt_toolkit.application import get_app  # noqa: PLC0415
+
+        return str(get_app().current_buffer.text or "")
+    except Exception:  # pylint: disable=broad-except
+        return ""
+
+
+def _add_approval_bindings(
+    bindings: Any,
+    transport: RichTransport,
+    dispatcher: TerminalSignalDispatcher,
+) -> None:
+    """Attach the y/n/a/v/Esc approval-decision bindings to ``bindings``.
+
+    When a turn pauses on an approval, the transport stashes the payload in
+    ``transport.pending_approval`` and the approval panel shows y/n/a/v. These
+    bindings are gated by a Condition so they intercept ONLY while a decision is
+    armed and the input box is empty — otherwise y/n/a flow through as typed
+    text. Deciding submits a slash command as the prompt result, which the REPL
+    loop routes through handle_message -> the host (/approve, /deny, or
+    /approve --remember). Split out of ``build_repl_key_bindings`` to keep that
+    function under the lint branch/statement ceilings.
+    """
+    if _PTCondition is None:
+        return
+    _armed = _PTCondition(
+        lambda: transport.pending_approval is not None and not _current_repl_input()
+    )
+
+    def _arm(command: str) -> None:
+        # Consume the arm and submit the decision as the prompt's result.
+        request_id = (transport.pending_approval or {}).get("request_id", "")
+        transport.pending_approval = None
+        return command.format(id=request_id)
+
+    def _make_decision(template: str) -> Any:
+        def _handler(event: Any) -> None:
+            text = _arm(template)
+            event.app.exit(result=text)
+
+        return _handler
+
+    bindings.add("y", filter=_armed)(_make_decision("/approve {id}"))
+    bindings.add("n", filter=_armed)(_make_decision("/deny {id}"))
+    bindings.add("a", filter=_armed)(_make_decision("/approve {id} --remember"))
+
+    @bindings.add("v", filter=_armed)
+    def _approval_view(event: Any) -> None:
+        # Re-render the panel (the payload already carries the full command).
+        dispatcher.render_approval_view()
+
+    @bindings.add("escape", filter=_armed)
+    def _approval_dismiss(event: Any) -> None:
+        # Esc dismisses the panel without deciding: disarm and return to the
+        # (empty) prompt so the operator can read/scroll and use /approve.
+        transport.pending_approval = None
 
 
 def _invalidate_repl_toolbar(event: Any) -> None:

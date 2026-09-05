@@ -114,7 +114,7 @@ def test_all_key_bindings_register_and_dispatch(
     registered_callbacks: dict[str, Any] = {}
 
     class _RecordBindings:
-        def add(self, k: str) -> Any:
+        def add(self, k: str, filter: Any = None, **kwargs: Any) -> Any:  # noqa: A002
             registered_keys.append(k)
 
             def _decorate(callback: Any) -> Any:

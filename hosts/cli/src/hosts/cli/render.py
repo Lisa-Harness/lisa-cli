@@ -19,6 +19,7 @@ from kernel.tools.mcp_client import MCPToolSpec
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 if TYPE_CHECKING:
     # ``HostRuntime`` is used only as a string annotation (stringified by
@@ -58,6 +59,7 @@ def _format_cost(model: object) -> str:
     cost_tier = str(getattr(model, "cost_tier", "") or "").strip()
     return cost_tier or "—"
 
+
 # Heavy imports are deferred into the functions that use them so that
 # ``--version`` / ``modes`` / ``models`` / ``verify`` don't pay the cost of
 # ``rich.markdown`` (-> ``markdown_it`` + ``pygments`` ~= 1.4s) or
@@ -68,6 +70,14 @@ def _format_cost(model: object) -> str:
 STYLE_BORDER_SESSION = "steel_blue3"
 STYLE_BORDER_RESPONSE = "dark_sea_green4"
 STYLE_BORDER_CATALOG = "slate_blue1"
+STYLE_BORDER_APPROVAL = "gold3"
+STYLE_CONTAINMENT_CONTAINED = "dark_sea_green4"
+STYLE_CONTAINMENT_DEGRADED = "gold3"
+STYLE_CONTAINMENT_NONE = "indian_red"
+STYLE_TEXT_MUTED = "grey58"
+STYLE_TEXT_PRIMARY = "bright_white"
+STYLE_ROW_MODEL = "dark_sea_green4"
+_SECONDS_PER_MINUTE = 60
 
 
 def render_modes(runtime: HostRuntime, *, console: Console | None = None) -> Table:
@@ -344,7 +354,105 @@ def render_markdown_panel(
     return panel
 
 
+def _containment_badge(containment: str) -> tuple[str, str]:
+    """Return (label, style) for a sandbox containment state."""
+    state = (containment or "unknown").strip().lower()
+    if state == "contained":
+        return "CONTAINED (sandbox)", STYLE_CONTAINMENT_CONTAINED
+    if state == "degraded":
+        return "DEGRADED — sandbox cannot run", STYLE_CONTAINMENT_DEGRADED
+    return "NOT SANDBOXED", STYLE_CONTAINMENT_NONE
+
+
+def _format_approval_expiry(seconds: object) -> str:
+    """Format a host-supplied approval TTL for compact panel display."""
+    try:
+        remaining = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if remaining == 0:
+        return "expires now"
+    if remaining < _SECONDS_PER_MINUTE:
+        return f"expires in {remaining}s"
+    minutes, seconds = divmod(remaining, _SECONDS_PER_MINUTE)
+    if minutes < _SECONDS_PER_MINUTE:
+        return f"expires in {minutes}m {seconds}s"
+    hours, minutes = divmod(minutes, _SECONDS_PER_MINUTE)
+    return f"expires in {hours}h {minutes}m"
+
+
+def render_approval_panel(
+    payload: dict[str, object],
+    *,
+    console: Console | None = None,
+) -> Panel:
+    """Render the keystroke approval panel for a pending action.
+
+    ``payload`` is the structured ``data["approval"]`` the host attaches to the
+    turn response (``lisa.approval.v1``). It shows the tool/pack and effect
+    tier, the proposed command, the sandbox containment badge, and the
+    decision hints. The host decides approve/ask/deny and owns the policy
+    write; this function only renders — it never decides.
+    """
+
+    target = f"{payload.get('pack_id') or ''}:{payload.get('target_id') or ''}".strip(":")
+    effect = str(payload.get("effect") or "").strip() or "execute"
+    command = str(payload.get("command") or "").strip()
+    preview = str(payload.get("preview") or "").strip()
+    request_id = str(payload.get("request_id") or "").strip()
+    containment, containment_style = _containment_badge(str(payload.get("containment") or ""))
+    reasons = str(payload.get("containment_reasons") or "").strip()
+    policy_reason = str(payload.get("policy_reason") or "").strip()
+    policy_tier = str(payload.get("policy_tier") or "").strip()
+    expiry = _format_approval_expiry(payload.get("expires_in_seconds"))
+
+    body = Text()
+    body.append(f"{preview or 'Run an action'}\n", style=STYLE_TEXT_PRIMARY)
+    if command:
+        body.append("\n$ ", style=STYLE_TEXT_MUTED)
+        body.append(command + "\n", style="bright_white")
+    body.append("\ntool   ", style=STYLE_TEXT_MUTED)
+    body.append(f"{target or '(unknown)'}\n")
+    body.append("effect ", style=STYLE_TEXT_MUTED)
+    body.append(f"{effect}\n")
+    body.append("scope  ", style=STYLE_TEXT_MUTED)
+    body.append(f"{containment}\n", style=containment_style)
+    if reasons:
+        body.append("       ", style=STYLE_TEXT_MUTED)
+        body.append(f"{reasons}\n", style=STYLE_CONTAINMENT_DEGRADED)
+    if policy_reason:
+        body.append("policy ", style=STYLE_TEXT_MUTED)
+        if policy_tier:
+            body.append(f"{policy_tier}: ")
+        body.append(policy_reason + "\n", style=STYLE_TEXT_MUTED)
+    if expiry:
+        body.append(expiry + "\n", style=STYLE_TEXT_MUTED)
+
+    body.append("\n[y]", style=STYLE_CONTAINMENT_CONTAINED)
+    body.append(" approve   ", style=STYLE_TEXT_MUTED)
+    body.append("[n]", style=STYLE_CONTAINMENT_NONE)
+    body.append(" deny   ", style=STYLE_TEXT_MUTED)
+    body.append("[a]", style=STYLE_ROW_MODEL)
+    body.append(" always (remember)   ", style=STYLE_TEXT_MUTED)
+    body.append("[v]", style=STYLE_TEXT_PRIMARY)
+    body.append(" view   ", style=STYLE_TEXT_MUTED)
+    body.append("[esc]", style=STYLE_TEXT_MUTED)
+    body.append(" dismiss\n", style=STYLE_TEXT_MUTED)
+    body.append(f"  /approve {request_id}  or  /deny {request_id}", style=STYLE_TEXT_MUTED)
+
+    panel = Panel(
+        body,
+        title="Approval required",
+        border_style=STYLE_BORDER_APPROVAL,
+        padding=(0, 1),
+    )
+    if console is not None:
+        console.print(panel)
+    return panel
+
+
 __all__ = [
+    "render_approval_panel",
     "render_markdown_panel",
     "render_mcp_server_tools",
     "render_mcp_servers",
