@@ -240,10 +240,6 @@ generate_env_file() {
             done
             printf "\n"
         done
-
-        printf "# --- Web search (optional) ---\n"
-        printf "# WEB_SEARCH_API_KEY=   <-- fill in to enable /search\n"
-        printf "\n"
     } > "$env_file"
 
     printf "  Created %s — %d provider(s) configured\n" "$env_file" "${#PROVIDERS[@]}"
@@ -335,7 +331,7 @@ post_install_guidance() {
         printf "  Ollama selected — make sure it's installed and models pulled:\n"
         printf "    curl -fsSL https://ollama.com/install.sh | sh\n"
         printf "    ollama pull llama3.2:latest\n"
-        printf "    ollama pull qwen2.5:7b\n"
+        printf "    ollama pull gemma4:cloud\n"
         printf "\n"
         printf "  Then refresh the manifest:\n"
         printf "    lisa models discover && lisa models apply\n"
