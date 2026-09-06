@@ -19,7 +19,7 @@ import typer
 
 # Load .env BEFORE injecting the packs venv site-packages so that
 # LISA_DATA_DIR (and LISA_PACKS_VENV) are honored when resolving the
-# packs venv location. The loader only needs framework_root() and
+# packs venv (``<data_dir>/venv``) location. The loader only needs framework_root() and
 # default_data_dir(), both of which are env-independent, so it can run
 # safely before any host import. Search order:
 #   (1) CWD — for repo-mode dev sessions
