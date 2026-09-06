@@ -307,6 +307,15 @@ StreamingOption = Annotated[
         ),
     ),
 ]
+QuietOption = Annotated[
+    bool,
+    typer.Option(
+        "--quiet",
+        "-q",
+        help="Suppress the once-mode activity line, per-tool lines, and the "
+        "⚡ footer so the response is the only output (pipe-friendly).",
+    ),
+]
 # ---------------------------------------------------------------------------
 # Runtime initialization (builds HostRuntime, not _RUNTIME_STATE)
 # ---------------------------------------------------------------------------
@@ -1303,6 +1312,7 @@ def _once_command(
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
     host_log: HostLogOption = "",
+    quiet: QuietOption = False,
 ) -> None:
     runtime = _initialize_runtime_or_exit(
         log_level=log_level,
@@ -1321,12 +1331,14 @@ def _once_command(
     )
     if runtime is None:
         return
-    restart_required = asyncio.run(_run_once_with_teardown(runtime, message))
+    restart_required = asyncio.run(_run_once_with_teardown(runtime, message, quiet=quiet))
     if restart_required:
         _exit_restart_required()
 
 
-async def _run_once_with_teardown(runtime: HostRuntime, message: str) -> bool:
+async def _run_once_with_teardown(
+    runtime: HostRuntime, message: str, *, quiet: bool = False
+) -> bool:
     """Run one turn, then close the MCP pool.
 
     Returns ``True`` if the runtime flagged a restart as required (e.g.
@@ -1334,13 +1346,15 @@ async def _run_once_with_teardown(runtime: HostRuntime, message: str) -> bool:
     notice instead of a clean exit.
     """
     from host.handle_message import handle_message
-    from hosts.cli.transport import RichTransport
+    from hosts.cli.transport import OnceTransport
 
-    transport = RichTransport(console=console)
+    transport = OnceTransport(console=console, quiet=quiet)
+    transport.start_turn(message)
     try:
         await runtime.start()
         await handle_message(runtime, message, transport)
     finally:
+        transport.stop_activity()
         await runtime.aclose()
     return runtime.restart_required
 

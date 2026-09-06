@@ -42,7 +42,7 @@ from hosts.cli.keys import (
     build_repl_key_bindings,
     install_loop_signal_handlers,
 )
-from hosts.cli.transport import RichTransport
+from hosts.cli.transport import OnceTransport, RichTransport
 
 logger = logging.getLogger(__name__)
 
@@ -335,8 +335,9 @@ async def _process_repl_turn(
     # is stopped by the transport on the first on_stage/on_response/
     # on_error/on_text_chunk. The stage is "dispatch" — the pre-pipeline
     # phase (command parse, start_mode bypass, current_mode_id selection).
-    # There is no separate router; handoff is mid-turn via transition_stage.
-    if isinstance(transport, RichTransport):
+    # there is no message banner to pin and the turn is driven by the host
+    # session runner, not the transport.
+    if isinstance(transport, RichTransport) and not isinstance(transport, OnceTransport):
         # Pin the submitted prompt to the top of the Live region (ask 1).
         transport.start_thinking(
             "dispatch",

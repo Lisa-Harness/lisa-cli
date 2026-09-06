@@ -90,6 +90,18 @@ def _truncate(value: str, limit: int = _ARG_PREVIEW_MAX) -> str:
     return value[: limit - 1] + "…"
 
 
+def _format_tokens(tokens: int) -> str:
+    """Format a token count compactly for the status/footer (``256k``)."""
+    tokens = int(tokens or 0)
+    if tokens <= 0:
+        return "—"
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:g}M"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:g}k"
+    return str(tokens)
+
+
 class _TrailingSpinner:
     """A Live-compatible renderable that puts the spinner *after* the line.
 
@@ -194,6 +206,12 @@ class RichTransport:
         # final response. When non-None the approval panel just rendered and the
         # y/n/a/v keystroke bindings (keys.py) are armed to decide it without
         # the operator retyping the request id. Cleared on the next turn start.
+        # When False, per-row ``[mode]`` prefixes are suppressed — the mode
+        # already appears once on the REPL status header and the once-mode
+        # activity line, so repeating it down every transcript row is noise.
+        self.with_prefix: bool = True
+        # Mode-only change while no Live region is up (REPL) is silent; once
+        # mode emits a single handoff line itself.
         self.pending_approval: dict[str, Any] | None = None
         # ── The transcript: one ordered list of rows ────────────────────
         self._rows: list[_Row] = []
@@ -205,6 +223,8 @@ class RichTransport:
         # Running counters for the graphic column.
         self._handoff_count: int = 0
         self._tool_call_count: int = 0
+        self._tool_ok_count: int = 0
+        self._tool_error_count: int = 0
         # ── Live status-header state (persistent, updated per stage) ─────
         # A fixed status bar rendered at the top of the Live region so
         # mode / model / token count stay visible and update instantly while
@@ -224,6 +244,11 @@ class RichTransport:
         # perf_counter() captured at start_thinking so the status header can
         # show elapsed seconds without a wall-clock dependency.
         self._turn_started_perf: float = 0.0
+        # Compact once mode: suppress the Workflow summary Panel and heavy
+        # transcript chrome — the activity line carries mode/model/progress
+        # and a single ⚡ footer line replaces the grid (ask: once output is
+        # vertically efficient, per-turn, pipe-friendly).
+        self.compact: bool = False
         # ── Per-turn caps (ask 3) ────────────────────────────────────────
         # The max_* caps surfaced by stage events, stored so the always-on
         # status-header cap strip and _aggregate_progress can read them
@@ -288,6 +313,8 @@ class RichTransport:
         self._model_call_count = 0
         self._handoff_count = 0
         self._tool_call_count = 0
+        self._tool_ok_count = 0
+        self._tool_error_count = 0
         self._status_current_model = ""
         self._status_model_provider = ""
         self._status_turn_tokens = 0
@@ -780,13 +807,21 @@ class RichTransport:
             self._rows[-1].active = True
 
     def _append_transition(self, from_mode: str, to_mode: str, data: dict[str, Any]) -> None:
-        """Append a mode-transition row."""
+        """Append a mode-transition row.
+
+        Compact mode renders the handoff as a bare ``↦ from → to`` line — the
+        destination mode already surfaces on the activity line and (via
+        ``handoff``) the workflow footer, so the bracket form is redundant.
+        """
         arrow = "→" if from_mode else "⇥"
-        text = f"[{to_mode}] handoff: {from_mode or 'start'} {arrow} {to_mode}"
         max_handoffs = int(data.get("max_handoffs") or 0)
         # Track the cap for the always-on status header and aggregate progress.
         if max_handoffs > self._max_handoffs:
             self._max_handoffs = max(self._max_handoffs, max_handoffs)
+        if self.compact:
+            text = f"↦ {from_mode or 'start'} {arrow} {to_mode}"
+        else:
+            text = f"[{to_mode}] handoff: {from_mode or 'start'} {arrow} {to_mode}"
         self._append_row(
             _Row(
                 kind="transition",
@@ -898,12 +933,16 @@ class RichTransport:
             total_tokens = data.get("_state.total_tokens") or data.get("total_tokens")
         if status_glyph and total_tokens not in (None, "", 0):
             body += f" {total_tokens} tok"
-        return f"{prefix}{body}"
+        return self._with_mode_prefix(prefix, body)
 
     def _complete_tool_row(self, data: dict[str, Any]) -> None:
         """Update the in-flight tool row in place with its status + duration."""
         ok = data.get("ok")
         status = "ok" if ok is True else ("error" if ok is False else "")
+        if status == "ok":
+            self._tool_ok_count += 1
+        elif status == "error":
+            self._tool_error_count += 1
         glyph = _TOOL_STATUS_GLYPH.get(status, _TOOL_STATUS_GLYPH[""])
         if self._open_tool_row is not None and self._open_tool_row < len(self._rows):
             row = self._rows[self._open_tool_row]
@@ -930,7 +969,16 @@ class RichTransport:
         """
         data = data or {}
         prefix = f"[{self._current_mode}] " if self._current_mode else ""
-        return f"{prefix}stage: {label}"
+        return self._with_mode_prefix(prefix, f"stage: {label}")
+
+    def _with_mode_prefix(self, prefix: str, body: str) -> str:
+        """Apply the ``[mode]`` prefix unless row prefixes are suppressed.
+
+        When ``with_prefix`` is False the mode lives on the REPL status
+        header and the once-mode activity line, so repeating it down every
+        transcript row is noise — the body renders un-prefixed.
+        """
+        return f"{prefix}{body}" if self.with_prefix else body
 
     # ── tool_dispatch legible rendering ──────────────────────────────
     _TOOL_KIND_GLYPH: ClassVar[dict[str, str]] = {
@@ -980,15 +1028,33 @@ class RichTransport:
         duration = (complete or data).get("duration_ms")
         if status_glyph and duration not in (None, "", 0):
             body += f" {round(float(duration))}ms"
-        return f"{prefix}{body}"
+        return self._with_mode_prefix(prefix, body)
 
     @staticmethod
     def _primary_arg_preview(data: dict[str, Any]) -> str:
-        """Extract the primary call argument as a short inline preview."""
-        for key in ("arg_preview", "query", "path", "command", "input"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return _truncate(value)
+        """Extract the primary call argument as a short inline preview.
+
+        Prefers the kernel-resolved ``display`` label (rendered from the
+        tool's ``display_template`` — e.g. bash_run's command line), falling
+        back to the first present among the well-known primary-argument keys
+        for tools whose payload pre-dates the field or whose template failed.
+        """
+        display = data.get("display")
+        if isinstance(display, str) and display.strip():
+            return _truncate(display.strip())
+        # Fallback: first non-empty primary-argument string. The kernel emits
+        # the full argument dict under ``arguments``; a tool without a
+        # ``display_template`` (or one whose template failed) previews its
+        # primary argument here.
+        arguments = data.get("arguments")
+        sources: list[dict[str, Any]] = [data]
+        if isinstance(arguments, dict):
+            sources.append(arguments)
+        for source in sources:
+            for key in ("arg_preview", "query", "path", "command", "input"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    return _truncate(value)
         return ""
 
     def _render_fork_stage(self, summary: tuple[int, int] | None = None) -> str:
@@ -1022,16 +1088,45 @@ class RichTransport:
 
     # ── Streaming / response / debug / error ────────────────────────
 
+    def _print_once_footer(self) -> None:
+        """Render the single-line once-mode footer.
+
+        ``⚡ 22s · 5 tools · 2 models · 1 handoff · 8.4k tok`` — one line,
+        per-turn only; the REPL-style token split (turn/session) collapses
+        here because a ``once`` invocation is one process and one turn.
+        """
+        model_time_ms = round(sum(self._iteration_durations))
+        tools_total = self._tool_call_count
+        tool_failures = self._tool_error_count
+        parts: list[str] = [f"⚡ {self._elapsed_seconds()}s"]
+        parts.append(f"{tools_total} tool{'s' if tools_total != 1 else ''}")
+        if tool_failures:
+            parts[-1] += f" ({tools_total - tool_failures} ✓ {tool_failures} ✗)"
+        parts.append(f"{self._model_call_count} model{'s' if self._model_call_count != 1 else ''}")
+        if model_time_ms:
+            parts[-1] += f" ({model_time_ms}ms)"
+        if self._handoff_count:
+            parts.append(f"{self._handoff_count} handoff{'s' if self._handoff_count != 1 else ''}")
+            route = self._current_mode
+            if route:
+                parts[-1] += f" → {route}"
+        if self._status_turn_tokens:
+            parts.append(f"{_format_tokens(self._status_turn_tokens)} tok")
+        self.console.print(Text(" · ".join(parts), style=STYLE_TEXT_MUTED))
+
     def _render_workflow_summary(self) -> None:
-        """Render the compact execution summary beneath a successful response."""
+        """Render the post-response summary: compact ⚡ line once, grid in REPL."""
+        if self.compact:
+            self._print_once_footer()
+            return
         from rich.table import Table
 
         tools = [r for r in self._rows if r.kind == "tool"]
         transitions = [r for r in self._rows if r.kind == "transition"]
         forks = [r for r in self._rows if r.kind == "fork"]
 
-        ok = sum(1 for row in tools if "✓" in row.text)
-        failed = sum(1 for row in tools if "✗" in row.text)
+        ok = self._tool_ok_count
+        failed = self._tool_error_count
         model_time_ms = round(sum(self._iteration_durations))
         route = self._current_mode or "default"
         model = self._status_current_model or "-"
@@ -1172,4 +1267,286 @@ class RichTransport:
         self.console.print(Panel(body, title="Error", border_style=STYLE_BORDER_ERROR))
 
 
-__all__ = ["RichTransport"]
+class OnceTransport(RichTransport):
+    """Vertically efficient transport for the ``once`` command.
+
+    Once mode is input/output in the caller's shell — another pipeline stage,
+    not a session with a screen — so instead of a persistent Live transcript
+    it renders:
+
+    * a one-line transient activity indicator (spinner + mode + in-flight
+      tool label + models/tools/elapsed) via an overwrite-in-place Live; and
+    * each tool/model/fork row printed to real scrollback as it *completes*,
+      so the trajectory survives piping/tee and never needs the transcript.
+
+    Tokens are per-turn: "session vs turn" is a meaningless split when the
+    whole invocation is one process, and the footer reports a single total.
+
+    Non-tty consoles (``console.is_terminal`` False) skip the spinner entirely
+    and emit only the completed-event lines — safe under ``| grep``.
+    """
+
+    _ACTIVITY_WIDTH: int = 100
+
+    def __init__(self, *, console: Console | None = None, quiet: bool = False) -> None:
+        super().__init__(console=console)
+        self.compact = True
+        self.with_prefix = False
+        self.quiet = quiet
+        self._active_label: str = ""
+        self._last_tool_data: dict[str, Any] | None = None
+        self._activity: Live | None = None
+        self._status_reasoning_chars: int = 0
+
+    # ── Lifecycle ───────────────────────────────────────────────────
+
+    def start_turn(self, message: str) -> None:
+        """Begin once-mode rendering: echo the command, arm the activity line.
+
+        No-op when ``quiet`` (the response alone prints later).
+        """
+        if self.quiet:
+            return
+        width = self.console.size.width or self._ACTIVITY_WIDTH
+        line = Text()
+        line.append("λ ", style="bold steel_blue3")
+        line.append(_truncate(message.strip(), max(0, width - 6)), style="bold " + STYLE_TEXT_PRIMARY)
+        self.console.print(line)
+        self.start_activity()
+
+    def start_activity(self) -> None:
+        """Show the one-line transient activity display (tty only)."""
+        if self.quiet or self._activity is not None or not self.console.is_terminal:
+            return
+        activity = Live(
+            self._activity_renderable(),
+            console=self.console,
+            refresh_per_second=4,
+            transient=True,
+        )
+        try:
+            activity.start()
+        except Exception:  # pylint: disable=broad-except
+            return
+        self._activity = activity
+
+    def stop_activity(self) -> None:
+        activity = self._activity
+        self._activity = None
+        if activity is not None:
+            try:
+                activity.stop()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def start_thinking(self, stage: str = "dispatch", **kwargs: Any) -> None:
+        """Once mode does not use the Live transcript; start the activity line."""
+        self.start_activity()
+
+    def stop_thinking(
+        self,
+        *,
+        flush_transcript: bool = False,
+        flush_stream: bool = False,
+    ) -> None:
+        # The activity indicator is always transient — flush flags do not
+        # resurrect it once the answer/error is ready to print.
+        self.stop_activity()
+
+    # ── Stage events ────────────────────────────────────────────────
+
+    async def on_stage(self, label: str, data: dict[str, Any] | None = None) -> None:
+        """Update counters + activity line; print tool rows only on completion."""
+        if self.quiet:
+            return
+        data = data or {}
+        prev_mode = self._current_mode
+        if label == "model_call":
+            model_id = data.get("model_id")
+            if model_id not in (None, "", 0):
+                provider = data.get("provider")
+                self._status_current_model = str(model_id)
+                self._status_model_provider = str(provider) if provider not in (None, "") else ""
+            self._model_call_count += 1
+            iter_raw = data.get("iteration") or data.get("_state.iteration")
+            if iter_raw not in (None, "", 0) and int(iter_raw) > self._current_iter:
+                self._current_iter = int(iter_raw)
+            max_iter = int(data.get("max_iterations") or 0)
+            if max_iter > self._max_iterations:
+                self._max_iterations = max_iter
+            if data.get("mode_id"):
+                self._current_mode = str(data["mode_id"])
+        elif label == "model_call_complete":
+            d_raw = data.get("duration_ms")
+            if d_raw not in (None, "", 0):
+                try:
+                    self._iteration_durations.append(float(d_raw))
+                except (TypeError, ValueError):
+                    pass
+            total_raw = data.get("_state.total_tokens") or data.get("total_tokens")
+            if total_raw not in (None, "", 0):
+                self._status_turn_tokens += int(total_raw)
+        elif label == "model_call_failed":
+            self._print_event_line(
+                self._render_model_call(data, status_glyph="✗"), style=STYLE_ROW_ERROR
+            )
+        elif label == "tool_dispatch":
+            self._tool_call_count += 1
+            max_calls = int(data.get("max_tool_calls") or 0)
+            if max_calls > self._max_tool_calls:
+                self._max_tool_calls = max_calls
+            self._active_label = self._render_tool_dispatch(data)
+            self._last_tool_data = data
+        elif label == "tool_dispatch_complete":
+            ok = data.get("ok")
+            status = "ok" if ok is True else ("error" if ok is False else "")
+            if status == "ok":
+                self._tool_ok_count += 1
+            elif status == "error":
+                self._tool_error_count += 1
+            glyph = _TOOL_STATUS_GLYPH.get(status, _TOOL_STATUS_GLYPH[""])
+            # The completion event does not re-send the call arguments, so
+            # render the row from the dispatch payload and apply status/duration
+            # from the completion (mirrors the base transport's row update).
+            row_data = self._last_tool_data or data
+            self._print_event_line(
+                self._render_tool_dispatch(row_data, status_glyph=glyph, complete=data),
+                style=STYLE_ROW_TOOL,
+            )
+            self._active_label = ""
+            self._last_tool_data = None
+        elif label == "fork_start":
+            self._fork_children = {}
+            self._fork_total = int(data.get("children", 0)) or 0
+            self._print_event_line(self._render_fork_stage())
+        elif label == "fork_child_start":
+            idx = int(data.get("child_index", -1))
+            if idx >= 0:
+                self._fork_children[idx] = {
+                    "mode_id": data.get("mode_id", ""),
+                    "stage_id": data.get("stage_id", ""),
+                    "status": "running",
+                    "query_preview": data.get("query_preview", ""),
+                }
+                self._active_label = f"fork #{idx} {data.get('mode_id', '')}".strip()
+        elif label == "fork_child_complete":
+            idx = int(data.get("child_index", -1))
+            if idx >= 0:
+                existing = self._fork_children.get(idx, {})
+                existing.update(
+                    {
+                        "status": data.get("status", "ok"),
+                        "duration_ms": data.get("duration_ms"),
+                    }
+                )
+                self._fork_children[idx] = existing
+            self._active_label = ""
+            if self._fork_children and all(
+                c.get("status") != "running" for c in self._fork_children.values()
+            ):
+                self._print_event_line(self._render_fork_stage())
+                self._fork_children = {}
+        elif label == "fork_complete":
+            if self._fork_children:
+                self._print_event_line(self._render_fork_stage())
+                self._fork_children = {}
+            self._fork_total = 0
+        # else: bookkeeping-only events update nothing visible in once mode.
+
+        if self._current_mode and self._current_mode != prev_mode:
+            self._handoff_count += 1
+            max_handoffs = int(data.get("max_handoffs") or 0)
+            if max_handoffs > self._max_handoffs:
+                self._max_handoffs = max_handoffs
+            self._print_event_line(
+                f"↦ {prev_mode or 'start'} → {self._current_mode}",
+                style=STYLE_ROW_TRANSITION,
+            )
+        self._redraw_activity()
+
+    # ── Streaming / response ───────────────────────────────────────
+
+    async def on_text_chunk(self, text: str, reasoning: str = "") -> None:
+        """Stage answer deltas / count reasoning without rendering either.
+
+        The answer renders once, fully formatted, from ``on_response``;
+        thinking segments are a REPL affordance (Ctrl+Y) that once mode
+        replaces with the compact footer.
+        """
+        if reasoning:
+            self._status_reasoning_chars += len(reasoning)
+        if text:
+            self._answer_staging.append(text, style=STYLE_STREAM_ANSWER)
+            self._streamed_during_turn = True
+
+    async def on_response(self, text: str, data: dict[str, Any] | None = None) -> None:
+        """Print the answer, then the compact ⚡ footer (or nothing if quiet)."""
+        self.stop_activity()
+        self._answer_staging = Text()
+        approval = (data or {}).get("approval")
+        if isinstance(approval, dict) and approval.get("request_id"):
+            from hosts.cli.render import render_approval_panel  # noqa: PLC0415
+
+            self.pending_approval = approval
+            render_approval_panel(approval, console=self.console)
+            return
+        if text:
+            self.console.print(Rule(title="Response", style=STYLE_BORDER_RESPONSE))
+            self.console.print(Markdown(text))
+        if text and not self.quiet:
+            self.console.print()
+        if not self.quiet:
+            self._print_once_footer()
+
+    async def on_error(self, message: str, exc: Exception | None = None) -> None:
+        """Stop the activity line and render the error panel.
+
+        Completed event lines already printed to scrollback as they finished,
+        so the trajectory up to the failure is preserved without a flush.
+        """
+        self.stop_activity()
+        body = message
+        if exc is not None:
+            body = f"{type(exc).__name__}: {exc}\n\n{message}"
+        logger.error("transport error: %s", body)
+        self.console.print(Panel(body, title="Error", border_style=STYLE_BORDER_ERROR))
+
+    # ── Internals ───────────────────────────────────────────────────
+
+    def _print_event_line(self, text: str, *, style: str | None = None) -> None:
+        """Print one completed scrollback line, replacing the activity line."""
+        self.stop_activity()
+        self.console.print(f"  {text}", style=style or STYLE_TEXT_MUTED)
+        self.start_activity()
+
+    def _redraw_activity(self) -> None:
+        if self._activity is not None:
+            try:
+                self._activity.update(self._activity_renderable())
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def _activity_renderable(self) -> RenderableType:
+        """The one-line transient activity display."""
+        elapsed = self._elapsed_seconds()
+        width = self.console.size.width or self._ACTIVITY_WIDTH
+        parts: list[str] = []
+        if self._current_mode:
+            parts.append(f"[{self._current_mode}]")
+        if self._status_current_model:
+            model = self._status_current_model
+            if self._status_model_provider:
+                model = f"{self._status_model_provider}:{model}"
+            parts.append(model)
+        if self._active_label:
+            parts.append(_truncate(self._active_label, 48))
+        parts.append(f"models {self._model_call_count}")
+        parts.append(f"tools {self._tool_call_count}")
+        parts.append(f"{elapsed}s")
+        body = _truncate(" · ".join(parts), max(0, width - 4))
+        line = Text()
+        line.append(body, style=STYLE_STAGE)
+        return _TrailingSpinner(line, self._thinking_spinner, STYLE_GRAPHIC)
+
+
+__all__ = ["RichTransport", "OnceTransport"]
