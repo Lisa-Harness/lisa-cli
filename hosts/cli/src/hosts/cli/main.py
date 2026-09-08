@@ -213,6 +213,15 @@ NoLogOption = Annotated[
         help="Disable turn logging entirely.",
     ),
 ]
+AllPacksOption = Annotated[
+    bool,
+    typer.Option(
+        "--all",
+        help=(
+            "Update every runtime-installed pack with a recorded install source (pack update only)."
+        ),
+    ),
+]
 HostLogOption = Annotated[
     str,
     typer.Option(
@@ -1214,13 +1223,14 @@ def _mcp_command(
 # ---------------------------------------------------------------------------
 
 
-@app.command("pack", help="Manage runtime pack installs (list/install/uninstall).")
+@app.command("pack", help="Manage runtime pack installs (list/install/uninstall/update).")
 def _pack_command(
-    action: str = typer.Argument(..., help="Action: list, install, uninstall."),
+    action: str = typer.Argument(..., help="Action: list, install, uninstall, update."),
     target: str = typer.Argument(
         "",
-        help="Install spec or package name (required for install/uninstall).",
+        help="Install spec or package name (required for install/uninstall/update <pack>).",
     ),
+    all_packs: AllPacksOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1256,26 +1266,40 @@ def _pack_command(
         render_pack_list_panel(runtime, console=console)
         return
     if normalized == "install":
-        ok, details = asyncio.run(_run_pack_install(runtime, target))
-        if not ok:
-            console.print(f"[red]{details}[/red]")
-            raise typer.Exit(code=1)
-        console.print(details)
-        if runtime.restart_required:
-            _exit_restart_required()
-        raise typer.Exit(code=0)
+        _finish_pack_mutation(runtime, asyncio.run(_run_pack_install(runtime, target)))
+        return
     if normalized == "uninstall":
-        ok, details = asyncio.run(_run_pack_uninstall(runtime, target))
-        if not ok:
-            console.print(f"[red]{details}[/red]")
-            raise typer.Exit(code=1)
-        console.print(details)
-        if runtime.restart_required:
-            _exit_restart_required()
-        raise typer.Exit(code=0)
+        _finish_pack_mutation(runtime, asyncio.run(_run_pack_uninstall(runtime, target)))
+        return
+    if normalized == "update":
+        if all_packs:
+            _finish_pack_mutation(runtime, asyncio.run(_run_pack_update_all(runtime)))
+            return
+        if not target.strip():
+            console.print("[red]Usage: lisa pack update <pack> | lisa pack update --all.[/red]")
+            raise typer.Exit(code=2)
+        _finish_pack_mutation(runtime, asyncio.run(_run_pack_update(runtime, target.strip())))
+        return
 
-    console.print("[red]Unknown action. Use: list, install, uninstall.[/red]")
+    console.print("[red]Unknown action. Use: list, install, uninstall, update.[/red]")
     raise typer.Exit(code=2)
+
+
+def _finish_pack_mutation(runtime: HostRuntime, result: tuple[bool, str]) -> None:
+    """Print a pack lifecycle result and apply the exit-code contract.
+
+    Failure prints the details in red and exits 1; success prints the
+    details and exits via :func:`_exit_restart_required` when the runtime
+    flagged a restart, else 0.
+    """
+    ok, details = result
+    if not ok:
+        console.print(f"[red]{details}[/red]")
+        raise typer.Exit(code=1)
+    console.print(details)
+    if runtime.restart_required:
+        _exit_restart_required()
+    raise typer.Exit(code=0)
 
 
 async def _run_pack_install(runtime: HostRuntime, spec: str) -> tuple[bool, str]:
@@ -1290,6 +1314,20 @@ async def _run_pack_uninstall(runtime: HostRuntime, package_name: str) -> tuple[
     from host.commands import run_pack_uninstall
 
     return await run_pack_uninstall(runtime, package_name)
+
+
+async def _run_pack_update(runtime: HostRuntime, package_name: str) -> tuple[bool, str]:
+    """Upgrade one installed pack in place from its recorded install source."""
+    from host.commands import run_pack_update
+
+    return await run_pack_update(runtime, package_name)
+
+
+async def _run_pack_update_all(runtime: HostRuntime) -> tuple[bool, str]:
+    """Upgrade every runtime-installed pack with a recorded install source."""
+    from host.commands import run_pack_update_all
+
+    return await run_pack_update_all(runtime)
 
 
 # ---------------------------------------------------------------------------

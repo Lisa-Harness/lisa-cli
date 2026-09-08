@@ -73,6 +73,8 @@ _HOST_REPL_SHORTCUTS: tuple[str, ...] = (
     "/pack disable ",
     "/pack install ",
     "/pack uninstall ",
+    "/pack update ",
+    "/pack update --all",
     "/tokens",
     "/quit",
 )
@@ -256,7 +258,9 @@ async def run_repl(
                     _render_session_exit_summary(runtime, console)
                     console.print(f"[{STYLE_TEXT_MUTED}]Applying restart now...[/]")
                     return True
-        restart_requested = await _run_repl_loop(runtime, transport, console, prompt_session, dispatcher)
+        restart_requested = await _run_repl_loop(
+            runtime, transport, console, prompt_session, dispatcher
+        )
     finally:
         # Close the MCP pool. aclose() handles the anyio cross-task rule
         # internally: when the pool was started via start_pool_deferred(),
@@ -615,9 +619,7 @@ class _SlashCommandCompleter(Completer):
     def __init__(self, words: list[str]) -> None:
         self._inner = WordCompleter(words, ignore_case=True)
 
-    def get_completions(
-        self, document: Document, complete_event: Any
-    ) -> Any:
+    def get_completions(self, document: Document, complete_event: Any) -> Any:
         if not document.text_before_cursor.lstrip().startswith("/"):
             return
         yield from self._inner.get_completions(document, complete_event)
