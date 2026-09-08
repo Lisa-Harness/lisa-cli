@@ -29,6 +29,7 @@ Stage-line legend
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, ClassVar
@@ -56,6 +57,8 @@ STYLE_ROW_TOOL = "cornflower_blue"
 STYLE_ROW_ERROR = "indian_red"
 STYLE_STREAM_ANSWER = "bright_white"
 STYLE_STREAM_REASONING = "grey42"
+STYLE_OUTPUT_REGION = "grey42"
+STYLE_OUTPUT_REGION_BORDER = "grey35"
 
 #: Lines reserved below the Live region for post-turn content that must stay
 #: visible: the turn footer (1), the Rule separator (1), the bottom toolbar
@@ -80,6 +83,16 @@ _TOOL_STATUS_GLYPH = {"ok": "✓", "error": "✗", "running": "…", "": "·"}
 
 #: Maximum length of the primary tool argument shown inline on a tool row.
 _ARG_PREVIEW_MAX = 40
+
+#: Lines of a streaming tool's output kept visible in the live region. The
+#: buffer scrolls: older lines are dropped as new ones arrive, mirroring a
+#: terminal tail. The full output still reaches the model via ToolResult —
+#: this is an operator-view cap only.
+_OUTPUT_REGION_MAX_LINES = 12
+
+#: Per-line width cap for streaming output lines so long lines wrap instead
+#: of blowing out the region (final width clamps against the live console).
+_OUTPUT_LINE_MAX = 200
 
 
 def _truncate(value: str, limit: int = _ARG_PREVIEW_MAX) -> str:
@@ -142,6 +155,11 @@ class _Row:
     is the segment body (kept collapsed/expanded per the transport flag) and
     ``thinking_expanded`` is the per-row expand state. Multiple thinking rows
     intersperse with tool-call rows in arrival order.
+
+    For ``kind == "tool"`` a streaming tool (one whose ``.tool.yml`` declares
+    ``stream_output``) accumulates its live operator-visible output lines in
+    ``output_lines`` while the call is in flight; the region renders beneath
+    the tool row and collapses to a one-line summary on completion.
     """
 
     kind: str
@@ -149,6 +167,8 @@ class _Row:
     active: bool = False
     data: dict[str, Any] = field(default_factory=dict)
     thinking_expanded: bool = False
+    output_lines: deque[str] = field(default_factory=deque)
+    output_total: int = 0
 
 
 class RichTransport:
@@ -262,6 +282,11 @@ class RichTransport:
         self._open_tool_row: int | None = None
         # Index of the in-flight model row, so its completion updates in place.
         self._open_model_row: int | None = None
+        # Whether the in-flight tool row carries a live output region (the
+        # tool declared stream_output and lines are arriving). Kept as a
+        # flag because the row index alone doesn't say whether to render
+        # the region.
+        self._tool_output_streaming: bool = False
         # The streamed model output for the current turn as a single flowing
         # Text (visible answer bright, reasoning dimmed). Persists across
         # stop_thinking — the transcript flushes it to scrollback.
@@ -328,6 +353,7 @@ class RichTransport:
         self._open_tool_row = None
         self._open_model_row = None
         self._open_thinking_row = None
+        self._tool_output_streaming = False
         self._answer_staging = Text()
         is_dispatch = stage == "dispatch"
         self._thinking_spinner = "dots2" if is_dispatch else "dots"
@@ -380,6 +406,14 @@ class RichTransport:
             for row in self._rows:
                 try:
                     self.console.print(self._row_line(row))
+                    # A streaming tool's captured tail flushes with the row
+                    # so a diagnostic transcript retains what the command
+                    # produced before the failure/cancellation.
+                    if row.kind == "tool" and row.output_lines:
+                        for out_line in row.output_lines:
+                            self.console.print(
+                                Text(f"│ {out_line}", style=STYLE_OUTPUT_REGION)
+                            )
                 except Exception:  # pylint: disable=broad-except
                     pass
             if flush_stream and self._answer_staging:
@@ -564,6 +598,11 @@ class RichTransport:
            row gets a trailing spinner. Thinking rows render collapsed (a
            compact ``▸ Thinking… N char`` summary) or expanded (the full dimmed
            segment body) per the global ``thinking_collapsed`` flag.
+        4. Directly beneath the in-flight tool row, a streaming tool's live
+           output region — the most recent ``_OUTPUT_REGION_MAX_LINES`` lines
+           of the running command, indented so the tool row reads as the
+           region's owner. Scrolls with the transcript; the buffer keeps only
+           the tail (like ``tail -f``).
         """
         renderables: list[Any] = []
         banner = self._render_prompt_banner()
@@ -578,18 +617,50 @@ class RichTransport:
                 renderables.append(_TrailingSpinner(line, self._thinking_spinner, STYLE_GRAPHIC))
             else:
                 renderables.append(line)
+            streaming_row = row.kind == "tool" and self._tool_output_streaming
+            if streaming_row and self._open_tool_row is not None:
+                # The region belongs to the IN-FLIGHT tool row; map the global
+                # row index to the visible window index before rendering.
+                open_idx = self._open_tool_row - (len(self._rows) - len(rows))
+                if i == open_idx:
+                    region = self._render_output_region(row)
+                    if region is not None:
+                        renderables.append(region)
         return Group(*renderables)
+
+    def _render_output_region(self, row: _Row) -> RenderableType | None:
+        """Render the live scrolling output region for a streaming tool call.
+
+        Each buffered line renders as ``│ <line>`` — a thin left rail marks
+        the region's extent without boxing it (the rail matches the dimmed
+        row style, so the output reads as subordinate to the tool line).
+        Returns ``None`` when there is nothing buffered yet, so an
+        about-to-stream call shows no empty region.
+        """
+        if not row.output_lines:
+            return None
+        lines: list[Text] = []
+        width = self.console.size.width or 80
+        for out_line in row.output_lines:
+            body = _truncate(out_line, max(0, min(_OUTPUT_LINE_MAX, width - 6)))
+            lines.append(Text(f"│ {body}", style=STYLE_OUTPUT_REGION))
+        return Group(*lines)
 
     def _row_line(self, row: _Row) -> Text:
         """Render one transcript row.
 
         Tool/model/transition/fork rows render as ``<text>``. Thinking rows
         render collapsed (a compact summary) or expanded (the full dimmed
-        segment body) per the row's expand flag.
+        segment body) per the row's expand flag. A completed streaming tool
+        row carries its ``↳ N lines of output`` summary inline.
         """
         if row.kind == "thinking":
             return self._render_thinking_row(row)
-        return Text(row.text, style=self._row_style(row.kind))
+        text = row.text
+        summary = row.data.get("_output_summary")
+        if summary:
+            text = f"{text}  {summary}"
+        return Text(text, style=self._row_style(row.kind))
 
     def _render_thinking_row(self, row: _Row) -> Text:
         """Render one thinking segment: collapsed summary or expanded body."""
@@ -765,10 +836,16 @@ class RichTransport:
             self._route_model_call(label, data)
             return
 
+        # ── Incremental tool output (stream_output tools) ───────────
+        if label == "tool_output":
+            self._handle_tool_output(data)
+            return
+
         # ── Tool dispatch ───────────────────────────────────────────
         if label == "tool_dispatch":
             self._tool_call_count += 1
             self._open_tool_row = len(self._rows)
+            self._tool_output_streaming = bool(data.get("stream_output"))
             max_calls = int(data.get("max_tool_calls") or 0)
             # Track the cap for the always-on status header cap strip (ask 3)
             # and the aggregate progress blend (ask 2). A later event may
@@ -790,6 +867,83 @@ class RichTransport:
         # ── Catch-all (bookkeeping) ─────────────────────────────────
         # Bookkeeping events update counters but render no row.
         self._mark_last_active()
+        self._refresh_live()
+
+    def _handle_tool_output(self, data: dict[str, Any]) -> None:
+        """Route one streamed tool-output line into the live region.
+
+        Lines attach to the in-flight tool row (opened by ``tool_dispatch``).
+        If no tool row is open — e.g. the line raced ahead of the dispatch
+        event or the dispatch was for a different tool kind — the line is
+        attributed to the LAST tool row so late job output still lands
+        somewhere visible; otherwise it is dropped (there is no sane owner).
+        The region shows the most recent ``_OUTPUT_REGION_MAX_LINES`` lines
+        (a scrolling tail, like ``tail -f``), with a counter for the total
+        lines received this call.
+        """
+        text = str(data.get("text") or "")
+        if not text:
+            return
+        idx = self._open_tool_row
+        row: _Row | None = None
+        if idx is not None and 0 <= idx < len(self._rows) and self._rows[idx].kind == "tool":
+            row = self._rows[idx]
+        else:
+            for candidate in reversed(self._rows):
+                if candidate.kind == "tool":
+                    row = candidate
+                    break
+        if row is None:
+            return
+        stream = str(data.get("stream") or "stdout")
+        for raw_line in text.split("\n"):
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            row.output_lines.append(line)
+            row.output_total += 1
+        while len(row.output_lines) > _OUTPUT_REGION_MAX_LINES:
+            row.output_lines.popleft()
+        row.data = {**row.data, "_last_output_stream": stream}
+        self._tool_output_streaming = True
+        self._refresh_live()
+
+    def _handle_tool_output(self, data: dict[str, Any]) -> None:
+        """Route one streamed tool-output line into the live region.
+
+        Lines attach to the in-flight tool row (opened by ``tool_dispatch``).
+        If no tool row is open — e.g. the line raced ahead of the dispatch
+        event or belonged to an already-completed call — the line is
+        attributed to the LAST tool row so late job output still lands
+        somewhere visible; otherwise it is dropped (there is no sane owner).
+        The region shows the most recent ``_OUTPUT_REGION_MAX_LINES`` lines
+        (a scrolling tail, like ``tail -f``).
+        """
+        text = str(data.get("text") or "")
+        if not text:
+            return
+        idx = self._open_tool_row
+        row: _Row | None = None
+        if idx is not None and 0 <= idx < len(self._rows) and self._rows[idx].kind == "tool":
+            row = self._rows[idx]
+        else:
+            for candidate in reversed(self._rows):
+                if candidate.kind == "tool":
+                    row = candidate
+                    break
+        if row is None:
+            return
+        stream = str(data.get("stream") or "stdout")
+        for raw_line in text.split("\n"):
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            row.output_lines.append(line)
+            row.output_total += 1
+        while len(row.output_lines) > _OUTPUT_REGION_MAX_LINES:
+            row.output_lines.popleft()
+        row.data = {**row.data, "_last_output_stream": stream}
+        self._tool_output_streaming = True
         self._refresh_live()
 
     def _append_row(self, row: _Row) -> None:
@@ -946,8 +1100,19 @@ class RichTransport:
         glyph = _TOOL_STATUS_GLYPH.get(status, _TOOL_STATUS_GLYPH[""])
         if self._open_tool_row is not None and self._open_tool_row < len(self._rows):
             row = self._rows[self._open_tool_row]
-            row.text = self._render_tool_dispatch(row.data, status_glyph=glyph, complete=data)
-            row.data = {**row.data, **data}
+            if row.output_total:
+                # A streaming call: collapse the live region to a one-line
+                # completion summary (the full tail already scrolled past in
+                # the Live region; the model still gets the full output).
+                plural = "s" if row.output_total != 1 else ""
+                summary = f"↳ {row.output_total} line{plural} of output"
+                if status == "error":
+                    summary = f"↳ {summary} (failed)"
+                row.text = self._render_tool_dispatch(row.data, status_glyph=glyph, complete=data)
+                row.data = {**row.data, **data, "_output_summary": summary}
+            else:
+                row.text = self._render_tool_dispatch(row.data, status_glyph=glyph, complete=data)
+                row.data = {**row.data, **data}
         else:
             self._append_row(
                 _Row(
@@ -958,6 +1123,7 @@ class RichTransport:
             )
             return
         self._open_tool_row = None
+        self._tool_output_streaming = False
         self._mark_last_active()
         self._refresh_live()
 
@@ -1295,6 +1461,7 @@ class OnceTransport(RichTransport):
         self.quiet = quiet
         self._active_label: str = ""
         self._last_tool_data: dict[str, Any] | None = None
+        self._last_tool_streaming: bool = False
         self._activity: Live | None = None
         self._status_reasoning_chars: int = 0
 
@@ -1372,8 +1539,7 @@ class OnceTransport(RichTransport):
             if iter_raw not in (None, "", 0) and int(iter_raw) > self._current_iter:
                 self._current_iter = int(iter_raw)
             max_iter = int(data.get("max_iterations") or 0)
-            if max_iter > self._max_iterations:
-                self._max_iterations = max_iter
+            self._max_iterations = max(self._max_iterations, max_iter)
             if data.get("mode_id"):
                 self._current_mode = str(data["mode_id"])
         elif label == "model_call_complete":
@@ -1393,10 +1559,22 @@ class OnceTransport(RichTransport):
         elif label == "tool_dispatch":
             self._tool_call_count += 1
             max_calls = int(data.get("max_tool_calls") or 0)
-            if max_calls > self._max_tool_calls:
-                self._max_tool_calls = max_calls
+            self._max_tool_calls = max(self._max_tool_calls, max_calls)
             self._active_label = self._render_tool_dispatch(data)
             self._last_tool_data = data
+            self._last_tool_streaming = bool(data.get("stream_output"))
+        elif label == "tool_output":
+            # Once mode has no Live transcript region — streamed lines print
+            # to real scrollback as they arrive (piped runs keep them under
+            # tee/grep; quiet mode drops them). A dim rail prefixes each so
+            # they read as tool output, not model prose.
+            text = str(data.get("text") or "")
+            stream_label = str(data.get("stream") or "stdout")
+            if text and not self.quiet:
+                for raw_line in text.split("\n"):
+                    line = raw_line.rstrip()
+                    if line:
+                        self._print_stream_line(line, stream=stream_label)
         elif label == "tool_dispatch_complete":
             ok = data.get("ok")
             status = "ok" if ok is True else ("error" if ok is False else "")
@@ -1415,6 +1593,7 @@ class OnceTransport(RichTransport):
             )
             self._active_label = ""
             self._last_tool_data = None
+            self._last_tool_streaming = False
         elif label == "fork_start":
             self._fork_children = {}
             self._fork_total = int(data.get("children", 0)) or 0
@@ -1456,8 +1635,7 @@ class OnceTransport(RichTransport):
         if self._current_mode and self._current_mode != prev_mode:
             self._handoff_count += 1
             max_handoffs = int(data.get("max_handoffs") or 0)
-            if max_handoffs > self._max_handoffs:
-                self._max_handoffs = max_handoffs
+            self._max_handoffs = max(self._max_handoffs, max_handoffs)
             self._print_event_line(
                 f"↦ {prev_mode or 'start'} → {self._current_mode}",
                 style=STYLE_ROW_TRANSITION,
@@ -1519,6 +1697,18 @@ class OnceTransport(RichTransport):
         self.console.print(f"  {text}", style=style or STYLE_TEXT_MUTED)
         self.start_activity()
 
+    def _print_stream_line(self, line: str, *, stream: str = "stdout") -> None:
+        """Print one streamed tool-output line to scrollback (once mode).
+
+        Unlike ``_print_event_line`` this does NOT stop/restart the activity
+        line per line — a churning command would flicker the spinner. The
+        activity Live redraws over its own region on the next refresh, so
+        printed lines persist above it.
+        """
+        if stream == "stderr" and not line.startswith("[stderr]"):
+            line = f"[stderr] {line}"
+        self.console.print(Text(f"  │ {line}", style=STYLE_OUTPUT_REGION))
+
     def _redraw_activity(self) -> None:
         if self._activity is not None:
             try:
@@ -1549,4 +1739,4 @@ class OnceTransport(RichTransport):
         return _TrailingSpinner(line, self._thinking_spinner, STYLE_GRAPHIC)
 
 
-__all__ = ["RichTransport", "OnceTransport"]
+__all__ = ["OnceTransport", "RichTransport"]
