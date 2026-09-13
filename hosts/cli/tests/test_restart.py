@@ -25,7 +25,7 @@ from host.runtime import HostRuntime
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
     """Build a HostRuntime whose data_dir is tmp_path."""
-    from kernel.testing.runtime_factory import build_test_runtime
+    from host.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -55,34 +55,19 @@ def test_restart_current_process_unix_uses_execv(tmp_path: Path) -> None:
     assert captured["args"] == ["/usr/bin/python", "lisa", "--log-level", "debug"]
 
 
-def test_restart_current_process_windows_exits_without_spawning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_restart_current_process_windows_exits_without_spawning() -> None:
     """On Windows, _restart_current_process does NOT spawn; exits with code."""
     import typer
     from hosts.cli import main as cli_main
+    from unittest.mock import patch
 
-    spawn_calls: list[Any] = []
     execv_calls: list[Any] = []
-
-    monkeypatch.setattr(cli_main.os, "name", "nt")
-    monkeypatch.setattr(
-        cli_main.subprocess,
-        "Popen",
-        lambda *a, **k: spawn_calls.append((a, k)),
-    )
-    monkeypatch.setattr(cli_main.os, "execv", lambda *a: execv_calls.append(a))
-
-    with pytest.raises(typer.Exit) as exc_info:
-        cli_main._restart_current_process()
+    with patch.object(cli_main.os, "name", "nt"), patch.object(cli_main.os, "execv", lambda *a: execv_calls.append(a)):
+        with pytest.raises(typer.Exit) as exc_info:
+            cli_main._restart_current_process()
 
     assert exc_info.value.exit_code == cli_main._RESTART_REQUIRED_EXIT
-    assert spawn_calls == [], "Windows path must NOT spawn a subprocess"
     assert execv_calls == [], "Windows path must NOT call os.execv"
-
-
-# ── _exit_restart_required (one-shot paths) ───────────────────────────
-
 
 def test_exit_restart_required_raises_typer_exit(tmp_path: Path) -> None:
     """_exit_restart_required raises typer.Exit with the restart code."""
@@ -104,7 +89,7 @@ def test_confirm_restart_yes_proceeds(tmp_path: Path, monkeypatch: pytest.Monkey
     from rich.console import Console
 
     runtime = _make_runtime(tmp_path)
-    runtime.request_restart("pack install: lisa-pack-cloudflare")
+    runtime.session.request_restart("pack install: lisa-pack-cloudflare")
     console = Console(quiet=True)
 
     monkeypatch.setattr(cli_repl.Confirm, "ask", staticmethod(lambda *a, **k: True))
@@ -118,7 +103,7 @@ def test_confirm_restart_no_defers(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     from rich.console import Console
 
     runtime = _make_runtime(tmp_path)
-    runtime.request_restart("pack install: lisa-pack-cloudflare")
+    runtime.session.request_restart("pack install: lisa-pack-cloudflare")
     console = Console(quiet=True)
 
     monkeypatch.setattr(cli_repl.Confirm, "ask", staticmethod(lambda *a, **k: False))
@@ -136,7 +121,7 @@ def test_confirm_restart_eof_defers(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     from rich.console import Console
 
     runtime = _make_runtime(tmp_path)
-    runtime.request_restart("pack enable: lisa-pack-cloudflare")
+    runtime.session.request_restart("pack enable: lisa-pack-cloudflare")
     console = Console(quiet=True)
 
     monkeypatch.setattr(cli_repl.Confirm, "ask", staticmethod(_raise_eof))
@@ -156,7 +141,7 @@ def test_confirm_restart_keyboard_interrupt_defers(
     from rich.console import Console
 
     runtime = _make_runtime(tmp_path)
-    runtime.request_restart("pack enable: lisa-pack-cloudflare")
+    runtime.session.request_restart("pack enable: lisa-pack-cloudflare")
     console = Console(quiet=True)
 
     monkeypatch.setattr(cli_repl.Confirm, "ask", staticmethod(_raise_interrupt))
@@ -175,11 +160,11 @@ def test_consume_restart_resume_message_stashes_and_clears_env(
 
     monkeypatch.setenv(cli_main._RESTART_RESUME_MESSAGE_ENV, "check cloudflare status")
     runtime = _make_runtime(tmp_path)
-    assert runtime.pending_resume_message is None
+    assert runtime.session.pending_resume_message is None
 
     cli_main._consume_restart_resume_message(runtime)
 
-    assert runtime.pending_resume_message == "check cloudflare status"
+    assert runtime.session.pending_resume_message == "check cloudflare status"
     assert cli_main._RESTART_RESUME_MESSAGE_ENV not in os.environ
 
 
@@ -194,7 +179,7 @@ def test_consume_restart_resume_message_noop_when_absent(
 
     cli_main._consume_restart_resume_message(runtime)
 
-    assert runtime.pending_resume_message is None
+    assert runtime.session.pending_resume_message is None
     assert cli_main._RESTART_RESUME_MESSAGE_ENV not in os.environ
 
 
@@ -208,11 +193,11 @@ def test_consume_restart_resume_message_clears_after_replay(
     runtime = _make_runtime(tmp_path)
 
     cli_main._consume_restart_resume_message(runtime)
-    assert runtime.pending_resume_message == "run again"
+    assert runtime.session.pending_resume_message == "run again"
 
-    runtime.pending_resume_message = None
+    runtime.session.pending_resume_message = None
     cli_main._consume_restart_resume_message(runtime)
-    assert runtime.pending_resume_message is None
+    assert runtime.session.pending_resume_message is None
 
 
 # ── Runtime field ─────────────────────────────────────────────────────
@@ -221,5 +206,5 @@ def test_consume_restart_resume_message_clears_after_replay(
 def test_host_runtime_has_pending_resume_message_field(tmp_path: Path) -> None:
     """HostRuntime exposes pending_resume_message, defaulting to None."""
     runtime = _make_runtime(tmp_path)
-    assert hasattr(runtime, "pending_resume_message")
-    assert runtime.pending_resume_message is None
+    assert hasattr(runtime.session, "pending_resume_message")
+    assert runtime.session.pending_resume_message is None

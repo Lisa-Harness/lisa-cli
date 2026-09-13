@@ -194,7 +194,7 @@ async def run_repl(
 
     initial_mode = runtime.start_mode_id
     initial_model_alias = (
-        model_alias_for_mode(initial_mode, manifest=runtime.manifest)
+        model_alias_for_mode(initial_mode, manifest=runtime.session.manifest)
         if runtime.start_mode_id
         else "default"
     )
@@ -231,8 +231,8 @@ async def run_repl(
     # Replay a pending resume message (set by `/pack ... --resume <msg>` in
     # the prior session via the LISA_RESTART_RESUME_MESSAGE env var) as the
     # first turn. Cleared after one replay.
-    pending_resume = runtime.pending_resume_message
-    runtime.pending_resume_message = None
+    pending_resume = runtime.session.pending_resume_message
+    runtime.session.pending_resume_message = None
 
     restart_requested = False
     try:
@@ -245,11 +245,11 @@ async def run_repl(
                 )
             )
             await _process_repl_turn(runtime, transport, console, pending_resume, dispatcher)
-            if runtime.restart_required:
+            if runtime.session.restart_required:
                 _render_restart_required_notice_if_needed(runtime, console)
                 if not _confirm_restart(runtime, console):
-                    runtime.restart_required = False
-                    runtime.restart_reason = ""
+                    runtime.session.restart_required = False
+                    runtime.session.restart_reason = ""
                     console.print(
                         f"[{STYLE_TEXT_MUTED}]Restart deferred. "
                         f"Run /quit then relaunch `lisa` manually when ready.[/]"
@@ -295,11 +295,11 @@ async def _run_repl_loop(
             console.print(f"[{STYLE_TEXT_MUTED}]Session closed.[/]")
             return False
         await _process_repl_turn(runtime, transport, console, message, dispatcher)
-        if runtime.restart_required:
+        if runtime.session.restart_required:
             _render_restart_required_notice_if_needed(runtime, console)
             if not _confirm_restart(runtime, console):
-                runtime.restart_required = False
-                runtime.restart_reason = ""
+                runtime.session.restart_required = False
+                runtime.session.restart_reason = ""
                 console.print(
                     f"[{STYLE_TEXT_MUTED}]Restart deferred. "
                     f"Run /quit then relaunch `lisa` manually when ready.[/]"
@@ -311,7 +311,7 @@ async def _run_repl_loop(
                     f"[{STYLE_TEXT_MUTED}]Please restart `lisa` manually to "
                     f"reload packs and MCP manifests.[/]"
                 )
-            elif runtime.restart_reason:
+            elif runtime.session.restart_reason:
                 console.print(f"[{STYLE_TEXT_MUTED}]Applying restart now...[/]")
             else:
                 console.print(
@@ -345,7 +345,7 @@ async def _process_repl_turn(
         # Pin the submitted prompt to the top of the Live region (ask 1).
         transport.start_thinking(
             "dispatch",
-            session_tokens=runtime.tokens.session_total_tokens,
+            session_tokens=runtime.session.tokens.session_total_tokens,
             message=message,
         )
     # ── Clear stale operator signals ───────────────────────────────────
@@ -384,10 +384,10 @@ async def _process_repl_turn(
         logger.info("REPL turn cancelled by user (Ctrl+C)")
         dispatcher.note_interrupt()
         _reset_runtime_after_cancelled_turn(runtime)
-        runtime.tokens.session_turn_count += 1
-        runtime.tokens.session_cancelled_count += 1
+        runtime.session.tokens.session_turn_count += 1
+        runtime.session.tokens.session_cancelled_count += 1
         elapsed_ms = (time.perf_counter() - turn_start) * 1000.0
-        runtime.tokens.session_total_latency_ms += elapsed_ms
+        runtime.session.tokens.session_total_latency_ms += elapsed_ms
         console.print(Rule(style=STYLE_RULE))
         # Swallow the cancellation so the REPL loop re-renders the prompt.
         # Without this re-raise guard, asyncio's cancellation propagation
@@ -397,19 +397,19 @@ async def _process_repl_turn(
         if isinstance(transport, RichTransport):
             transport.stop_thinking(flush_transcript=True)
         elapsed_ms = (time.perf_counter() - turn_start) * 1000.0
-        runtime.tokens.session_error_count += 1
-        runtime.tokens.session_total_latency_ms += elapsed_ms
+        runtime.session.tokens.session_error_count += 1
+        runtime.session.tokens.session_total_latency_ms += elapsed_ms
         logger.error("REPL turn failed: %s: %s", type(exc).__name__, exc)
         _render_runtime_error(console, exc, title="Turn Error")
         console.print(Rule(style=STYLE_RULE))
         return
     elapsed_ms = (time.perf_counter() - turn_start) * 1000.0
-    runtime.tokens.session_turn_count += 1
-    runtime.tokens.session_success_count += 1
-    runtime.tokens.session_total_latency_ms += elapsed_ms
-    mode_id = runtime.current_mode_id
-    runtime.tokens.session_mode_counts[mode_id] = (
-        runtime.tokens.session_mode_counts.get(mode_id, 0) + 1
+    runtime.session.tokens.session_turn_count += 1
+    runtime.session.tokens.session_success_count += 1
+    runtime.session.tokens.session_total_latency_ms += elapsed_ms
+    mode_id = runtime.session.current_mode_id
+    runtime.session.tokens.session_mode_counts[mode_id] = (
+        runtime.session.tokens.session_mode_counts.get(mode_id, 0) + 1
     )
 
     # The transport's on_response already rendered the response panel during
@@ -431,7 +431,7 @@ async def _process_repl_turn(
 
     # Compact turn-summary footer: mode · model · tokens · elapsed, plus a
     # handoff note when the model switched modes mid-turn. Sourced from
-    # ``runtime.last_turn_context`` (populated by handle_message) and the
+    # ``runtime.session.last_turn_context`` (populated by handle_message) and the
     # per-turn elapsed timer. Skipped when there's no completion context
     # (e.g. an early-exit host-command path).
     if not isinstance(transport, RichTransport):
@@ -446,13 +446,13 @@ async def _process_repl_turn(
 def _render_turn_footer(console: Console, runtime: HostRuntime, elapsed_ms: float) -> None:
     """Render a one-line post-response summary: mode · model · tokens · time.
 
-    Draws from ``runtime.last_turn_context`` (the ``completion`` dict
+    Draws from ``runtime.session.last_turn_context`` (the ``completion`` dict
     populated by ``handle_message``) plus the per-turn elapsed timer.
     When a mid-turn mode handoff occurred, appends ``→  <new mode>`` so
     the user sees the transition that happened during the turn. Quiet
     (no-op) when no completion context is available.
     """
-    ctx = runtime.last_turn_context
+    ctx = runtime.session.last_turn_context
     if ctx is None or not getattr(ctx, "completion", None):
         return
     comp = ctx.completion or {}
@@ -469,11 +469,11 @@ def _render_turn_footer(console: Console, runtime: HostRuntime, elapsed_ms: floa
     if total_tokens:
         parts.append(f"{total_tokens} tok")
     parts.append(f"{int(elapsed_ms)}ms")
-    # Mid-turn handoff: the host already updated runtime.current_mode_id
+    # Mid-turn handoff: the host already updated runtime.session.current_mode_id
     # from result.handoff_to. If it differs from the entry mode, surface
     # the transition on the footer.
     entry_mode = str(comp.get("mode_id") or "")
-    current = runtime.current_mode_id
+    current = runtime.session.current_mode_id
     if current and current != entry_mode and entry_mode:
         parts.append(f"→ {current}")
     footer = "  ·  ".join(parts)
@@ -501,7 +501,7 @@ def _render_session_panel_text(runtime: HostRuntime) -> str:
     from host.commands import model_alias_for_mode
 
     start_mode = runtime.start_mode_id or "default"
-    model_alias = model_alias_for_mode(start_mode, manifest=runtime.manifest) or "default"
+    model_alias = model_alias_for_mode(start_mode, manifest=runtime.session.manifest) or "default"
     user = runtime.config.user_slug or "(unset)"
     return (
         f"User: {user}  |  Start mode: {start_mode}  |  Model: {model_alias}\n"
@@ -546,19 +546,19 @@ def _reset_runtime_after_cancelled_turn(runtime: HostRuntime) -> None:
     This does NOT touch the MCP pool, the thread, or session-level
     accumulators (turn/error/cancelled counts are updated by the caller).
     """
-    runtime.tokens.reset_turn()
-    runtime.last_turn_context = None
-    runtime.current_mode_id = runtime.start_mode_id
-    runtime.current_stage_id = "-"
-    runtime.next_model_id = "-"
-    runtime.next_model_provider = "-"
+    runtime.session.tokens.reset_turn()
+    runtime.session.last_turn_context = None
+    runtime.session.current_mode_id = runtime.start_mode_id
+    runtime.session.current_stage_id = "-"
+    runtime.session.next_model_id = "-"
+    runtime.session.next_model_provider = "-"
 
 
 def _render_restart_required_notice_if_needed(runtime: HostRuntime, console: Console) -> None:
     """Render a one-shot restart-required notice after pack lifecycle changes."""
-    if not runtime.restart_required:
+    if not runtime.session.restart_required:
         return
-    reason = runtime.restart_reason.strip() or "runtime change"
+    reason = runtime.session.restart_reason.strip() or "runtime change"
     console.print(
         Panel(
             "Restart required to reload entry points, pack catalogs, and MCP manifests.\n"
@@ -577,7 +577,7 @@ def _confirm_restart(runtime: HostRuntime, console: Console) -> bool:
     (Ctrl+D) or KeyboardInterrupt, the restart is deferred so the
     user is not forced out of the session unexpectedly.
     """
-    reason = runtime.restart_reason.strip() or "runtime change"
+    reason = runtime.session.restart_reason.strip() or "runtime change"
     prompt_text = f"Exit now to reload ({reason})? [Y/n]"
     try:
         return bool(
@@ -651,7 +651,7 @@ def _build_repl_prompt_session(
     """
     if PromptSession is None or FileHistory is None or Completer is None or Document is None:
         return None
-    history_path = runtime.data_dir / _REPL_HISTORY_FILE_NAME
+    history_path = runtime.paths.data_dir / _REPL_HISTORY_FILE_NAME
     history_path.parent.mkdir(parents=True, exist_ok=True)
     bindings = build_repl_key_bindings(transport, dispatcher) if KeyBindings is not None else None
     return _ReplPromptSession(
@@ -665,7 +665,7 @@ def _build_repl_prompt_session(
         bottom_toolbar=lambda: _repl_bottom_toolbar(
             transport,
             session_name=runtime.session_plan.manifest.name,
-            mode_id=runtime.current_mode_id,
+            mode_id=runtime.session.current_mode_id,
         ),
         style=Style.from_dict(_REPL_PROMPT_STYLE) if Style is not None else None,
     )

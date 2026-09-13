@@ -465,7 +465,7 @@ def _consume_restart_resume_message(runtime: HostRuntime) -> None:
     """
     resume_msg = os.environ.pop(_RESTART_RESUME_MESSAGE_ENV, "").strip()
     if resume_msg:
-        runtime.pending_resume_message = resume_msg
+        runtime.session.pending_resume_message = resume_msg
 
 
 def _exit_restart_required() -> None:
@@ -627,7 +627,7 @@ def _verify_check_manifest(runtime: HostRuntime) -> tuple[str, str]:
     from host.model_manifest import load_model_manifest
 
     try:
-        path = runtime.models_path
+        path = runtime.paths.models_path
         manifest = load_model_manifest(path)
         model_count = len(manifest.models)
         if model_count == 0:
@@ -762,9 +762,9 @@ def _verify_check_provider_keys() -> tuple[str, str]:
 
 def _verify_check_paths(runtime: HostRuntime) -> tuple[str, str]:
     parts: list[str] = []
-    parts.append(f"Data dir: {runtime.data_dir}")
-    parts.append(f"Thread logs: {runtime.thread_dir}")
-    tp = runtime.thread_path
+    parts.append(f"Data dir: {runtime.paths.data_dir}")
+    parts.append(f"Thread logs: {runtime.paths.thread_dir}")
+    tp = runtime.paths.thread_path
     if tp:
         parts.append(f"Thread path: {tp}")
     return _VERIFY_PASS, "; ".join(parts)
@@ -1133,11 +1133,11 @@ async def _collect_mcp_tools(runtime: HostRuntime) -> McpIntrospection:
     commands degrade to showing only the internal tool catalog instead of
     crashing.
     """
-    if not runtime.mcp_warm_configs and not runtime.mcp_cold_configs:
+    if not runtime.resources.mcp_warm_configs and not runtime.resources.mcp_cold_configs:
         return ({}, {})
     try:
         await runtime.start()
-        pool = runtime.mcp_tool_pool
+        pool = runtime.resources.mcp_tool_pool
         if pool is None:
             return ({}, {})
         tools = await pool.list_tools()
@@ -1297,7 +1297,7 @@ def _finish_pack_mutation(runtime: HostRuntime, result: tuple[bool, str]) -> Non
         console.print(f"[red]{details}[/red]")
         raise typer.Exit(code=1)
     console.print(details)
-    if runtime.restart_required:
+    if runtime.session.restart_required:
         _exit_restart_required()
     raise typer.Exit(code=0)
 
@@ -1394,7 +1394,7 @@ async def _run_once_with_teardown(
     finally:
         transport.stop_activity()
         await runtime.aclose()
-    return runtime.restart_required
+    return runtime.session.restart_required
 
 
 # ---------------------------------------------------------------------------

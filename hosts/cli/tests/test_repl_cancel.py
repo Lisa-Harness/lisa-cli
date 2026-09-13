@@ -23,7 +23,7 @@ from host.runtime import HostRuntime
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
     """Build a HostRuntime whose data_dir is tmp_path."""
-    from kernel.testing.runtime_factory import build_test_runtime
+    from host.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -73,19 +73,19 @@ def test_process_repl_turn_keyboard_interrupt_returns_prompt(
     # Spinner was stopped.
     assert transport._status is None
     # Session-level accounting: turn counted as cancelled, not errored.
-    assert runtime.tokens.session_turn_count == 1
-    assert runtime.tokens.session_cancelled_count == 1
-    assert runtime.tokens.session_error_count == 0
-    assert runtime.tokens.session_success_count == 0
+    assert runtime.session.tokens.session_turn_count == 1
+    assert runtime.session.tokens.session_cancelled_count == 1
+    assert runtime.session.tokens.session_error_count == 0
+    assert runtime.session.tokens.session_success_count == 0
     # The runtime was NOT closed — the pool survives for the next turn.
     assert aclose_called == []
     # Route preview reset to the start mode with neutral model placeholders
     # (the same defaults HostRuntime.__init__ sets; the next turn repopulates).
-    assert runtime.current_mode_id == runtime.start_mode_id
-    assert runtime.next_model_id == "-"
-    assert runtime.next_model_provider == "-"
+    assert runtime.session.current_mode_id == runtime.start_mode_id
+    assert runtime.session.next_model_id == "-"
+    assert runtime.session.next_model_provider == "-"
     # last_turn_context cleared so a stale half-built context isn't surfaced.
-    assert runtime.last_turn_context is None
+    assert runtime.session.last_turn_context is None
 
 
 def test_process_repl_turn_cancelled_error_returns_prompt(
@@ -122,10 +122,10 @@ def test_process_repl_turn_cancelled_error_returns_prompt(
     asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "typo msg", dispatcher))
 
     assert transport._status is None
-    assert runtime.tokens.session_cancelled_count == 1
-    assert runtime.tokens.session_error_count == 0
-    assert runtime.current_mode_id == runtime.start_mode_id
-    assert runtime.last_turn_context is None
+    assert runtime.session.tokens.session_cancelled_count == 1
+    assert runtime.session.tokens.session_error_count == 0
+    assert runtime.session.current_mode_id == runtime.start_mode_id
+    assert runtime.session.last_turn_context is None
 
 
 def test_process_repl_turn_keyboard_interrupt_stops_spinner(
@@ -181,9 +181,9 @@ def test_process_repl_turn_normal_exception_still_errors(
     dispatcher = TerminalSignalDispatcher(runtime, transport, console)
     asyncio.run(cli_repl._process_repl_turn(runtime, transport, console, "x", dispatcher))
 
-    assert runtime.tokens.session_error_count == 1
-    assert runtime.tokens.session_cancelled_count == 0
-    assert runtime.tokens.session_success_count == 0
+    assert runtime.session.tokens.session_error_count == 1
+    assert runtime.session.tokens.session_cancelled_count == 0
+    assert runtime.session.tokens.session_success_count == 0
 
 
 # ── _reset_runtime_after_cancelled_turn ──────────────────────────────
@@ -195,18 +195,18 @@ def test_reset_runtime_after_cancelled_turn_clears_per_turn_state(tmp_path: Path
 
     runtime = _make_runtime(tmp_path)
     # Dirty per-turn state from a half-run turn.
-    runtime.tokens.turn_prompt_tokens = 123
-    runtime.tokens.turn_completion_tokens = 456
-    runtime.last_turn_context = object()  # type: ignore[assignment]
-    runtime.current_mode_id = "search"
-    runtime.next_model_id = "stale-model"
+    runtime.session.tokens.turn_prompt_tokens = 123
+    runtime.session.tokens.turn_completion_tokens = 456
+    runtime.session.last_turn_context = object()  # type: ignore[assignment]
+    runtime.session.current_mode_id = "search"
+    runtime.session.next_model_id = "stale-model"
 
     cli_repl._reset_runtime_after_cancelled_turn(runtime)
 
-    assert runtime.tokens.turn_prompt_tokens == 0
-    assert runtime.tokens.turn_completion_tokens == 0
-    assert runtime.last_turn_context is None
-    assert runtime.current_mode_id == runtime.start_mode_id
+    assert runtime.session.tokens.turn_prompt_tokens == 0
+    assert runtime.session.tokens.turn_completion_tokens == 0
+    assert runtime.session.last_turn_context is None
+    assert runtime.session.current_mode_id == runtime.start_mode_id
 
 
 # ── TokenCounters.session_cancelled_count ────────────────────────────
@@ -215,9 +215,9 @@ def test_reset_runtime_after_cancelled_turn_clears_per_turn_state(tmp_path: Path
 def test_token_counters_has_cancelled_field(tmp_path: Path) -> None:
     """TokenCounters exposes a session_cancelled_count field defaulting to 0."""
     runtime = _make_runtime(tmp_path)
-    assert runtime.tokens.session_cancelled_count == 0
-    runtime.tokens.session_cancelled_count += 1
-    assert runtime.tokens.session_cancelled_count == 1
+    assert runtime.session.tokens.session_cancelled_count == 0
+    runtime.session.tokens.session_cancelled_count += 1
+    assert runtime.session.tokens.session_cancelled_count == 1
 
 
 def test_session_exit_summary_includes_cancelled_when_present(tmp_path: Path) -> None:
@@ -225,7 +225,7 @@ def test_session_exit_summary_includes_cancelled_when_present(tmp_path: Path) ->
     from host.commands import format_token_stats
 
     runtime = _make_runtime(tmp_path)
-    runtime.tokens.session_cancelled_count = 2
+    runtime.session.tokens.session_cancelled_count = 2
     summary = format_token_stats(runtime)
     assert "cancelled: 2" in summary
 

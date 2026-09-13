@@ -31,7 +31,7 @@ from rich.console import Console
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
     """Build a HostRuntime whose data_dir is tmp_path."""
-    from kernel.testing.runtime_factory import build_test_runtime
+    from host.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -162,7 +162,7 @@ def test_all_key_bindings_register_and_dispatch(
 
         # Verify the signal was set (for operator-signal bindings).
         if key in ("c-c", "c-d", "c-z", "c-p", "c-o", "c-\\"):
-            assert runtime.operator_signal_value is not OperatorSignal.NONE, (
+            assert runtime.session.operator_signal_value is not OperatorSignal.NONE, (
                 f"Key {key!r} did not set operator_signal_value"
             )
 
@@ -188,10 +188,10 @@ def test_dispatcher_clear_resets_signal_to_none(tmp_path: Path) -> None:
     dispatcher = TerminalSignalDispatcher(runtime, transport, console)
 
     dispatcher.request_pause()
-    assert runtime.operator_signal_value is OperatorSignal.PAUSE
+    assert runtime.session.operator_signal_value is OperatorSignal.PAUSE
 
     dispatcher.clear()
-    assert runtime.operator_signal_value is OperatorSignal.NONE
+    assert runtime.session.operator_signal_value is OperatorSignal.NONE
 
 
 def test_process_repl_turn_clears_signal_before_handle_message(
@@ -213,13 +213,13 @@ def test_process_repl_turn_clears_signal_before_handle_message(
 
     # Simulate a previous turn having paused.
     dispatcher.request_pause()
-    assert runtime.operator_signal_value is OperatorSignal.PAUSE
+    assert runtime.session.operator_signal_value is OperatorSignal.PAUSE
 
     # handle_message should NOT see the stale signal.
     seen_signals: list[OperatorSignal] = []
 
     async def _record_signal(*args: Any) -> SimpleNamespace:
-        seen_signals.append(runtime.operator_signal_value)
+        seen_signals.append(runtime.session.operator_signal_value)
         return SimpleNamespace(text="ok")
 
     monkeypatch.setattr(cli_repl, "handle_message", _record_signal)
@@ -248,10 +248,10 @@ def test_sigint_double_tap_within_window_escalates_to_terminate(tmp_path: Path) 
     dispatcher = TerminalSignalDispatcher(runtime, transport, console)
 
     dispatcher.request_interrupt()
-    assert runtime.operator_signal_value is OperatorSignal.INTERRUPT
+    assert runtime.session.operator_signal_value is OperatorSignal.INTERRUPT
 
     dispatcher.request_interrupt()
-    assert runtime.operator_signal_value is OperatorSignal.TERMINATE
+    assert runtime.session.operator_signal_value is OperatorSignal.TERMINATE
 
 
 def test_sigint_outside_window_resets_counter(
@@ -270,7 +270,7 @@ def test_sigint_outside_window_resets_counter(
 
     # First interrupt.
     dispatcher.request_interrupt()
-    assert runtime.operator_signal_value is OperatorSignal.INTERRUPT
+    assert runtime.session.operator_signal_value is OperatorSignal.INTERRUPT
 
     # Advance time past the window.
     with mock.patch.object(
@@ -279,7 +279,7 @@ def test_sigint_outside_window_resets_counter(
         dispatcher.request_interrupt()
 
     # Still INTERRUPT (counter reset).
-    assert runtime.operator_signal_value is OperatorSignal.INTERRUPT
+    assert runtime.session.operator_signal_value is OperatorSignal.INTERRUPT
 
 
 # ── Ctrl+Z per-OS ────────────────────────────────────────────────────
@@ -300,7 +300,7 @@ def test_ctrl_z_windows_is_eof(
     dispatcher = TerminalSignalDispatcher(runtime, transport, console)
 
     dispatcher.request_suspend()
-    assert runtime.operator_signal_value is OperatorSignal.EOF
+    assert runtime.session.operator_signal_value is OperatorSignal.EOF
 
 
 def test_ctrl_z_posix_is_suspend(
@@ -321,7 +321,7 @@ def test_ctrl_z_posix_is_suspend(
     dispatcher = TerminalSignalDispatcher(runtime, transport, console)
 
     dispatcher.request_suspend()
-    assert runtime.operator_signal_value is OperatorSignal.SUSPEND
+    assert runtime.session.operator_signal_value is OperatorSignal.SUSPEND
 
 
 # ── No operator-signal leaks across turns ──────────────────────────
@@ -361,7 +361,7 @@ def test_no_operator_signal_leaks_across_two_turns(
     )
     # The turn-start clear should have reset it.
     # At this point it's still NONE because handle_message didn't set anything.
-    assert runtime.operator_signal_value is OperatorSignal.NONE
+    assert runtime.session.operator_signal_value is OperatorSignal.NONE
 
 
 # ── OperatorSignal str-roundtrips through kernel path ────────────────

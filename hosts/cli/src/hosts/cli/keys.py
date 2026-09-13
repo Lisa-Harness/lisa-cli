@@ -13,7 +13,7 @@ disconnected paths in :mod:`hosts.cli.repl`:
 - Prompt-level ``KeyboardInterrupt`` / ``EOFError`` (prompt_toolkit
   focused).
 - Operator key bindings writing bare ``str`` values into
-  ``runtime.operator_signal_value``.
+  ``runtime.session.operator_signal_value``.
 
 This module provides:
 - :class:`TerminalSignalDispatcher` — the single dispatch hub.
@@ -104,18 +104,18 @@ class TerminalSignalDispatcher:
     # ── Public dispatch methods (called from key bindings) ──────────
 
     def request_pause(self) -> None:
-        """Write PAUSE to ``runtime.operator_signal_value``."""
-        self._runtime.operator_signal_value = OperatorSignal.PAUSE
+        """Write PAUSE to ``runtime.session.operator_signal_value``."""
+        self._runtime.session.operator_signal_value = OperatorSignal.PAUSE
         logger.debug("operator signal: PAUSE")
 
     def request_stop(self) -> None:
-        """Write STOP to ``runtime.operator_signal_value``."""
-        self._runtime.operator_signal_value = OperatorSignal.STOP
+        """Write STOP to ``runtime.session.operator_signal_value``."""
+        self._runtime.session.operator_signal_value = OperatorSignal.STOP
         logger.debug("operator signal: STOP")
 
     def request_terminate(self) -> None:
-        """Write TERMINATE to ``runtime.operator_signal_value``."""
-        self._runtime.operator_signal_value = OperatorSignal.TERMINATE
+        """Write TERMINATE to ``runtime.session.operator_signal_value``."""
+        self._runtime.session.operator_signal_value = OperatorSignal.TERMINATE
         logger.debug("operator signal: TERMINATE")
 
     def request_toggle_thinking(self) -> None:
@@ -151,15 +151,15 @@ class TerminalSignalDispatcher:
         self._last_interrupt_at = now
 
         if self._interrupt_count >= 2:
-            self._runtime.operator_signal_value = OperatorSignal.TERMINATE
+            self._runtime.session.operator_signal_value = OperatorSignal.TERMINATE
             logger.debug("operator signal: TERMINATE (double-tap Ctrl+C)")
         else:
-            self._runtime.operator_signal_value = OperatorSignal.INTERRUPT
+            self._runtime.session.operator_signal_value = OperatorSignal.INTERRUPT
             logger.debug("operator signal: INTERRUPT (Ctrl+C)")
 
     def request_eof(self) -> None:
-        """Write EOF to ``runtime.operator_signal_value``."""
-        self._runtime.operator_signal_value = OperatorSignal.EOF
+        """Write EOF to ``runtime.session.operator_signal_value``."""
+        self._runtime.session.operator_signal_value = OperatorSignal.EOF
         logger.debug("operator signal: EOF")
 
     def request_suspend(self) -> None:
@@ -171,7 +171,7 @@ class TerminalSignalDispatcher:
         if os.name == "nt":
             self.request_eof()
         else:
-            self._runtime.operator_signal_value = OperatorSignal.SUSPEND
+            self._runtime.session.operator_signal_value = OperatorSignal.SUSPEND
             logger.debug("operator signal: SUSPEND (Ctrl+Z)")
             # Flush the transport's Live region before backgrounding so the
             # terminal state is clean on resume.
@@ -197,7 +197,7 @@ class TerminalSignalDispatcher:
 
     def clear(self) -> None:
         """Reset ``operator_signal_value`` to ``NONE`` at turn start."""
-        self._runtime.operator_signal_value = OperatorSignal.NONE
+        self._runtime.session.operator_signal_value = OperatorSignal.NONE
 
     # ── Process-level signal handlers (POSIX only) ───────────────────
 
@@ -211,7 +211,7 @@ class TerminalSignalDispatcher:
         :meth:`request_interrupt`.
         """
         self.request_interrupt()
-        if self._runtime.operator_signal_value is OperatorSignal.TERMINATE:
+        if self._runtime.session.operator_signal_value is OperatorSignal.TERMINATE:
             # Hard-cancel the main task for immediate teardown.
             try:
                 loop = asyncio.get_running_loop()
@@ -223,7 +223,7 @@ class TerminalSignalDispatcher:
 
     def on_sigterm(self) -> None:
         """Handle SIGTERM: graceful TERMINATE, then cancel."""
-        self._runtime.operator_signal_value = OperatorSignal.TERMINATE
+        self._runtime.session.operator_signal_value = OperatorSignal.TERMINATE
         logger.debug("operator signal: TERMINATE (SIGTERM)")
         try:
             loop = asyncio.get_running_loop()

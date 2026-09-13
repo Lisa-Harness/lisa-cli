@@ -1,7 +1,7 @@
 """Tests for the ``_render_turn_footer`` post-response summary in the REPL.
 
 The footer renders a one-line ``mode · model · tokens · elapsed`` summary
-sourced from ``runtime.last_turn_context`` plus a handoff note when the
+sourced from ``runtime.session.last_turn_context`` plus a handoff note when the
 model switched modes mid-turn.
 """
 
@@ -22,7 +22,7 @@ from hosts.cli.repl import _render_turn_footer
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
-    from kernel.testing.runtime_factory import build_test_runtime
+    from host.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -37,7 +37,7 @@ def test_footer_quiet_when_no_completion_context(tmp_path: Path) -> None:
     """No last_turn_context (or no completion dict) means no footer."""
     runtime = _make_runtime(tmp_path)
     console = _make_console()
-    runtime.last_turn_context = None
+    runtime.session.last_turn_context = None
     with console.capture() as capture:
         _render_turn_footer(console, runtime, elapsed_ms=340.0)
     assert capture.get().strip() == ""
@@ -47,7 +47,7 @@ def test_footer_renders_mode_model_tokens_time(tmp_path: Path) -> None:
     """The footer shows mode, model, total tokens, and elapsed ms."""
     runtime = _make_runtime(tmp_path)
     console = _make_console()
-    runtime.last_turn_context = TurnContext(
+    runtime.session.last_turn_context = TurnContext(
         mode_id="coding",
         completion={
             "mode_id": "coding",
@@ -55,7 +55,7 @@ def test_footer_renders_mode_model_tokens_time(tmp_path: Path) -> None:
             "resolved_model": {"model_id": "haiku", "provider": "anthropic"},
         },
     )
-    runtime.current_mode_id = "coding"
+    runtime.session.current_mode_id = "coding"
     with console.capture() as capture:
         _render_turn_footer(console, runtime, elapsed_ms=340.0)
     out = capture.get().strip()
@@ -68,12 +68,12 @@ def test_footer_renders_mode_model_tokens_time(tmp_path: Path) -> None:
 
 
 def test_footer_shows_handoff_when_mode_changed_mid_turn(tmp_path: Path) -> None:
-    """When runtime.current_mode_id differs from the entry mode, the footer
+    """When runtime.session.current_mode_id differs from the entry mode, the footer
     appends ``→  <new mode>`` so the mid-turn transition is visible.
     """
     runtime = _make_runtime(tmp_path)
     console = _make_console()
-    runtime.last_turn_context = TurnContext(
+    runtime.session.last_turn_context = TurnContext(
         mode_id="default",
         completion={
             "mode_id": "default",
@@ -82,7 +82,7 @@ def test_footer_shows_handoff_when_mode_changed_mid_turn(tmp_path: Path) -> None
         },
     )
     # Simulate handle_message having applied a mid-turn handoff.
-    runtime.current_mode_id = "coding"
+    runtime.session.current_mode_id = "coding"
     with console.capture() as capture:
         _render_turn_footer(console, runtime, elapsed_ms=500.0)
     out = capture.get().strip()
@@ -165,7 +165,7 @@ def test_shift_enter_registration_failure_keeps_ctrl_j_binding(
 
     monkeypatch.setattr(cli_keys, "_PTKeyBindings", _BindingsRejectingShiftEnter)
     transport = RichTransport(console=_make_console())
-    # The operator-signal bindings only write ``runtime.operator_signal_value``;
+    # The operator-signal bindings only write ``runtime.session.operator_signal_value``;
     # a SimpleNamespace stand-in is sufficient and avoids a full runtime build.
     runtime = SimpleNamespace(operator_signal_value=OperatorSignal.NONE)
     dispatcher = cli_keys.TerminalSignalDispatcher(runtime, transport, _make_console())

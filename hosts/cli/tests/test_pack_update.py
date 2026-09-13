@@ -23,7 +23,7 @@ from host.runtime import HostRuntime
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
-    from kernel.testing.runtime_factory import build_test_runtime
+    from host.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -225,7 +225,7 @@ def test_pack_update_restart_required_exits_with_restart_code(
 ) -> None:
     """After a successful update, restart_required exits _RESTART_REQUIRED_EXIT."""
     runtime = _make_runtime(tmp_path)
-    runtime.request_restart("pack update: lisa-pack-cloudflare")
+    runtime.session.request_restart("pack update: lisa-pack-cloudflare")
 
     _console, captured, exit_code = _invoke_pack_update(
         tmp_path,
@@ -242,7 +242,7 @@ def test_pack_update_all_restart_required_exits_with_restart_code(
 ) -> None:
     """After update --all, restart_required exits _RESTART_REQUIRED_EXIT."""
     runtime = _make_runtime(tmp_path)
-    runtime.request_restart("pack update-all: 2 pack(s)")
+    runtime.session.request_restart("pack update-all: 2 pack(s)")
 
     _console, _captured, exit_code = _invoke_pack_update(
         tmp_path,
@@ -272,7 +272,7 @@ def test_pack_update_all_noop_does_not_require_restart(
         ),
     )
     assert exit_code == 0
-    assert runtime.restart_required is False
+    assert runtime.session.restart_required is False
 
 
 def cli_main_restart_exit() -> int:

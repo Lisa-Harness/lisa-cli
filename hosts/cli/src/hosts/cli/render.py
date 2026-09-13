@@ -119,7 +119,7 @@ def render_models(runtime: HostRuntime, *, console: Console | None = None) -> Ta
     """
     from host.model_manifest import load_model_manifest
 
-    path = runtime.models_path
+    path = runtime.paths.models_path
     manifest = load_model_manifest(path)
     table = Table(title="Lisa Models")
     table.add_column("Model", style="bold")
