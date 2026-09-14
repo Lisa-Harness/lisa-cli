@@ -30,6 +30,38 @@ lisa once "summarize the thread"   # run a single turn non-interactively
 lisa --help     # show all commands
 ```
 
+### One-shot pipelines (`once` with stdin and `--raw`)
+
+`once` reads piped stdin automatically (when stdin is not a tty) and attaches
+it to the turn ahead of your instruction, so config/data can flow through the
+model into another command:
+
+```bash
+cat /etc/sysconfig/whatever.conf | lisa once "recommend improvements to this config"
+cat whatever.conf | lisa once -r "fix it for me." > whatever.conf.new
+```
+
+`-r`/`--raw` writes the response verbatim to stdout — no Rule header, no
+Markdown re-render, no `⚡` footer — moves activity output to stderr, and
+prepends an output contract to the turn so the model emits only the requested
+result (no preamble or commentary). Combine with `-q` to also suppress the
+stderr activity lines. `--no-stdin` disables stdin attachment (use when a
+foreground pipe should not be consumed). `-q -r` = only the raw response on
+stdout.
+
+An unresolved approval in once mode is a hard stop: the request id is durable,
+the process prints the required `/approve <request-id>` to stderr and exits
+with code `3`, so pipelines never mistake an un-decided approval for a
+completed turn. Decide it in an interactive session (or pre-approve the
+command prefix in `policy.yaml`) and re-run.
+
+A model yield — the turn ends with the model asking you a question instead of
+producing a result — is the same contract: the question prints to stderr, stdout
+gets nothing, and the process exits with code `4`. The raw-mode contract tells
+the model to make the best-supported inference from the provided material and
+state assumptions in a trailing comment instead of asking; when even that is
+impossible, re-run with the missing information included in the prompt.
+
 ### Approvals
 
 Commands execute without an approval prompt only when the bash pack reports a
@@ -66,8 +98,10 @@ lisa --once-unknown continue          # one-shot, no env var
 Registered subcommands (`verify`, `pack`, `models`, …) are never rerouted,
 so the flag is safe to leave on. Group-level options and their values
 (e.g. `--log-level debug`) are skipped when locating the subcommand
-position. The env var is the intended default; the flag is redundant and
-exists only for discoverability.
+position. Once-only flags (`-r/--raw`, `-q/--quiet`, `--stdin/--no-stdin`)
+are hoisted after the injected `once` token, so `lisa -r "fix it"` parses as
+`lisa once -r "fix it"`. The env var is the intended default; the flag is
+redundant and exists only for discoverability.
 
 ## Development
 

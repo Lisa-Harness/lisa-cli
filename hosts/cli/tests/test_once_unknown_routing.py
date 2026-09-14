@@ -102,6 +102,62 @@ def test_no_positional_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli_main._maybe_route_to_once(["--version"]) == ["--version"]
 
 
+# ── Once-only flag hoisting ──────────────────────────────────────────
+
+
+def test_raw_flag_hoisted_after_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`lisa -r "fix"` parses as `lisa once -r "fix"`."""
+    monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
+    assert cli_main._maybe_route_to_once(["-r", "fix it"]) == [
+        "once",
+        "-r",
+        "fix it",
+    ]
+
+
+def test_raw_and_quiet_hoisted_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Multiple once-only flags keep their order after the injected once."""
+    monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
+    assert cli_main._maybe_route_to_once(["-q", "--raw", "summarize"]) == [
+        "once",
+        "-q",
+        "--raw",
+        "summarize",
+    ]
+
+
+def test_long_raw_flag_hoisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The long form --raw hoists the same as -r."""
+    monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
+    assert cli_main._maybe_route_to_once(["--raw", "fix"]) == ["once", "--raw", "fix"]
+
+
+def test_once_flag_after_positional_not_touched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flags after the positional are already once options; head is empty."""
+    monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
+    assert cli_main._maybe_route_to_once(["fix it", "-r"]) == ["once", "fix it", "-r"]
+
+
+def test_once_only_flag_without_routing_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without routing active, argv is untouched even with -r present."""
+    monkeypatch.delenv(cli_main._ONCE_UNKNOWN_ENV, raising=False)
+    assert cli_main._maybe_route_to_once(["-r", "fix it"]) == ["-r", "fix it"]
+
+
+def test_group_options_and_once_flags_coexist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Group options stay put; only once-only flags hoist after `once`."""
+    monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
+    assert cli_main._maybe_route_to_once(
+        ["--log-level", "debug", "-r", "fix it"]
+    ) == ["--log-level", "debug", "once", "-r", "fix it"]
+
+
 @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
 def test_falsy_env_values_disable_routing(
     val: str, monkeypatch: pytest.MonkeyPatch

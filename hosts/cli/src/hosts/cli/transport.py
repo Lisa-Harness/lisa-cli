@@ -29,6 +29,7 @@ Stage-line legend
 from __future__ import annotations
 
 import logging
+import sys
 from collections import deque
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -1450,15 +1451,36 @@ class OnceTransport(RichTransport):
 
     Non-tty consoles (``console.is_terminal`` False) skip the spinner entirely
     and emit only the completed-event lines — safe under ``| grep``.
+
+    Raw mode (``raw=True``) writes the response verbatim to raw stdout — no
+    Rule header, no Markdown re-render — so redirected/piped output stays
+    machine-readable; all activity output lives on the transport console
+    (stderr when the once command runs in raw mode). An approval that reaches
+    the response un-decided sets ``approval_unresolved`` for the caller to
+    exit non-zero instead of emitting an interactive prompt.
     """
 
     _ACTIVITY_WIDTH: int = 100
 
-    def __init__(self, *, console: Console | None = None, quiet: bool = False) -> None:
+    def __init__(
+        self, *, console: Console | None = None, quiet: bool = False, raw: bool = False
+    ) -> None:
         super().__init__(console=console)
         self.compact = True
         self.with_prefix = False
         self.quiet = quiet
+        self.raw = raw
+        # Set when a response arrives carrying an unresolved approval request:
+        # once mode has no prompt loop to decide approvals, so the caller exits
+        # with _APPROVAL_REQUIRED_EXIT instead of printing approval text into
+        # redirected output. Never cleared here; owned by the command path.
+        self.approval_unresolved: bool = False
+        # Set when the turn ended in a model yield (the model asked the
+        # operator a question instead of finishing). The question goes to
+        # stderr only; stdout gets nothing, so pipelines never receive the
+        # question as if it were the requested artifact.
+        self.yield_unresolved: bool = False
+        self.yield_question: str = ""
         self._active_label: str = ""
         self._last_tool_data: dict[str, Any] | None = None
         self._last_tool_streaming: bool = False
@@ -1658,7 +1680,25 @@ class OnceTransport(RichTransport):
             self._streamed_during_turn = True
 
     async def on_response(self, text: str, data: dict[str, Any] | None = None) -> None:
-        """Print the answer, then the compact ⚡ footer (or nothing if quiet)."""
+        """Print the answer, then the compact ⚡ footer (or nothing if quiet).
+
+        Raw mode writes ``text`` verbatim to raw stdout — no Rule header, no
+        Markdown re-render — keeping redirected/piped output machine-readable;
+        the ⚡ footer prints on the transport console (stderr in raw mode).
+
+        An approval that reaches the response un-decided is a hard stop: once
+        mode has no prompt loop to answer it, so the request id is stashed
+        (``approval_unresolved``) and nothing is written to stdout — the
+        caller exits non-zero rather than emitting an interactive panel (or
+        the bare approval text) into redirected output.
+
+        A model yield (the ``yield`` terminal action — the model asked the
+        operator a question instead of finishing) is the same contract: the
+        question is stashed (``yield_unresolved``), printed to stderr only,
+        and stdout gets nothing — the caller exits non-zero instead of
+        writing the question into redirected output as if it were the
+        requested result.
+        """
         self.stop_activity()
         self._answer_staging = Text()
         approval = (data or {}).get("approval")
@@ -1666,14 +1706,53 @@ class OnceTransport(RichTransport):
             from hosts.cli.render import render_approval_panel  # noqa: PLC0415
 
             self.pending_approval = approval
-            render_approval_panel(approval, console=self.console)
+            self.approval_unresolved = True
+            if self.console.is_terminal:
+                render_approval_panel(approval, console=self.console)
+            else:
+                # Non-interactive surface (piped/redirected): fail fast on
+                # stderr instead of a panel the operator can never answer.
+                request_id = str(approval.get("request_id", ""))
+                target = str(approval.get("target_id", "action"))
+                Console(stderr=True).print(
+                    f"[red]Approval required for {target} (request {request_id}). "
+                    f"Re-run interactively, then /approve {request_id}, or "
+                    f"pre-approve via policy.yaml.[/red]"
+                )
+            return
+        # A model yield (ask-the-operator question) is an unresolved turn, not
+        # an answer. The host surfaces it structurally on
+        # ``data["yielded"]`` (and ``HostCommandResult.yielded_question``).
+        yield_question = str((data or {}).get("yielded") or "")
+        if yield_question:
+            self.yield_unresolved = True
+            self.yield_question = yield_question
+            self.console.print(
+                Text(f"⏸ Model asked: {yield_question}", style=STYLE_ROW_TRANSITION)
+            )
+            if not self.console.is_terminal:
+                Console(stderr=True).print(
+                    "[red]The model asked a question instead of producing a "
+                    "result. Once mode cannot answer it. Re-run with the "
+                    "missing information in the prompt, or interactively.[/red]"
+                )
             return
         if text:
-            self.console.print(Rule(title="Response", style=STYLE_BORDER_RESPONSE))
-            self.console.print(Markdown(text))
-        if text and not self.quiet:
+            if self.raw:
+                sys.stdout.write(text)
+                if not text.endswith("\n"):
+                    sys.stdout.write("\n")
+                sys.stdout.flush()
+            else:
+                self.console.print(Rule(title="Response", style=STYLE_BORDER_RESPONSE))
+                self.console.print(Markdown(text))
+        if text and not self.quiet and not self.raw:
             self.console.print()
-        if not self.quiet:
+        if not self.quiet and not self.raw:
+            self._print_once_footer()
+        elif self.raw and not self.quiet:
+            # The footer is activity output: in raw mode it prints on the
+            # transport console (stderr) so stdout stays machine-readable.
             self._print_once_footer()
 
     async def on_error(self, message: str, exc: Exception | None = None) -> None:

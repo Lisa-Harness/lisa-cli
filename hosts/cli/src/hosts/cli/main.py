@@ -97,6 +97,8 @@ from hosts.cli.render import (
 if TYPE_CHECKING:
     from host.runtime import HostRuntime as HostRuntime
 
+    from hosts.cli.transport import OnceTransport as OnceTransport
+
 # ``handle_message`` is deferred to the turn-execution call sites
 # (``_run_once_with_teardown``) so ``--version`` / ``modes`` / ``models`` /
 # ``verify`` don't pay the ~3s ``openai`` + ``mcp`` + ``kernel.ipsar_fsm``
@@ -119,6 +121,18 @@ app = typer.Typer(
 # change). Scripts can detect this to distinguish "restart needed" from a
 # clean exit. Matches the BSD sysexits.h value for EX_UNAVAILABLE.
 _RESTART_REQUIRED_EXIT = 69
+
+# Exit code returned when a `once` turn ends with an unresolved approval
+# request. Once mode has no prompt loop to decide an approval, so the
+# request stays durable and the process exits non-zero — scripts detect
+# "needs approval" instead of mistaking it for a completed turn.
+_APPROVAL_REQUIRED_EXIT = 3
+
+# Exit code returned when a `once` turn ends in a model yield (the model
+# asked the operator a question instead of finishing). The question is
+# durable on the thread and printed to stderr; stdout gets nothing. Scripts
+# detect "needs input" and re-run with the missing information in the prompt.
+_YIELD_UNRESOLVED_EXIT = 4
 
 # Env var carrying a message to replay as the first turn on the next launch
 # after a restart. Set by `/pack install ... --resume <msg>` in
@@ -323,6 +337,29 @@ QuietOption = Annotated[
         "-q",
         help="Suppress the once-mode activity line, per-tool lines, and the "
         "⚡ footer so the response is the only output (pipe-friendly).",
+    ),
+]
+StdinOption = Annotated[
+    bool,
+    typer.Option(
+        "--stdin/--no-stdin",
+        help=(
+            "Read piped stdin (when stdin is not a tty) and attach it to the "
+            "turn as a <piped-input> block ahead of the message. Default: auto."
+        ),
+    ),
+]
+RawOption = Annotated[
+    bool,
+    typer.Option(
+        "--raw",
+        "-r",
+        help=(
+            "Write the response verbatim to stdout for redirection/piping — no "
+            "Rule header, no Markdown re-render, no footer — move activity "
+            "output to stderr, and prepend a raw-mode output contract to the "
+            "turn so the model emits only the requested result."
+        ),
     ),
 ]
 # ---------------------------------------------------------------------------
@@ -1334,10 +1371,51 @@ async def _run_pack_update_all(runtime: HostRuntime) -> tuple[bool, str]:
 # once command
 # ---------------------------------------------------------------------------
 
+# Prepended to the turn message in --raw mode: the response is consumed
+# verbatim as a machine artifact, so the model must emit only the result.
+# The yield prohibition is explicit: a prior turn ended in the `yield`
+# tool (asking the operator for missing input), which wrote the question
+# prose into redirected output as if it were the artifact.
+_RAW_CONTRACT = (
+    "OUTPUT CONTRACT (raw mode): Your entire response text is consumed verbatim "
+    "as a machine artifact (redirected to a file or piped to another tool). "
+    "Emit ONLY the requested result — no preamble, no closing commentary, no "
+    "restating the task, no follow-up questions, and do not wrap the whole "
+    "output in a markdown code fence. "
+    "Do NOT call the yield/ask tool and do not end with a question: if required "
+    "input is missing, make the best-supported inference from the provided "
+    "material and state the assumption in a trailing comment (e.g. '# NOTE: ...'), "
+    "then still emit the full result. A question or an empty response is a "
+    "failed turn."
+)
+
+
+def _compose_once_message(instruction: str, payload: str) -> str:
+    """Compose the once-mode turn message from the CLI instruction and stdin.
+
+    When both are present the payload is wrapped in a ``<piped-input>`` block
+    ahead of the instruction so the model can tell data from directive;
+    otherwise the non-empty one is the message.
+    """
+    instruction = instruction.strip()
+    payload = payload.strip()
+    if payload and instruction:
+        return f"<piped-input>\n{payload}\n</piped-input>\n\n{instruction}"
+    return payload or instruction
+
 
 @app.command("once", help="Run a single turn and print the response.")
 def _once_command(
-    message: str = typer.Argument(..., help="Message to route through the host."),
+    message: str = typer.Argument(
+        "",
+        help=(
+            "Message to route through the host. When stdin is piped (not a tty), "
+            "its contents are attached as the turn payload, e.g. "
+            "`cat f.conf | lisa once -r 'fix this config'`."
+        ),
+    ),
+    stdin: StdinOption = True,
+    raw: RawOption = False,
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1352,6 +1430,22 @@ def _once_command(
     host_log: HostLogOption = "",
     quiet: QuietOption = False,
 ) -> None:
+    payload = ""
+    if stdin and not sys.stdin.isatty():
+        try:
+            payload = sys.stdin.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            console.print(f"[red]Failed to read piped stdin: {exc}[/red]")
+            raise typer.Exit(code=2) from exc
+    if not message.strip() and not payload.strip():
+        console.print(
+            "[red]No message and no piped input. Pass a message and/or pipe "
+            "data on stdin.[/red]"
+        )
+        raise typer.Exit(code=2)
+    full_message = _compose_once_message(message, payload)
+    if raw:
+        full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
     runtime = _initialize_runtime_or_exit(
         log_level=log_level,
         log_path=log,
@@ -1369,24 +1463,40 @@ def _once_command(
     )
     if runtime is None:
         return
-    restart_required = asyncio.run(_run_once_with_teardown(runtime, message, quiet=quiet))
+    restart_required, transport = asyncio.run(
+        _run_once_with_teardown(runtime, full_message, quiet=quiet, raw=raw)
+    )
+    if transport.approval_unresolved:
+        # The approval request id is durable; the operator must decide it in
+        # an interactive session. Exit non-zero so pipelines never mistake an
+        # un-decided approval for a completed turn.
+        raise typer.Exit(code=_APPROVAL_REQUIRED_EXIT)
+    if transport.yield_unresolved:
+        # The model ended in a yield (ask-the-operator). The question was
+        # printed to stderr; stdout got nothing. Exit non-zero so pipelines
+        # never mistake the question for the requested artifact.
+        raise typer.Exit(code=_YIELD_UNRESOLVED_EXIT)
     if restart_required:
         _exit_restart_required()
 
 
 async def _run_once_with_teardown(
-    runtime: HostRuntime, message: str, *, quiet: bool = False
-) -> bool:
+    runtime: HostRuntime, message: str, *, quiet: bool = False, raw: bool = False
+) -> tuple[bool, OnceTransport]:
     """Run one turn, then close the MCP pool.
 
-    Returns ``True`` if the runtime flagged a restart as required (e.g.
-    a pack lifecycle command), so the caller can exit with a restart
-    notice instead of a clean exit.
+    Returns ``(restart_required, transport)`` — the transport is returned so
+    the caller can inspect post-turn state (``approval_unresolved``).
+
+    In raw mode the transport console moves to stderr so activity output
+    (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
+    the response itself is written verbatim to stdout by the transport.
     """
     from host.handle_message import handle_message
     from hosts.cli.transport import OnceTransport
 
-    transport = OnceTransport(console=console, quiet=quiet)
+    transport_console: Console = Console(stderr=True) if raw else console
+    transport = OnceTransport(console=transport_console, quiet=quiet, raw=raw)
     transport.start_turn(message)
     try:
         await runtime.start()
@@ -1394,7 +1504,7 @@ async def _run_once_with_teardown(
     finally:
         transport.stop_activity()
         await runtime.aclose()
-    return runtime.session.restart_required
+    return runtime.session.restart_required, transport
 
 
 # ---------------------------------------------------------------------------
@@ -1459,6 +1569,11 @@ _VALUE_TAKING_GROUP_FLAGS = frozenset(
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# Once-only flags: valid on the `once` subcommand but not at group level.
+# When once-unknown routing injects `once`, these are hoisted after it so
+# Typer parses them as once options (`lisa -r "fix it"` -> `lisa once -r "fix it"`).
+_ONCE_ONLY_FLAGS = frozenset({"-r", "--raw", "-q", "--quiet", "--stdin", "--no-stdin"})
+
 
 def _once_unknown_active(args: list[str]) -> bool:
     """True if once-unknown routing is on (env var or --once-unknown flag)."""
@@ -1511,6 +1626,12 @@ def _maybe_route_to_once(args: list[str]) -> list[str]:
         lisa continue                       -> lisa once continue
         lisa "do something else"             -> lisa once "do something else"
         lisa --log-level debug continue      -> lisa --log-level debug once continue
+        lisa -r "fix it"                     -> lisa once -r "fix it"
+
+    Once-only flags (``-r/--raw``, ``-q/--quiet``, ``--stdin/--no-stdin``)
+    appearing before the positional are hoisted to just after the injected
+    ``once`` token — Typer rejects them as unknown group options otherwise.
+    Tokens after a bare ``--`` are positional content and are never hoisted.
 
     Known subcommands (e.g. `verify`, `pack`) are never rerouted, so the
     flag is safe to leave on. The ``--once-unknown`` flag is stripped before
@@ -1527,6 +1648,14 @@ def _maybe_route_to_once(args: list[str]) -> list[str]:
         return args
     if args[idx] in _known_command_names():
         return args
+    head = args[:idx]
+    # A bare `--` terminates option parsing: tokens after it are positional
+    # content, never flags, so only hoist once-only flags before it.
+    sep = head.index("--") if "--" in head else len(head)
+    hoisted = [a for a in head[:sep] if a in _ONCE_ONLY_FLAGS]
+    if hoisted:
+        kept = [a for a in head[:sep] if a not in _ONCE_ONLY_FLAGS]
+        return [*kept, *head[sep:], "once", *hoisted, *args[idx:]]
     return [*args[:idx], "once", *args[idx:]]
 
 
