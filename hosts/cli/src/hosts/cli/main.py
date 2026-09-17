@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -146,6 +147,29 @@ _RESTART_RESUME_MESSAGE_ENV = "LISA_RESTART_RESUME_MESSAGE"
 # discoverability and is handled in pre-parse before Typer sees argv.
 _ONCE_UNKNOWN_ENV = "LISA_ONCE_UNKNOWN"
 _ONCE_UNKNOWN_FLAG = "--once-unknown"
+
+# Sentinel for --approve/--deny meaning "the (single) pending approval":
+# resolved to the concrete request id before dispatch via the approval
+# service's list_pending (recorded-owner identity makes cross-process
+# pending records visible to a fresh process).
+_PENDING_APPROVAL_TARGET = "pending"
+
+# Grammar for `lisa once` decision subcommands (matched against the
+# lowercased message). `policy` accepts a bare verb or up to two short
+# arg tokens (subcommand word + value; the host validates the vocabulary).
+# approve/deny require the first argument to look like a request id (the
+# host mints 32-hex ids) or start a --remember flag whose value is
+# free-form. Prose like "deny the claim" or "approve my leave request"
+# fails the id shape and stays on the model path. The host re-validates
+# the exact id anyway.
+_REQUEST_ID_SHAPE = r"[0-9a-f]{8,64}"
+_ONCE_HOST_COMMAND_RE = re.compile(
+    r"^(?:"
+    r"policy(?:\s+\S{1,32}){0,2}"
+    r"|approve(?:\s+" + _REQUEST_ID_SHAPE + r")?(?:\s+--remember\b.*)?"
+    r"|deny\s+" + _REQUEST_ID_SHAPE + r""
+    r")$"
+)
 
 
 def _restart_current_process() -> None:
@@ -359,6 +383,42 @@ RawOption = Annotated[
             "Rule header, no Markdown re-render, no footer — move activity "
             "output to stderr, and prepend a raw-mode output contract to the "
             "turn so the model emits only the requested result."
+        ),
+    ),
+]
+OnceApproveOption = Annotated[
+    str,
+    typer.Option(
+        "--approve",
+        help=(
+            "Pre-arm approval for the request id the upcoming turn raises: "
+            "`lisa once --approve <request-id> 'continue'` dispatches "
+            "/approve first, then runs the turn. Use with the durable id "
+            "printed by a prior exit-3 run. `--approve` (bare) targets the "
+            "single pending approval."
+        ),
+    ),
+]
+OnceDenyOption = Annotated[
+    str,
+    typer.Option(
+        "--deny",
+        help=(
+            "Pre-arm a denial for the upcoming turn: "
+            "`lisa once --deny <request-id> 'continue'` dispatches /deny first. "
+            "`--deny` (bare) targets the single pending approval."
+        ),
+    ),
+]
+OnceRememberOption = Annotated[
+    str,
+    typer.Option(
+        "--remember",
+        help=(
+            "With --approve: persist an allow rule for the decided action's "
+            "command prefix (default: program + first subcommand token) so "
+            "future matching runs auto-approve. "
+            "Pass an explicit prefix to widen/narrow the scope."
         ),
     ),
 ]
@@ -1390,6 +1450,122 @@ _RAW_CONTRACT = (
 )
 
 
+def _once_prearmed_decision(
+    approve: str, deny: str, remember: str
+) -> str | None:
+    """Build the pre-armed decision command for a once turn, or None.
+
+    ``--approve``/``--deny`` accept either a request id or, bare, the
+    sentinel "pending" (resolving to the single pending approval via the
+    host's recorded-owner identity). ``--remember <prefix>`` only applies
+    to approve; deny + remember is a usage error.
+    """
+    approve = approve.strip()
+    deny = deny.strip()
+    remember = remember.strip()
+    if approve and deny:
+        console.print("[red]--approve and --deny are mutually exclusive.[/red]")
+        raise typer.Exit(code=2)
+    if remember and not approve:
+        console.print("[red]--remember requires --approve.[/red]")
+        raise typer.Exit(code=2)
+    if not approve and not deny:
+        if remember:
+            console.print("[red]--remember requires --approve.[/red]")
+            raise typer.Exit(code=2)
+        return None
+    if approve:
+        target = approve if approve.lower() != _PENDING_APPROVAL_TARGET else ""
+        cmd = "/approve" + (f" {target}" if target else "")
+        if remember:
+            cmd += f" --remember {remember}"
+        return cmd
+    target = deny if deny.lower() != _PENDING_APPROVAL_TARGET else ""
+    return "/deny" + (f" {target}" if target else "")
+
+
+async def _run_once_host_command_turn(
+    runtime: HostRuntime, command: str
+) -> tuple[bool, str]:
+    """Run one host-command message (no model turn), then close the pool.
+
+    Mirrors ``_run_once_with_teardown`` without transport rendering: the
+    command path returns text (or a structured result) that this helper
+    prints through the shared console. The MCP pool starts in this event
+    loop and closes in the same one (anyio same-loop contract). A bare
+    ``/approve`` / ``/deny`` (no id) resolves to the single pending
+    approval first — the "decide the thing that just stopped me" case.
+    """
+    from host import NullTransport
+    from host.handle_message import handle_message
+
+    command = await _resolve_pending_approval_target(runtime, command)
+    try:
+        await runtime.start()
+        result = await handle_message(runtime, command, NullTransport())
+    finally:
+        await runtime.aclose()
+    text = getattr(result, "text", "") or str(result)
+    return runtime.session.restart_required, text
+
+
+async def _resolve_pending_approval_target(
+    runtime: HostRuntime, command: str
+) -> str:
+    """Resolve a bare ``/approve`` / ``/deny`` to the single pending id.
+
+    The approval store is process-durable and identity-scoped, so a fresh
+    once process sees the request a prior once run left pending. With
+    exactly one pending record the bare verb targets it; zero or multiple
+    pendings leave the command untouched so the host replies with its own
+    diagnostic (usage/expired/ambiguous).
+    """
+    verb, _, rest = command.partition(" ")
+    if verb not in {"/approve", "/deny"} or rest.strip():
+        return command
+    service = getattr(runtime.services, "approval_service", None)
+    if service is None or not hasattr(service, "list_pending"):
+        return command
+    from host.approval import approval_identity
+
+    try:
+        pending = await service.list_pending(approval_identity(runtime))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("once: pending-approval resolution failed: %s", exc)
+        return command
+    if len(pending) == 1:
+        request_id = pending[0].invocation.request_id
+        logger.info("once: resolved bare %s to pending %s", verb, request_id[:8])
+        return f"{verb} {request_id}"
+    return command
+
+
+def _run_once_host_command(command: str, **runtime_kwargs: Any) -> None:
+    """Run a host command (policy/approve/deny) through a fresh runtime.
+
+    The CLI's runtime options are forwarded verbatim; the command string is
+    normalized to its slash form (``approve X`` -> ``/approve X``) and
+    dispatched via handle_message exactly as the REPL would send it, so the
+    host's command handling (identity fallback, policy writes, thread
+    entries) is identical in both modes. Prints the reply and applies the
+    restart-required exit contract when the runtime flags one.
+    """
+    verb, _, rest = command.partition(" ")
+    if verb in {"approve", "deny", "policy"}:
+        command = f"/{command}"
+    runtime = _initialize_runtime_or_exit(**runtime_kwargs)
+    if runtime is None:
+        return
+    restart_required, text = asyncio.run(
+        _run_once_host_command_turn(runtime, command)
+    )
+    if text:
+        console.print(text)
+    if restart_required:
+        _exit_restart_required()
+    raise typer.Exit(code=0)
+
+
 def _compose_once_message(instruction: str, payload: str) -> str:
     """Compose the once-mode turn message from the CLI instruction and stdin.
 
@@ -1411,7 +1587,10 @@ def _once_command(
         help=(
             "Message to route through the host. When stdin is piped (not a tty), "
             "its contents are attached as the turn payload, e.g. "
-            "`cat f.conf | lisa once -r 'fix this config'`."
+            "`cat f.conf | lisa once -r 'fix this config'`. "
+            "Subcommands that skip the turn: `lisa once policy [mode M|bare on|off]`, "
+            "`lisa once approve <id> [--remember <prefix>]`, "
+            "`lisa once deny <id>`."
         ),
     ),
     stdin: StdinOption = True,
@@ -1429,7 +1608,38 @@ def _once_command(
     streaming: StreamingOption = "none",
     host_log: HostLogOption = "",
     quiet: QuietOption = False,
+    approve: OnceApproveOption = "",
+    deny: OnceDenyOption = "",
+    remember: OnceRememberOption = "",
 ) -> None:
+    # ── Decision subcommands (no model turn) ──────────────────────────
+    # `lisa once policy ...`, `lisa once approve <id>`, and
+    # `lisa once deny <id>` route through handle_message like the REPL's
+    # /policy, /approve, /deny: the host owns every decision and the
+    # recorded-owner identity fallback makes a cross-process decision
+    # valid. These run with no turn and exit 0 (or the command's error).
+    # The grammar guard keeps plain prose ("deny the claim", "approve my
+    # leave request") on the model path — only genuine command shapes
+    # (bare verb, verb + id/--remember args, or a policy subcommand) are
+    # intercepted. The host re-validates ids and flags anyway.
+    once_arg = message.strip()
+    if _ONCE_HOST_COMMAND_RE.match(once_arg.lower()):
+        return _run_once_host_command(
+            once_arg,
+            log_level=log_level,
+            log_path=log,
+            no_log=no_log,
+            data_dir=data_dir,
+            thread_dir=thread_dir,
+            no_thread=no_thread,
+            user_slug=session_context,
+            session_context_refresh=session_context_refresh,
+            timezone=timezone,
+            state_snapshot_path=state_snapshot,
+            streaming=streaming,
+            host_log_path=host_log,
+        )
+
     payload = ""
     if stdin and not sys.stdin.isatty():
         try:
@@ -1437,13 +1647,22 @@ def _once_command(
         except (OSError, UnicodeDecodeError) as exc:
             console.print(f"[red]Failed to read piped stdin: {exc}[/red]")
             raise typer.Exit(code=2) from exc
-    if not message.strip() and not payload.strip():
+    # A pre-armed decision (--approve/--deny) carries no message and no
+    # piped payload; it is consumed at the end of the turn.
+    decision_cmd = _once_prearmed_decision(approve, deny, remember)
+    if not message.strip() and not payload.strip() and decision_cmd is None:
         console.print(
             "[red]No message and no piped input. Pass a message and/or pipe "
             "data on stdin.[/red]"
         )
         raise typer.Exit(code=2)
     full_message = _compose_once_message(message, payload)
+    if decision_cmd is not None:
+        # Pre-arm: the decision rides ahead of the turn message so the host
+        # dispatches /approve|/deny FIRST (host-command dispatch runs before
+        # the model turn), then executes the turn with the approval now
+        # settled. --remember persists an allow rule for the decided prefix.
+        full_message = f"{decision_cmd}\n\n{full_message}" if full_message else decision_cmd
     if raw:
         full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
     runtime = _initialize_runtime_or_exit(
@@ -1491,10 +1710,20 @@ async def _run_once_with_teardown(
     In raw mode the transport console moves to stderr so activity output
     (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
     the response itself is written verbatim to stdout by the transport.
+
+    A message whose FIRST line is exactly ``/approve`` or ``/deny`` (the
+    ``--approve``/``--deny`` pre-arm prefix) is resolved against the
+    pending-approval store before the turn runs, so a bare
+    ``lisa once --approve pending 'continue'`` targets the one stopped
+    action without retyping its 32-hex id.
     """
     from host.handle_message import handle_message
     from hosts.cli.transport import OnceTransport
 
+    first_line, _, _rest = message.partition("\n")
+    if first_line.strip() in {"/approve", "/deny"}:
+        message = await _resolve_pending_approval_target(runtime, first_line.strip()) \
+            + ("\n\n" + _rest if _rest.strip() else "")
     transport_console: Console = Console(stderr=True) if raw else console
     transport = OnceTransport(console=transport_console, quiet=quiet, raw=raw)
     transport.start_turn(message)

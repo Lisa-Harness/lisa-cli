@@ -1708,16 +1708,23 @@ class OnceTransport(RichTransport):
             self.pending_approval = approval
             self.approval_unresolved = True
             if self.console.is_terminal:
-                render_approval_panel(approval, console=self.console)
+                # Once mode has no prompt loop: the panel shows the
+                # `lisa once "approve <id>"` commands instead of key hints.
+                render_approval_panel(approval, console=self.console, keystrokes=False)
             else:
                 # Non-interactive surface (piped/redirected): fail fast on
                 # stderr instead of a panel the operator can never answer.
+                # Keep each decision hint short so a 120-col console never
+                # wraps inside a copyable command.
                 request_id = str(approval.get("request_id", ""))
                 target = str(approval.get("target_id", "action"))
-                Console(stderr=True).print(
-                    f"[red]Approval required for {target} (request {request_id}). "
-                    f"Re-run interactively, then /approve {request_id}, or "
-                    f"pre-approve via policy.yaml.[/red]"
+                err_console = Console(stderr=True, width=200)
+                err_console.print(
+                    f"[red]Approval required for {target} (request {request_id}).\n"
+                    f'Decide without a session: lisa once "approve {request_id}" '
+                    f'or lisa once "deny {request_id}"\n'
+                    f'(add --remember <prefix> to approve-and-persist), '
+                    f"then re-run the original command.[/red]"
                 )
             return
         # A model yield (ask-the-operator question) is an unresolved turn, not

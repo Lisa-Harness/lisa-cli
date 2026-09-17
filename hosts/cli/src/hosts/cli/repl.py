@@ -75,6 +75,9 @@ _HOST_REPL_SHORTCUTS: tuple[str, ...] = (
     "/pack uninstall ",
     "/pack update ",
     "/pack update --all",
+    "/policy",
+    "/policy mode ",
+    "/policy bare ",
     "/tokens",
     "/quit",
 )

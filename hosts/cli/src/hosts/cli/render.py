@@ -385,14 +385,20 @@ def render_approval_panel(
     payload: dict[str, object],
     *,
     console: Console | None = None,
+    keystrokes: bool = True,
 ) -> Panel:
-    """Render the keystroke approval panel for a pending action.
+    """Render the approval panel for a pending action.
 
     ``payload`` is the structured ``data["approval"]`` the host attaches to the
     turn response (``lisa.approval.v1``). It shows the tool/pack and effect
     tier, the proposed command, the sandbox containment badge, and the
     decision hints. The host decides approve/ask/deny and owns the policy
     write; this function only renders — it never decides.
+
+    ``keystrokes=False`` (once mode) swaps the y/n/a/v/Esc key hints — which
+    only work while a prompt loop is armed — for the equivalent
+    ``lisa once "approve <id>"`` commands, so the operator can decide from
+    the same shell that raised the request.
     """
 
     target = f"{payload.get('pack_id') or ''}:{payload.get('target_id') or ''}".strip(":")
@@ -428,17 +434,35 @@ def render_approval_panel(
     if expiry:
         body.append(expiry + "\n", style=STYLE_TEXT_MUTED)
 
-    body.append("\n[y]", style=STYLE_CONTAINMENT_CONTAINED)
-    body.append(" approve   ", style=STYLE_TEXT_MUTED)
-    body.append("[n]", style=STYLE_CONTAINMENT_NONE)
-    body.append(" deny   ", style=STYLE_TEXT_MUTED)
-    body.append("[a]", style=STYLE_ROW_MODEL)
-    body.append(" always (remember)   ", style=STYLE_TEXT_MUTED)
-    body.append("[v]", style=STYLE_TEXT_PRIMARY)
-    body.append(" view   ", style=STYLE_TEXT_MUTED)
-    body.append("[esc]", style=STYLE_TEXT_MUTED)
-    body.append(" dismiss\n", style=STYLE_TEXT_MUTED)
-    body.append(f"  /approve {request_id}  or  /deny {request_id}", style=STYLE_TEXT_MUTED)
+    if keystrokes:
+        body.append("\n[y]", style=STYLE_CONTAINMENT_CONTAINED)
+        body.append(" approve   ", style=STYLE_TEXT_MUTED)
+        body.append("[n]", style=STYLE_CONTAINMENT_NONE)
+        body.append(" deny   ", style=STYLE_TEXT_MUTED)
+        body.append("[a]", style=STYLE_ROW_MODEL)
+        body.append(" always (remember)   ", style=STYLE_TEXT_MUTED)
+        body.append("[v]", style=STYLE_TEXT_PRIMARY)
+        body.append(" view   ", style=STYLE_TEXT_MUTED)
+        body.append("[esc]", style=STYLE_TEXT_MUTED)
+        body.append(" dismiss\n", style=STYLE_TEXT_MUTED)
+        body.append(
+            f"  /approve {request_id}  or  /deny {request_id}",
+            style=STYLE_TEXT_MUTED,
+        )
+    else:
+        body.append("\nDecide from the same shell, without a session:\n", style=STYLE_TEXT_MUTED)
+        body.append(
+            f'  lisa once "approve {request_id}"          # run it\n',
+            style=STYLE_TEXT_PRIMARY,
+        )
+        body.append(
+            f'  lisa once "approve {request_id} --remember <prefix>"\n',
+            style=STYLE_TEXT_MUTED,
+        )
+        body.append(
+            f'  lisa once "deny {request_id}"   ·   lisa once policy\n',
+            style=STYLE_TEXT_MUTED,
+        )
 
     panel = Panel(
         body,

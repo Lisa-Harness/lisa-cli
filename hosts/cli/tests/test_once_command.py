@@ -296,14 +296,19 @@ async def test_once_transport_flags_unresolved_approval() -> None:
 async def test_once_transport_approval_stderr_notice(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Non-tty transport console: the approval notice goes to stderr."""
+    """Non-tty transport console: the approval notice goes to stderr.
+
+    The notice advertises the once-mode decision commands (no REPL needed)
+    rather than the bare /approve slash form.
+    """
     transport = OnceTransport(console=Console(force_terminal=False, width=120))
     await transport.on_response(
         "Approval required.", {"approval": _approval_payload()}
     )
     captured = capsys.readouterr()
-    assert "/approve abc123def456" in captured.err
+    assert 'lisa once "approve abc123def456"' in captured.err
     assert "Approval required" in captured.err
+    assert 'lisa once "deny abc123def456"' in captured.err
 
 
 @pytest.mark.asyncio

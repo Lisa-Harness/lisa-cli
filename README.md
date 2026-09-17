@@ -50,10 +50,20 @@ foreground pipe should not be consumed). `-q -r` = only the raw response on
 stdout.
 
 An unresolved approval in once mode is a hard stop: the request id is durable,
-the process prints the required `/approve <request-id>` to stderr and exits
+the process prints the required decision commands to stderr and exits
 with code `3`, so pipelines never mistake an un-decided approval for a
-completed turn. Decide it in an interactive session (or pre-approve the
-command prefix in `policy.yaml`) and re-run.
+completed turn. Decide it from the same shell — no session needed — and re-run:
+
+```bash
+lisa once "approve <request-id>"           # run the paused action
+lisa once "approve <request-id> --remember git status"   # persist an allow rule
+lisa once "deny <request-id>"
+```
+
+(Bare `lisa once approve` with no id resolves to the single pending request.
+A pre-armed decision also works in one shot:
+`lisa once --approve <request-id> "continue the task"` dispatches the approval
+first, then runs the turn.)
 
 A model yield — the turn ends with the model asking you a question instead of
 producing a result — is the same contract: the question prints to stderr, stdout
@@ -76,12 +86,34 @@ the panel again, or `Esc` to dismiss it. Explicit commands remain available:
 /approve <request-id> --remember [command-prefix]
 ```
 
-The host reads `${LISA_DATA_DIR:-~/.lisa}/policy.yaml` for durable policy. The
-default is `mode: ask` with `sandbox_downgrade: true`. Rules are checked in the
+Once mode decides with the same host machinery (the request id survives the
+process boundary):
+
+```bash
+lisa once "approve <request-id>"                        # decide + re-run
+lisa once "deny <request-id>"
+lisa once "approve <request-id> --remember [prefix]"
+```
+
+### Policy (`/policy`, `lisa once policy`)
+
+Inspect and change the approval policy without hand-editing YAML. In the
+REPL it is `/policy`; in scripts it is `lisa once policy`:
+
+```bash
+lisa once policy                     # show the active document
+lisa once "policy mode trust"        # auto-allow write/execute (ask|trust|plan)
+lisa once "policy bare off"          # stop prompting for unsandboxed execute
+```
+
+Changes take effect immediately — the policy engine re-reads
+`${LISA_DATA_DIR:-~/.lisa}/policy.yaml` on every approval request. The default
+is `mode: ask` with `sandbox_downgrade: true`. Rules are checked in the
 order `deny`, `ask`, then `allow`; a remembered rule is scoped to the tool and
 the command prefix, rather than granting broad shell access. `external_write`
 actions always require an explicit policy decision because they leave the
-sandbox boundary.
+sandbox boundary, and `mode: trust` still prompts for unsandboxed `execute`
+(`bare_requires_approval: true`, toggle with `policy bare off`).
 
 ### Lazy `once` routing
 
