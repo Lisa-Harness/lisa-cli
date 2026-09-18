@@ -1826,7 +1826,7 @@ def _intake_command(
     """One-shot intake process. Triggered by systemd timer or cron.
 
     Collects signals from installed pack signal connectors, runs processing
-    loops, and writes the merged UnifiedState to ``<data-dir>/state.json``.
+    loops, and writes the merged UnifiedState to ``<data-dir>/state/state.json``.
     The next turn reads that state so the model has fresh ambient data.
     """
     resolved_data_dir = (
@@ -1845,7 +1845,7 @@ def _intake_command(
         f"[green]Intake tick complete.[/green] "
         f"{len(state.signal_snapshots)} signal(s), "
         f"{len(state.active_alerts)} alert(s). "
-        f"State written to {resolved_data_dir / 'state.json'}"
+        f"State written to {resolved_data_dir / 'state' / 'state.json'}"
     )
 
 

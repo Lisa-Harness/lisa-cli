@@ -654,7 +654,7 @@ def _build_repl_prompt_session(
     """
     if PromptSession is None or FileHistory is None or Completer is None or Document is None:
         return None
-    history_path = runtime.paths.data_dir / _REPL_HISTORY_FILE_NAME
+    history_path = runtime.paths.state_dir / _REPL_HISTORY_FILE_NAME
     history_path.parent.mkdir(parents=True, exist_ok=True)
     bindings = build_repl_key_bindings(transport, dispatcher) if KeyBindings is not None else None
     return _ReplPromptSession(
