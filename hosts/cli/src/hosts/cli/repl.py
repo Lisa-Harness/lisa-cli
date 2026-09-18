@@ -64,6 +64,7 @@ _HOST_REPL_SHORTCUTS: tuple[str, ...] = (
     "/help",
     "/help capabilities",
     "/intake",
+    "/last",
     "/mcp",
     "/models show",
     "/models discover",

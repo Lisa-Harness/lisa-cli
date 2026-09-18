@@ -1245,6 +1245,69 @@ def _tools_command(
     render_tools(runtime, console=console)
 
 
+# ---------------------------------------------------------------------------
+# last command
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "last",
+    help=(
+        "Reprint a previous response verbatim (default: the last model turn). "
+        "Pass a turn number to replay that turn's response: `lisa last 3`. "
+        "Reads the durable thread — no model call."
+    ),
+)
+def _last_command(
+    turn: str = typer.Argument(
+        "",
+        help="Optional turn number to replay that turn's response.",
+    ),
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    session_context_refresh: SessionContextRefreshOption = False,
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "none",
+    host_log: HostLogOption = "",
+) -> None:
+    runtime = _initialize_runtime_or_exit(
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        user_slug=session_context,
+        session_context_refresh=session_context_refresh,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
+    if runtime is None:
+        return
+    from host.commands import render_last_turn  # noqa: PLC0415  # lazy: defers host.commands startup cost
+
+    # Plain print, no Markdown re-render: piped/redirected output stays
+    # machine-readable (the same verbatim contract as OnceTransport raw
+    # mode). highlight/markup off so Rich never colorizes or interprets
+    # the response body.
+    console.print(
+        render_last_turn(runtime, turn.strip()),
+        highlight=False,
+        markup=False,
+        soft_wrap=False,
+    )
+
+
 McpIntrospection = tuple[dict[str, Any], dict[str, list[MCPToolSpec]]]
 """One MCP introspection result: ``(health, tools_by_server)``.
 
