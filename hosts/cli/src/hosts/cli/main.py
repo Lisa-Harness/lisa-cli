@@ -41,15 +41,30 @@ try:
 
     _FRAMEWORK_ROOT = _framework_root()
     from host.config import default_data_dir as _default_data_dir
+    from host.config import profile_data_dir as _profile_data_dir
 
-    # Honor LISA_DATA_DIR here so tool-mode installs configured with a custom
-    # data dir find their .env before any HostRuntime exists to do the full
-    # config resolution. Falls back to the platform default (~/.lisa).
+    # Honor LISA_DATA_DIR (and LISA_PROFILE) here so tool-mode installs
+    # configured with a custom data dir find their .env before any
+    # HostRuntime exists to do the full config resolution. Falls back to
+    # the platform default (~/.lisa). Mirrors HostConfig.from_env's
+    # precedence: LISA_DATA_DIR > LISA_PROFILE > default_data_dir().
     _data_dir_override = os.getenv("LISA_DATA_DIR", "").strip()
     if _data_dir_override:
         _default_env_dir = Path(_data_dir_override).expanduser()
     else:
-        _default_env_dir = _default_data_dir()
+        _profile_override = os.getenv("LISA_PROFILE", "").strip()
+        try:
+            _default_env_dir = (
+                _profile_data_dir(_profile_override)
+                if _profile_override
+                else _default_data_dir()
+            )
+        except ValueError:
+            # Invalid profile name: HostConfig.from_env raises the real
+            # startup error later; the .env loader falls back to the
+            # platform default so the error panel (not an import crash)
+            # is what the user sees.
+            _default_env_dir = _default_data_dir()
 
     # Module-level search order, shared with _verify_check_env (which reads
     # this constant so monkeypatched tests and the loader stay in sync).
@@ -281,6 +296,17 @@ DataDirOption = Annotated[
         ),
     ),
 ]
+ProfileOption = Annotated[
+    str,
+    typer.Option(
+        "--profile",
+        help=(
+            "Named data-dir profile: resolves to ~/.lisa/profiles/<name> "
+            "(overrides LISA_PROFILE; --data-dir still wins). Shares the "
+            "base packs venv, isolates threads/memory/models/policy."
+        ),
+    ),
+]
 OverlaysDirOption = Annotated[
     str,
     typer.Option(
@@ -427,12 +453,33 @@ OnceRememberOption = Annotated[
 # ---------------------------------------------------------------------------
 
 
+def _resolve_profiled_data_dir(data_dir: str, profile: str) -> str:
+    """Resolve the effective data dir from --data-dir / --profile.
+
+    Precedence (matching ``HostConfig.from_env``): explicit ``--data-dir``
+    wins; then ``--profile`` (CLI arg); then the framework falls back to
+    ``LISA_DATA_DIR`` > ``LISA_PROFILE`` > ``~/.lisa``. Returning an empty
+    string hands the decision to the framework so the env-var chain stays
+    in one place. An invalid profile name raises ``ValueError``, which
+    ``_initialize_runtime_or_exit`` renders as a startup-error panel.
+    """
+    if data_dir.strip():
+        return data_dir
+    name = profile.strip()
+    if not name:
+        return ""
+    from host.config import profile_data_dir
+
+    return str(profile_data_dir(name))
+
+
 def _initialize_runtime(
     *,
     log_level: str = "",
     log_path: str = "",
     no_log: bool = False,
     data_dir: str = "",
+    profile: str = "",
     overlays_dir: str = "",
     thread_dir: str = "",
     no_thread: bool = False,
@@ -452,6 +499,11 @@ def _initialize_runtime(
     wiring -> MCP config compilation) lives in the shared bootstrap so
     the CLI and web hosts cannot drift.
 
+    ``profile`` resolves to ``~/.lisa/profiles/<name>`` here (CLI arg >
+    ``LISA_PROFILE``; an explicit ``data_dir`` still wins) because
+    ``--data-dir`` and ``--profile`` are both CLI-level data-dir inputs —
+    the framework's ``HostConfig.from_env`` only knows the env var.
+
     The MCP pool is NOT started here â€” ``runtime.start()`` must be called
     inside the host's event loop (see :func:`hosts.cli.repl.run_repl`).
     """
@@ -462,7 +514,7 @@ def _initialize_runtime(
         log_level=log_level,
         log_path=log_path,
         no_log=no_log,
-        data_dir=data_dir,
+        data_dir=_resolve_profiled_data_dir(data_dir, profile),
         overlays_dir=overlays_dir,
         thread_dir=thread_dir,
         no_thread=no_thread,
@@ -504,6 +556,7 @@ def _run_default_no_args_mode(
     log: str,
     no_log: bool,
     data_dir: str,
+    profile: str,
     overlays_dir: str,
     thread_dir: str,
     no_thread: bool,
@@ -523,6 +576,7 @@ def _run_default_no_args_mode(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         overlays_dir=overlays_dir,
         thread_dir=thread_dir,
         no_thread=no_thread,
@@ -600,6 +654,7 @@ def _cli_callback(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     overlays_dir: OverlaysDirOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
@@ -620,6 +675,7 @@ def _cli_callback(
         log=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         overlays_dir=overlays_dir,
         thread_dir=thread_dir,
         no_thread=no_thread,
@@ -643,6 +699,7 @@ def _cli_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     overlays_dir: OverlaysDirOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
@@ -658,6 +715,7 @@ def _cli_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         overlays_dir=overlays_dir,
         thread_dir=thread_dir,
         no_thread=no_thread,
@@ -883,6 +941,7 @@ def _verify_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -898,6 +957,7 @@ def _verify_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -950,6 +1010,7 @@ def _modes_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -964,6 +1025,7 @@ def _modes_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1009,6 +1071,7 @@ def _models_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -1023,6 +1086,7 @@ def _models_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1104,6 +1168,7 @@ def _operations_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -1118,6 +1183,7 @@ def _operations_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1149,6 +1215,7 @@ def _tools_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -1163,6 +1230,7 @@ def _tools_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1274,6 +1342,7 @@ def _mcp_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -1288,6 +1357,7 @@ def _mcp_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1332,6 +1402,7 @@ def _pack_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -1346,6 +1417,7 @@ def _pack_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1599,6 +1671,7 @@ def _once_command(
     log: LogOption = "",
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
@@ -1630,6 +1703,7 @@ def _once_command(
             log_path=log,
             no_log=no_log,
             data_dir=data_dir,
+            profile=profile,
             thread_dir=thread_dir,
             no_thread=no_thread,
             user_slug=session_context,
@@ -1670,6 +1744,7 @@ def _once_command(
         log_path=log,
         no_log=no_log,
         data_dir=data_dir,
+        profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
         user_slug=session_context,
@@ -1744,6 +1819,7 @@ async def _run_once_with_teardown(
 @app.command("intake", help="Run one intake tick: collect signals, process, write state.")
 def _intake_command(
     data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
     log_level: LogLevelOption = "",
     host_log: HostLogOption = "",
 ) -> None:
@@ -1753,7 +1829,11 @@ def _intake_command(
     loops, and writes the merged UnifiedState to ``<data-dir>/state.json``.
     The next turn reads that state so the model has fresh ambient data.
     """
-    resolved_data_dir = Path(data_dir).expanduser() if data_dir else default_data_dir()
+    resolved_data_dir = (
+        Path(_resolve_profiled_data_dir(data_dir, profile)).expanduser()
+        if _resolve_profiled_data_dir(data_dir, profile)
+        else default_data_dir()
+    )
     try:
         from host.intake import run_intake
     except ImportError:
@@ -1786,6 +1866,7 @@ _VALUE_TAKING_GROUP_FLAGS = frozenset(
         "--log-level",
         "--log",
         "--data-dir",
+        "--profile",
         "--overlays-dir",
         "--thread-dir",
         "--session-context",

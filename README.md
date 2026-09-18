@@ -135,6 +135,40 @@ are hoisted after the injected `once` token, so `lisa -r "fix it"` parses as
 `lisa once -r "fix it"`. The env var is the intended default; the flag is
 redundant and exists only for discoverability.
 
+### Profiles (`--profile`, `LISA_PROFILE`)
+
+A **profile** is a named sub-workspace of the data dir:
+`~/.lisa/profiles/<name>`. It isolates everything derived from the data
+dir — threads, `memory.db`, `models.yaml`, `policy.yaml`, approvals,
+session context, `files/` — while **sharing the base packs venv**, so
+packs are installed once and discovered from every profile.
+
+```bash
+lisa --profile taxes            # one-shot: use the 'taxes' profile
+LISA_PROFILE=taxes lisa         # env var form (persistent for the shell)
+lisa --profile taxes verify     # works on every subcommand
+```
+
+Precedence: `--data-dir` (explicit) > `LISA_DATA_DIR` > `--profile` /
+`LISA_PROFILE` > `~/.lisa`. A fresh profile starts empty (defaults, like a
+fresh install); seed it from the base dir when you want a head start:
+
+```bash
+mkdir -p ~/.lisa/profiles/taxes
+cp ~/.lisa/models.yaml ~/.lisa/profiles/taxes/
+```
+
+In a shell, a small helper makes switching sticky for the session:
+
+```bash
+lprof taxes     # export LISA_PROFILE=taxes (creates ~/.lisa/profiles/taxes)
+lprof --list    # list profiles, mark the active one
+lprof off       # return to the base data dir
+```
+
+(The profile name must be a single path-safe segment — letters, digits,
+`-`, `_`, `.`.)
+
 ## Development
 
 This repo is a uv workspace whose only member is `hosts/cli/` (src layout:
