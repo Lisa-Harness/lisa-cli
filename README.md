@@ -169,6 +169,29 @@ lprof off       # return to the base data dir
 (The profile name must be a single path-safe segment — letters, digits,
 `-`, `_`, `.`.)
 
+### Data directory layout
+
+The data dir (base or profile) groups everything into lifecycle
+categories; the names live in one place (`sdk.layout`):
+
+```text
+~/.lisa/
+├── config/    models.yaml · policy.yaml · mcp_servers.yaml · overlays/ · session_context.md
+├── state/     installed-packs.json · state.json · approvals.json ·
+│              recovery-items.json · code-change-artifacts.json ·
+│              repl_history.txt · models.proposed.yaml
+├── data/      memory.db · threads/ · files/ · backups/
+├── cache/     fetch/ · session_context_cache/ · layers/    (rm-safe)
+├── logs/      host.jsonl · mcp/<server_id>.jsonl · token-usage.jsonl
+├── run/       per-session execution state, keyed by session hash:
+│              jobs/ · scratch/ · profile/ · sandbox-facts.json · logs (rm-safe)
+├── venv/      packs venv (shared with profiles)
+└── .env
+```
+
+`cache/` and `run/` can be deleted at any time. A backup of `config/`,
+`state/`, and `data/` captures everything durable.
+
 ## Development
 
 This repo is a uv workspace whose only member is `hosts/cli/` (src layout:
