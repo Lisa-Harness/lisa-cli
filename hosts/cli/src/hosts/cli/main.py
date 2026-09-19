@@ -55,9 +55,7 @@ try:
         _profile_override = os.getenv("LISA_PROFILE", "").strip()
         try:
             _default_env_dir = (
-                _profile_data_dir(_profile_override)
-                if _profile_override
-                else _default_data_dir()
+                _profile_data_dir(_profile_override) if _profile_override else _default_data_dir()
             )
         except ValueError:
             # Invalid profile name: HostConfig.from_env raises the real
@@ -132,6 +130,11 @@ app = typer.Typer(
     no_args_is_help=False,
     help="Run the Lisa framework terminal host.",
 )
+
+# Lisa palette accent for response separators (kept in sync with the shared
+# palette in repl.py / transport.py — the same value RichTransport uses for
+# the "Response" rule).
+_STYLE_RESPONSE = "dark_sea_green4"
 
 # Exit code returned when a restart is required (e.g. after a pack lifecycle
 # change). Scripts can detect this to distinguish "restart needed" from a
@@ -1294,18 +1297,24 @@ def _last_command(
     )
     if runtime is None:
         return
-    from host.commands import render_last_turn  # noqa: PLC0415  # lazy: defers host.commands startup cost
-
-    # Plain print, no Markdown re-render: piped/redirected output stays
-    # machine-readable (the same verbatim contract as OnceTransport raw
-    # mode). highlight/markup off so Rich never colorizes or interprets
-    # the response body.
-    console.print(
-        render_last_turn(runtime, turn.strip()),
-        highlight=False,
-        markup=False,
-        soft_wrap=False,
+    from host.commands import (  # noqa: PLC0415  # lazy: defers host.commands startup cost
+        render_last_turn,
     )
+    from rich.markdown import Markdown  # noqa: PLC0415  # lazy: defers startup cost
+    from rich.rule import Rule  # noqa: PLC0415  # lazy: defers startup cost
+
+    response_text = render_last_turn(runtime, turn.strip())
+    if not console.is_terminal:
+        # Piped/redirected: verbatim, no Markdown re-render — piped output
+        # stays machine-readable (the same contract as OnceTransport raw
+        # mode). highlight/markup off so Rich never interprets the body.
+        console.print(response_text, highlight=False, markup=False, soft_wrap=False)
+        return
+    # Interactive: the same treatment the original answer gets — a
+    # "Response" rule separator plus Rich Markdown rendering (colors,
+    # headings, code fences), mirroring RichTransport.on_response.
+    console.print(Rule(title="Response", style=_STYLE_RESPONSE))
+    console.print(Markdown(response_text))
 
 
 McpIntrospection = tuple[dict[str, Any], dict[str, list[MCPToolSpec]]]
@@ -1585,9 +1594,7 @@ _RAW_CONTRACT = (
 )
 
 
-def _once_prearmed_decision(
-    approve: str, deny: str, remember: str
-) -> str | None:
+def _once_prearmed_decision(approve: str, deny: str, remember: str) -> str | None:
     """Build the pre-armed decision command for a once turn, or None.
 
     ``--approve``/``--deny`` accept either a request id or, bare, the
@@ -1619,9 +1626,7 @@ def _once_prearmed_decision(
     return "/deny" + (f" {target}" if target else "")
 
 
-async def _run_once_host_command_turn(
-    runtime: HostRuntime, command: str
-) -> tuple[bool, str]:
+async def _run_once_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
     """Run one host-command message (no model turn), then close the pool.
 
     Mirrors ``_run_once_with_teardown`` without transport rendering: the
@@ -1644,9 +1649,7 @@ async def _run_once_host_command_turn(
     return runtime.session.restart_required, text
 
 
-async def _resolve_pending_approval_target(
-    runtime: HostRuntime, command: str
-) -> str:
+async def _resolve_pending_approval_target(runtime: HostRuntime, command: str) -> str:
     """Resolve a bare ``/approve`` / ``/deny`` to the single pending id.
 
     The approval store is process-durable and identity-scoped, so a fresh
@@ -1691,9 +1694,7 @@ def _run_once_host_command(command: str, **runtime_kwargs: Any) -> None:
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    restart_required, text = asyncio.run(
-        _run_once_host_command_turn(runtime, command)
-    )
+    restart_required, text = asyncio.run(_run_once_host_command_turn(runtime, command))
     if text:
         console.print(text)
     if restart_required:
@@ -1789,8 +1790,7 @@ def _once_command(
     decision_cmd = _once_prearmed_decision(approve, deny, remember)
     if not message.strip() and not payload.strip() and decision_cmd is None:
         console.print(
-            "[red]No message and no piped input. Pass a message and/or pipe "
-            "data on stdin.[/red]"
+            "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
         )
         raise typer.Exit(code=2)
     full_message = _compose_once_message(message, payload)
@@ -1860,8 +1860,9 @@ async def _run_once_with_teardown(
 
     first_line, _, _rest = message.partition("\n")
     if first_line.strip() in {"/approve", "/deny"}:
-        message = await _resolve_pending_approval_target(runtime, first_line.strip()) \
-            + ("\n\n" + _rest if _rest.strip() else "")
+        message = await _resolve_pending_approval_target(runtime, first_line.strip()) + (
+            "\n\n" + _rest if _rest.strip() else ""
+        )
     transport_console: Console = Console(stderr=True) if raw else console
     transport = OnceTransport(console=transport_console, quiet=quiet, raw=raw)
     transport.start_turn(message)

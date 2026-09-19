@@ -37,12 +37,15 @@ def _invoke_last(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
     argv: list[str],
+    *,
+    force_terminal: bool = False,
 ) -> tuple[int | None, str]:
     """Invoke ``_last_command`` with a stubbed runtime and capture stdout.
 
     Returns ``(exit_code, captured_output)``. The runtime is a real test
     runtime (thread paths resolve against tmp_path) so `render_last_turn`
-    reads the entries the test appends.
+    reads the entries the test appends. ``force_terminal`` exercises the
+    interactive rendering path (Rich Markdown + Response rule).
     """
     runtime = _make_runtime(tmp_path)
 
@@ -51,7 +54,10 @@ def _invoke_last(
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
     out_console = Console(
-        file=__import__("io").StringIO(), width=200, legacy_windows=False, force_terminal=False
+        file=__import__("io").StringIO(),
+        width=200,
+        legacy_windows=False,
+        force_terminal=force_terminal,
     )
     with patch.object(cli_main, "console", new=out_console):
         result: int | None = cli_main.app(args=["last", *argv], standalone_mode=False)
@@ -137,3 +143,32 @@ def test_last_unknown_turn_index(tmp_path: Any, monkeypatch: pytest.MonkeyPatch)
 
     assert code == 0
     assert "Turn 42 not found in the thread log." in output
+
+
+# ── Rendering parity (tty) ────────────────────────────────────────────
+
+
+def test_last_tty_renders_markdown_like_the_original_answer(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a tty, the replay gets the same treatment as the original answer:
+    a ``Response`` rule separator plus Rich Markdown rendering (headings,
+    bold, code fences) — not the plain unstyled print.
+    """
+    from host.thread import append_thread_entry
+
+    runtime = _make_runtime(tmp_path)
+    append_thread_entry(
+        thread_path=runtime.paths.thread_path,
+        user_slug=runtime.config.user_slug,
+        mode_id="default",
+        query="formatting question",
+        response_text="## Heading\n\n**bold point**\n\n```python\nprint('hi')\n```",
+        turn=0,
+    )
+    code, output = _invoke_last(monkeypatch, tmp_path, [], force_terminal=True)
+
+    assert code == 0
+    assert "Response" in output  # the Rule title
+    assert "Heading" in output
+    assert "bold point" in output
