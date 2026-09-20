@@ -25,20 +25,20 @@ pip install lisa-host-cli
 
 ```bash
 lisa            # show help (every command is one-shot)
-lisa once "summarize the thread"   # run a single turn
+lisa prompt "summarize the thread"   # run a single turn
 lisa verify     # run the diagnostic smoke check
 lisa --help     # show all commands
 ```
 
-### One-shot pipelines (`once` with stdin and `--raw`)
+### One-shot pipelines (`prompt` with stdin and `--raw`)
 
-`once` reads piped stdin automatically (when stdin is not a tty) and attaches
+`prompt` reads piped stdin automatically (when stdin is not a tty) and attaches
 it to the turn ahead of your instruction, so config/data can flow through the
 model into another command:
 
 ```bash
-cat /etc/sysconfig/whatever.conf | lisa once "recommend improvements to this config"
-cat whatever.conf | lisa once -r "fix it for me." > whatever.conf.new
+cat /etc/sysconfig/whatever.conf | lisa prompt "recommend improvements to this config"
+cat whatever.conf | lisa prompt -r "fix it for me." > whatever.conf.new
 ```
 
 `-r`/`--raw` writes the response verbatim to stdout — no Rule header, no
@@ -49,20 +49,20 @@ stderr activity lines. `--no-stdin` disables stdin attachment (use when a
 foreground pipe should not be consumed). `-q -r` = only the raw response on
 stdout.
 
-An unresolved approval in once mode is a hard stop: the request id is durable,
+An unresolved approval is a hard stop: the request id is durable,
 the process prints the required decision commands to stderr and exits
 with code `3`, so pipelines never mistake an un-decided approval for a
 completed turn. Decide it from the same shell — no session needed — and re-run:
 
 ```bash
-lisa once "approve <request-id>"           # run the paused action
-lisa once "approve <request-id> --remember git status"   # persist an allow rule
-lisa once "deny <request-id>"
+lisa prompt "approve <request-id>"           # run the paused action
+lisa prompt "approve <request-id> --remember git status"   # persist an allow rule
+lisa prompt "deny <request-id>"
 ```
 
-(Bare `lisa once approve` with no id resolves to the single pending request.
+(Bare `lisa prompt approve` with no id resolves to the single pending request.
 A pre-armed decision also works in one shot:
-`lisa once --approve <request-id> "continue the task"` dispatches the approval
+`lisa prompt --approve <request-id> "continue the task"` dispatches the approval
 first, then runs the turn.)
 
 A model yield — the turn ends with the model asking you a question instead of
@@ -76,24 +76,24 @@ impossible, re-run with the missing information included in the prompt.
 
 Commands execute without an approval prompt only when the bash pack reports a
 working, contained Bubblewrap sandbox. Missing, degraded, or unknown sandbox
-state fails closed and shows an approval panel instead. Once mode decides
+state fails closed and shows an approval panel instead. A prompt run decides
 with the host machinery (the request id survives the process boundary):
 
 ```bash
-lisa once "approve <request-id>"                        # decide + re-run
-lisa once "deny <request-id>"
-lisa once "approve <request-id> --remember [prefix]"
+lisa prompt "approve <request-id>"                        # decide + re-run
+lisa prompt "deny <request-id>"
+lisa prompt "approve <request-id> --remember [prefix]"
 ```
 
-### Policy (`lisa once policy`)
+### Policy (`lisa prompt policy`)
 
 Inspect and change the approval policy without hand-editing YAML. The command is
-`lisa once policy` (also reachable as the `policy` decision subcommand):
+`lisa prompt policy` (also reachable as the `policy` decision subcommand):
 
 ```bash
-lisa once policy                     # show the active document
-lisa once "policy mode trust"        # auto-allow write/execute (ask|trust|plan)
-lisa once "policy bare off"          # stop prompting for unsandboxed execute
+lisa prompt policy                     # show the active document
+lisa prompt "policy mode trust"        # auto-allow write/execute (ask|trust|plan)
+lisa prompt "policy bare off"          # stop prompting for unsandboxed execute
 ```
 
 Changes take effect immediately — the policy engine re-reads
@@ -105,25 +105,22 @@ actions always require an explicit policy decision because they leave the
 sandbox boundary, and `mode: trust` still prompts for unsandboxed `execute`
 (`bare_requires_approval: true`, toggle with `policy bare off`).
 
-### Lazy `once` routing
+### Lazy `prompt` routing
 
-Set `LISA_ONCE_UNKNOWN=1` (or pass `--once-unknown`) to let an unrecognized
-first positional become the `once` message, so you can skip typing
-`once` for ad-hoc one-shots:
+Set `LISA_PROMPT_UNKNOWN=1` to let an unrecognized first positional become
+the `prompt` message, so you can skip typing `prompt` for ad-hoc one-shots:
 
 ```bash
-LISA_ONCE_UNKNOWN=1 lisa continue
-LISA_ONCE_UNKNOWN=1 lisa "do something else"
-lisa --once-unknown continue          # one-shot, no env var
+LISA_PROMPT_UNKNOWN=1 lisa continue
+LISA_PROMPT_UNKNOWN=1 lisa "do something else"
 ```
 
 Registered subcommands (`verify`, `pack`, `models`, …) are never rerouted,
-so the flag is safe to leave on. Runtime options belong to each subcommand
-(`lisa once --log-level debug …`). Once-only flags (`-r/--raw`, `-q/--quiet`,
-`--stdin/--no-stdin`) appearing before the positional are hoisted after the
-injected `once` token, so `lisa -r "fix it"` parses as `lisa once -r "fix it"`.
-The env var is the intended default; the flag is redundant and exists only
-for discoverability.
+so the env var is safe to leave on. Runtime options belong to each
+subcommand (`lisa prompt --log-level debug …`). Prompt-only flags
+(`-r/--raw`, `-q/--quiet`, `--stdin/--no-stdin`) appearing before the
+positional are hoisted after the injected `prompt` token, so
+`lisa -r "fix it"` parses as `lisa prompt -r "fix it"`.
 
 ### Profiles (`--profile`, `LISA_PROFILE`)
 
@@ -214,7 +211,7 @@ uv run lisa --help
 
 `lisa-host-cli` wraps the transport-neutral `host` runtime (from `lisa-host-runtime`)
 with a Typer + Rich terminal interface. Every command is a one-shot process; turns
-run through `lisa once` and its `OnceTransport` renders the turn trajectory to
+run through `lisa prompt` and its `PromptTransport` renders the turn trajectory to
 scrollback. The CLI implements `TransportCallbacks`; the runtime never imports
 Rich, Typer, or any transport-specific code.
 

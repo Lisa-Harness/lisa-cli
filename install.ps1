@@ -328,7 +328,7 @@ function Write-PostInstallGuidance {
     }
 
     Write-Host "  Quick start (from any directory):"
-    Write-Host "    lisa once `"Hello, Lisa!`""
+    Write-Host "    lisa prompt `"Hello, Lisa!`""
     Write-Host ""
 
     if ($Provider -contains "ollama") {

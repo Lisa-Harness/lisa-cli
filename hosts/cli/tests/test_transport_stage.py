@@ -1,6 +1,6 @@
-"""Tests for the OnceTransport ``on_stage`` event-line rendering.
+"""Tests for the PromptTransport ``on_stage`` event-line rendering.
 
-``once`` is one process, one turn. The transport prints each completed
+``prompt`` is one process, one turn. The transport prints each completed
 tool/model/fork event as a real scrollback line (no Live transcript), so
 these tests drive the event pairs and assert on what printed. Consoles are
 non-tty (``Console(file=io.StringIO())``), so the activity Live never
@@ -15,13 +15,13 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from hosts.cli.transport import OnceTransport
+from hosts.cli.transport import PromptTransport
 
 
-def _make_transport(**kwargs: Any) -> tuple[OnceTransport, io.StringIO]:
+def _make_transport(**kwargs: Any) -> tuple[PromptTransport, io.StringIO]:
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, width=120)
-    return OnceTransport(console=console, **kwargs), buffer
+    return PromptTransport(console=console, **kwargs), buffer
 
 
 # ── Fork rendering ────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
-"""Once-mode Rich transport for the CLI host.
+"""Prompt-mode Rich transport for the CLI host.
 
 This is the terminal-transport implementation of
-:class:`host.callbacks.TransportCallbacks` for ``lisa once`` — the CLI's
-only turn path. Once mode is input/output in the caller's shell: another
+:class:`host.callbacks.TransportCallbacks` for ``lisa prompt`` — the CLI's
+only turn path. A prompt run is input/output in the caller's shell: another
 pipeline stage, not a session with a screen. Instead of a persistent Live
 transcript it renders:
 
@@ -11,7 +11,7 @@ transcript it renders:
 * each tool/model/fork row printed to real scrollback as it *completes*,
   so the trajectory survives piping/tee.
 
-Tokens are per-turn: a ``once`` invocation is one process and one turn,
+Tokens are per-turn: a ``prompt`` invocation is one process and one turn,
 so the footer reports a single total (the turn/session split collapses).
 
 Non-tty consoles (``console.is_terminal`` False) skip the spinner entirely
@@ -20,7 +20,7 @@ and emit only the completed-event lines — safe under ``| grep``.
 Raw mode (``raw=True``) writes the response verbatim to raw stdout — no
 Rule header, no Markdown re-render — so redirected/piped output stays
 machine-readable; all activity output lives on the transport console
-(stderr when the once command runs in raw mode).
+(stderr when the prompt command runs in raw mode).
 
 Stage-line legend
 -----------------
@@ -120,15 +120,15 @@ class _TrailingSpinner:
         return out
 
 
-class OnceTransport:
-    """Vertically efficient transport for the ``once`` command.
+class PromptTransport:
+    """Vertically efficient transport for the ``prompt`` command.
 
     See the module docstring for the rendering contract. The two
     post-turn flags the command path reads:
 
     * ``approval_unresolved`` — set when a response arrives carrying an
-      un-decided approval request. Once mode has no prompt loop to decide
-      approvals, so the caller exits with the approval-required code
+      un-decided approval request. A prompt run has no interactive loop to
+      decide approvals, so the caller exits with the approval-required code
       instead of emitting approval text into redirected output. Never
       cleared here; owned by the command path.
     * ``yield_unresolved`` / ``yield_question`` — set when the turn ended
@@ -194,7 +194,7 @@ class OnceTransport:
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start_turn(self, message: str) -> None:
-        """Begin once-mode rendering: echo the command, arm the activity line.
+        """Begin prompt-mode rendering: echo the command, arm the activity line.
 
         No-op when ``quiet`` (the response alone prints later).
         """
@@ -231,7 +231,7 @@ class OnceTransport:
                 activity.stop()
 
     def start_thinking(self, stage: str = "dispatch", **kwargs: Any) -> None:
-        """Once mode has no Live transcript; (re)arm the activity line.
+        """Prompt mode has no Live transcript; (re)arm the activity line.
 
         Accepts the TransportCallbacks kwargs (``session_tokens``,
         ``message``) for protocol compatibility and resets the per-turn
@@ -296,7 +296,7 @@ class OnceTransport:
             self._handle_tool_stage(label, data)
         elif label.startswith("fork_"):
             self._handle_fork_stage(label, data)
-        # else: bookkeeping-only events update nothing visible in once mode.
+        # else: bookkeeping-only events update nothing visible in prompt mode.
 
         if self._current_mode and self._current_mode != prev_mode:
             self._handoff_count += 1
@@ -312,7 +312,7 @@ class OnceTransport:
         """Stage answer deltas / count reasoning without rendering either.
 
         The answer renders once, fully formatted, from ``on_response``;
-        thinking segments were a live-transcript affordance that once mode
+        thinking segments were a live-transcript affordance that prompt mode
         replaces with the compact footer.
         """
         if reasoning:
@@ -328,11 +328,12 @@ class OnceTransport:
         Markdown re-render — keeping redirected/piped output machine-readable;
         the ⚡ footer prints on the transport console (stderr in raw mode).
 
-        An approval that reaches the response un-decided is a hard stop: once
-        mode has no prompt loop to answer it, so the request id is stashed
-        (``approval_unresolved``) and nothing is written to stdout — the
-        caller exits non-zero rather than emitting an interactive panel (or
-        the bare approval text) into redirected output.
+        An approval that reaches the response un-decided is a hard stop: a
+        prompt run has no interactive loop to answer it, so the request id
+        is stashed (``approval_unresolved``) and nothing is written to
+        stdout — the caller exits non-zero rather than emitting an
+        interactive panel (or the bare approval text) into redirected
+        output.
 
         A model yield (the ``yield`` terminal action — the model asked the
         operator a question instead of finishing) is the same contract: the
@@ -360,8 +361,8 @@ class OnceTransport:
             if not self.console.is_terminal:
                 Console(stderr=True).print(
                     "[red]The model asked a question instead of producing a "
-                    "result. Once mode cannot answer it. Re-run with the "
-                    "missing information in the prompt, or interactively.[/red]"
+                    "result. A one-shot prompt run cannot answer it. Re-run "
+                    "with the missing information in the prompt.[/red]"
                 )
             return
         if text:
@@ -376,17 +377,17 @@ class OnceTransport:
         if text and not self.quiet and not self.raw:
             self.console.print()
         if not self.quiet and not self.raw:
-            self._print_once_footer()
+            self._print_footer()
         elif self.raw and not self.quiet:
             # The footer is activity output: in raw mode it prints on the
             # transport console (stderr) so stdout stays machine-readable.
-            self._print_once_footer()
+            self._print_footer()
 
     def _render_unresolved_approval(self, approval: dict[str, Any]) -> None:
         """Capture a pending approval and surface the decision path.
 
-        A tty console renders the keystroke-free approval panel (the hints
-        point at `lisa once "approve <id>"`); a piped/redirected console
+        A tty console renders the approval panel (the hints point at
+        `lisa prompt "approve <id>"`); a piped/redirected console
         fails fast on stderr instead of printing a panel the operator can
         never answer.
         """
@@ -395,7 +396,7 @@ class OnceTransport:
         self.pending_approval = approval
         self.approval_unresolved = True
         if self.console.is_terminal:
-            render_approval_panel(approval, console=self.console, keystrokes=False)
+            render_approval_panel(approval, console=self.console)
             return
         # Keep each decision hint short so a 120-col console never wraps
         # inside a copyable command.
@@ -404,8 +405,8 @@ class OnceTransport:
         err_console = Console(stderr=True, width=200)
         err_console.print(
             f"[red]Approval required for {target} (request {request_id}).\n"
-            f'Decide without a session: lisa once "approve {request_id}" '
-            f'or lisa once "deny {request_id}"\n'
+            f'Decide without a session: lisa prompt "approve {request_id}" '
+            f'or lisa prompt "deny {request_id}"\n'
             f'(add --remember <prefix> to approve-and-persist), '
             f"then re-run the original command.[/red]"
         )
@@ -467,7 +468,7 @@ class OnceTransport:
             )
 
     def _handle_tool_stage(self, label: str, data: dict[str, Any]) -> None:
-        """Route tool_* stage events to the once-mode scrollback lines.
+        """Route tool_* stage events to the prompt-mode scrollback lines.
 
         ``tool_dispatch`` arms the activity label only; ``tool_output``
         prints streamed lines as they arrive (a dim rail marks them as tool
@@ -482,7 +483,7 @@ class OnceTransport:
             self._last_tool_streaming = bool(data.get("stream_output"))
             return
         if label == "tool_output":
-            # Once mode has no Live transcript region — streamed lines print
+            # Prompt mode has no Live transcript region — streamed lines print
             # to real scrollback as they arrive (piped runs keep them under
             # tee/grep; quiet mode drops them).
             text = str(data.get("text") or "")
@@ -511,7 +512,7 @@ class OnceTransport:
             self._last_tool_streaming = False
 
     def _handle_fork_stage(self, label: str, data: dict[str, Any]) -> None:
-        """Route fork_* stage events to the once-mode scrollback lines.
+        """Route fork_* stage events to the prompt-mode scrollback lines.
 
         ``fork_start`` seeds the child table and prints the header;
         ``fork_child_start`` records the child (activity label only, no
@@ -566,7 +567,7 @@ class OnceTransport:
         self.start_activity()
 
     def _print_stream_line(self, line: str, *, stream: str = "stdout") -> None:
-        """Print one streamed tool-output line to scrollback (once mode).
+        """Print one streamed tool-output line to scrollback (prompt mode).
 
         Unlike ``_print_event_line`` this does NOT stop/restart the activity
         line per line — a churning command would flicker the spinner. The
@@ -610,11 +611,11 @@ class OnceTransport:
             return 0
         return int(perf_counter() - self._turn_started_perf)
 
-    def _print_once_footer(self) -> None:
-        """Render the single-line once-mode footer.
+    def _print_footer(self) -> None:
+        """Render the single-line prompt-mode footer.
 
         ``⚡ 22s · 5 tools · 2 models · 1 handoff · 8.4k tok`` — one line,
-        per-turn only; a ``once`` invocation is one process and one turn,
+        per-turn only; a ``prompt`` invocation is one process and one turn,
         so the turn/session token split collapses to a single total.
         """
         model_time_ms = round(sum(self._iteration_durations))
@@ -762,4 +763,4 @@ class OnceTransport:
         return "\n".join(lines)
 
 
-__all__ = ["OnceTransport"]
+__all__ = ["PromptTransport"]

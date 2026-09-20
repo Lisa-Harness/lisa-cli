@@ -1,12 +1,12 @@
-"""Tests for once-mode decision subcommands and pre-armed decisions.
+"""Tests for prompt-mode decision subcommands and pre-armed decisions.
 
-Covers the once-mode approval/policy surface added so `lisa once` can close
-the loop the REPL closes with keystrokes:
+Covers the prompt-mode approval/policy surface added so `lisa prompt` can
+close the loop a persistent host closes with keystrokes:
 
-- `lisa once policy ...` / `lisa once approve <id>` / `lisa once deny <id>`
-  route through handle_message (the host's own command dispatch) with no
-  model turn; the grammar guard keeps plain prose ("deny the claim") on the
-  model path.
+- `lisa prompt policy ...` / `lisa prompt approve <id>` / `lisa prompt deny
+  <id>` route through handle_message (the host's own command dispatch) with
+  no model turn; the grammar guard keeps plain prose ("deny the claim") on
+  the model path.
 - `--approve/--deny [--remember]` pre-arm a decision that is dispatched
   ahead of the turn message; a bare `/approve` resolves to the single
   pending approval via the durable store.
@@ -38,14 +38,14 @@ def _make_runtime(tmp_path: Any) -> Any:
     return build_test_runtime(tmp_path, models_yaml="")
 
 
-def _invoke_once(
+def _invoke_prompt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
     argv: list[str],
     *,
     captured: dict[str, Any] | None = None,
 ) -> int | None:
-    """Invoke ``_once_command`` with stubbed runtime + handle_message.
+    """Invoke ``_prompt_command`` with stubbed runtime + handle_message.
 
     Records each dispatched message in ``captured["messages"]`` (list) and
     the runtime in ``captured["runtime"]``. Returns the Typer exit code.
@@ -71,7 +71,7 @@ def _invoke_once(
     monkeypatch.setattr(sys, "stdin", stdin_obj)
     with patch.object(cli_main, "console", new=Console(quiet=True)):
         result: int | None = cli_main.app(
-            args=["once", *argv], standalone_mode=False
+            args=["prompt", *argv], standalone_mode=False
         )
     return result
 
@@ -88,42 +88,42 @@ def _exit_code(result: int | None) -> int:
     return 0 if result is None else int(result)
 
 
-def test_once_policy_routes_to_host_command(
+def test_prompt_policy_routes_to_host_command(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`lisa once policy` dispatches /policy through handle_message."""
+    """`lisa prompt policy` dispatches /policy through handle_message."""
     captured: dict[str, Any] = {}
-    result = _invoke_once(monkeypatch, tmp_path, ["policy"], captured=captured)
+    result = _invoke_prompt(monkeypatch, tmp_path, ["policy"], captured=captured)
     assert _exit_code(result) == 0
     assert captured["messages"] == ["/policy"]
 
 
-def test_once_policy_mode_trust_dispatches_slash_form(
+def test_prompt_policy_mode_trust_dispatches_slash_form(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`lisa once "policy mode trust"` sends the policy subcommand verbatim."""
+    """`lisa prompt "policy mode trust"` sends the policy subcommand verbatim."""
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, ["policy mode trust"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["policy mode trust"], captured=captured)
     assert captured["messages"] == ["/policy mode trust"]
 
 
-def test_once_approve_subcommand_dispatches_slash_form(
+def test_prompt_approve_subcommand_dispatches_slash_form(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`lisa once "approve <id>"` dispatches /approve <id>."""
+    """`lisa prompt "approve <id>"` dispatches /approve <id>."""
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch, tmp_path, ["approve abc123def456"], captured=captured
     )
     assert captured["messages"] == ["/approve abc123def456"]
 
 
-def test_once_approve_remember_dispatches_flag(
+def test_prompt_approve_remember_dispatches_flag(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--remember rides along on the dispatched /approve."""
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["approve abc123def456 --remember git status"],
@@ -132,26 +132,26 @@ def test_once_approve_remember_dispatches_flag(
     assert captured["messages"] == ["/approve abc123def456 --remember git status"]
 
 
-def test_once_deny_subcommand_dispatches_slash_form(
+def test_prompt_deny_subcommand_dispatches_slash_form(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch, tmp_path, ["deny abc123def456"], captured=captured
     )
     assert captured["messages"] == ["/deny abc123def456"]
 
 
-def test_once_prose_is_not_intercepted(
+def test_prompt_prose_is_not_intercepted(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch, tmp_path, ["deny the claim in the report"], captured=captured
     )
     assert captured["messages"] == ["deny the claim in the report"]
     captured = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch, tmp_path, ["approve my leave request"], captured=captured
     )
     assert captured["messages"] == ["approve my leave request"]
@@ -160,16 +160,16 @@ def test_once_prose_is_not_intercepted(
 # ── `policy rule` management subcommands ──────────────────────────────
 
 
-def test_once_policy_rule_add_dispatches_slash_form(
+def test_prompt_policy_rule_add_dispatches_slash_form(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`lisa once "policy rule add ..."` sends the rule command verbatim.
+    """`lisa prompt "policy rule add ..."` sends the rule command verbatim.
 
     The free-form `--when` tail (a CEL expression with spaces and quoted
     string literals) must survive the grammar guard intact.
     """
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ['policy rule add allow --tool bash_run --when action.argv[0] == "git"'],
@@ -180,12 +180,12 @@ def test_once_policy_rule_add_dispatches_slash_form(
     ]
 
 
-def test_once_policy_rule_add_multiple_flags_with_when(
+def test_prompt_policy_rule_add_multiple_flags_with_when(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Several matchers before the --when expression all pass through."""
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         [
@@ -200,25 +200,25 @@ def test_once_policy_rule_add_multiple_flags_with_when(
     ]
 
 
-def test_once_policy_rule_remove_dispatches_slash_form(
+def test_prompt_policy_rule_remove_dispatches_slash_form(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch, tmp_path, ["policy rule remove allow:2"], captured=captured
     )
     assert captured["messages"] == ["/policy rule remove allow:2"]
 
 
-def test_once_policy_rule_list_dispatches_slash_form(
+def test_prompt_policy_rule_list_dispatches_slash_form(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, ["policy rule list"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["policy rule list"], captured=captured)
     assert captured["messages"] == ["/policy rule list"]
 
 
-def test_once_policy_rule_prose_is_not_intercepted(
+def test_prompt_policy_rule_prose_is_not_intercepted(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Prose mentioning `policy rule` stays on the model path.
@@ -232,19 +232,19 @@ def test_once_policy_rule_prose_is_not_intercepted(
         "tell me about policy rule engines and their design",
     ):
         captured: dict[str, Any] = {}
-        _invoke_once(monkeypatch, tmp_path, [prose], captured=captured)
+        _invoke_prompt(monkeypatch, tmp_path, [prose], captured=captured)
         assert captured["messages"] == [prose]
 
 
 # ── Bare verb resolves the single pending approval ────────────────────
 
 
-def test_once_approve_bare_resolves_single_pending(
+def test_prompt_approve_bare_resolves_single_pending(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`lisa once approve` targets the one pending record in the store."""
+    """`lisa prompt approve` targets the one pending record in the store."""
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, ["approve"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["approve"], captured=captured)
     # The pending store is empty here so the bare verb passes through
     # unresolved and the host replies with usage — no crash, exit 0. The
     # dispatched command is normalized to the slash form.
@@ -259,7 +259,7 @@ def test_prearm_approve_prepends_decision_command(
 ) -> None:
     """--approve <id> dispatches /approve first, then runs the turn."""
     captured: dict[str, Any] = {}
-    result = _invoke_once(
+    result = _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--approve", "abc123def456", "continue the task"],
@@ -278,7 +278,7 @@ def test_prearm_deny_with_message_prepends_denial(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--deny", "abc123def456", "what now"],
@@ -293,7 +293,7 @@ def test_prearm_approve_remember_rides_along(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--approve", "abc123def456", "--remember", "systemctl status", "go"],
@@ -306,7 +306,7 @@ def test_prearm_approve_remember_rides_along(
 def test_prearm_approve_and_deny_mutually_exclusive(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result = _invoke_once(
+    result = _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--approve", "abc", "--deny", "def", "x"],
@@ -317,7 +317,7 @@ def test_prearm_approve_and_deny_mutually_exclusive(
 def test_prearm_remember_requires_approve(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result = _invoke_once(
+    result = _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--deny", "abc123def456", "--remember", "git", "x"],
@@ -330,7 +330,7 @@ def test_prearm_decision_only_no_message_is_valid(
 ) -> None:
     """--approve with no message/payload is a valid decision-only run."""
     captured: dict[str, Any] = {}
-    result = _invoke_once(
+    result = _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--approve", "abc123def456"],
@@ -343,7 +343,7 @@ def test_prearm_decision_only_no_message_is_valid(
 def test_no_message_no_stdin_no_decision_still_exits_2(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result = _invoke_once(monkeypatch, tmp_path, [])
+    result = _invoke_prompt(monkeypatch, tmp_path, [])
     assert _exit_code(result) == 2
 
 
@@ -399,7 +399,7 @@ def test_bare_decision_with_explicit_id_is_untouched(tmp_path: Any) -> None:
 # ── Decision-subcommand run path is turn-free ─────────────────────────
 
 
-def test_once_policy_does_not_read_stdin(
+def test_prompt_policy_does_not_read_stdin(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The subcommand path never consumes piped stdin (nothing to attach)."""
@@ -424,6 +424,6 @@ def test_once_policy_does_not_read_stdin(
     stdin_obj.isatty = lambda: False  # type: ignore[method-assign]
     monkeypatch.setattr(sys, "stdin", stdin_obj)
     with patch.object(cli_main, "console", new=Console(quiet=True)):
-        result = cli_main.app(args=["once", "policy"], standalone_mode=False)
+        result = cli_main.app(args=["prompt", "policy"], standalone_mode=False)
     assert _exit_code(result) == 0
     assert captured["messages"] == ["/policy"]

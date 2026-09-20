@@ -1,6 +1,6 @@
 """Tests for the CLI host restart contract after pack lifecycle commands.
 
-One-shot paths (``once``, ``pack``) exit with ``_RESTART_REQUIRED_EXIT``
+One-shot paths (``prompt``, ``pack``) exit with ``_RESTART_REQUIRED_EXIT``
 on all platforms instead of re-execing — a fresh process re-run loads the
 reloaded entry points, pack catalogs, and MCP manifests.
 """
@@ -36,13 +36,13 @@ def test_exit_restart_required_raises_typer_exit() -> None:
     assert exc_info.value.exit_code == cli_main._RESTART_REQUIRED_EXIT
 
 
-# ── once command applies the exit contract ────────────────────────────
+# ── prompt command applies the exit contract ───────────────────────────
 
 
-def test_once_pack_mutation_exit_contract(
+def test_prompt_pack_mutation_exit_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A once turn that flags restart_required exits with the restart code."""
+    """A prompt turn that flags restart_required exits with the restart code."""
     from unittest.mock import patch
 
     import typer
@@ -54,16 +54,16 @@ def test_once_pack_mutation_exit_contract(
         approval_unresolved = False
         yield_unresolved = False
 
-    async def _fake_run_once_with_teardown(_runtime, _message, **_kwargs):
+    async def _fake_run_prompt_with_teardown(_runtime, _message, **_kwargs):
         runtime.session.request_restart("pack enable: lisa-pack-cloudflare")
         return runtime.session.restart_required, _FakeTransport()
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kw: runtime)
-    monkeypatch.setattr(cli_main, "_run_once_with_teardown", _fake_run_once_with_teardown)
+    monkeypatch.setattr(cli_main, "_run_prompt_with_teardown", _fake_run_prompt_with_teardown)
 
     with patch.object(cli_main, "console"):
         with pytest.raises(typer.Exit) as exc_info:
-            cli_main._once_command(
+            cli_main._prompt_command(
                 message="continue",
                 stdin=False,
                 raw=False,

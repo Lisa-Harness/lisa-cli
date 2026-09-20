@@ -3,7 +3,7 @@
 This is the terminal-transport entry point for the Lisa framework. It
 wraps the transport-neutral :mod:`host` runtime with Typer commands
 and Rich rendering. Every command is a one-shot process: turns run via
-``lisa once`` and lifecycle/inspection commands (verify, models, pack,
+``lisa prompt`` and lifecycle/inspection commands (verify, models, pack,
 mcp, last, intake) run once and exit.
 """
 
@@ -118,10 +118,10 @@ from hosts.cli.render import (
 if TYPE_CHECKING:
     from host.runtime import HostRuntime as HostRuntime
 
-    from hosts.cli.transport import OnceTransport as OnceTransport
+    from hosts.cli.transport import PromptTransport as PromptTransport
 
 # ``handle_message`` is deferred to the turn-execution call sites
-# (``_run_once_with_teardown``) so ``--version`` / ``modes`` / ``models`` /
+# (``_run_prompt_with_teardown``) so ``--version`` / ``modes`` / ``models`` /
 # ``verify`` don't pay the ~3s ``openai`` + ``mcp`` + ``kernel.ipsar_fsm``
 # import cost it drags in. See ``host/__init__.py``'s PEP 562
 # ``__getattr__`` for the package-level lazy import.
@@ -139,7 +139,7 @@ app = typer.Typer(
 )
 
 # Lisa palette accent for response separators (kept in sync with the shared
-# palette in transport.py — the same value OnceTransport uses for the
+# palette in transport.py — the same value PromptTransport uses for the
 # "Response" rule).
 _STYLE_RESPONSE = "dark_sea_green4"
 
@@ -150,25 +150,23 @@ _STYLE_RESPONSE = "dark_sea_green4"
 # EX_UNAVAILABLE.
 _RESTART_REQUIRED_EXIT = 69
 
-# Exit code returned when a `once` turn ends with an unresolved approval
-# request. Once mode has no prompt loop to decide an approval, so the
-# request stays durable and the process exits non-zero — scripts detect
+# Exit code returned when a `prompt` turn ends with an unresolved approval
+# request. A prompt run has no interactive loop to decide an approval, so
+# the request stays durable and the process exits non-zero — scripts detect
 # "needs approval" instead of mistaking it for a completed turn.
 _APPROVAL_REQUIRED_EXIT = 3
 
-# Exit code returned when a `once` turn ends in a model yield (the model
+# Exit code returned when a `prompt` turn ends in a model yield (the model
 # asked the operator a question instead of finishing). The question is
 # durable on the thread and printed to stderr; stdout gets nothing. Scripts
 # detect "needs input" and re-run with the missing information in the prompt.
 _YIELD_UNRESOLVED_EXIT = 4
 
-# Env var (or --once-unknown flag) enabling lazy routing: an unrecognized
-# first positional is redirected to `lisa once <args...>` so users can run
-# `lisa continue` or `lisa "do something else"` without typing `once`. The
-# flag is redundant with the env var (people set it via env); it exists for
-# discoverability and is handled in pre-parse before Typer sees argv.
-_ONCE_UNKNOWN_ENV = "LISA_ONCE_UNKNOWN"
-_ONCE_UNKNOWN_FLAG = "--once-unknown"
+# Env var enabling lazy routing: an unrecognized first positional is
+# redirected to `lisa prompt <args...>` so users can run `lisa continue` or
+# `lisa "do something else"` without typing `prompt`. Handled in pre-parse
+# before Typer sees argv.
+_PROMPT_UNKNOWN_ENV = "LISA_PROMPT_UNKNOWN"
 
 # Sentinel for --approve/--deny meaning "the (single) pending approval":
 # resolved to the concrete request id before dispatch via the approval
@@ -176,7 +174,7 @@ _ONCE_UNKNOWN_FLAG = "--once-unknown"
 # pending records visible to a fresh process).
 _PENDING_APPROVAL_TARGET = "pending"
 
-# Grammar for `lisa once` decision subcommands (matched against the
+# Grammar for `lisa prompt` decision subcommands (matched against the
 # lowercased message). `policy` accepts a bare verb or up to two short
 # arg tokens (subcommand word + value; the host validates the vocabulary),
 # OR the `rule` branch: `policy rule` requires an add|remove|list verb next
@@ -190,7 +188,7 @@ _PENDING_APPROVAL_TARGET = "pending"
 # request" fails the id shape and stays on the model path. The host
 # re-validates the exact id anyway.
 _REQUEST_ID_SHAPE = r"[0-9a-f]{8,64}"
-_ONCE_HOST_COMMAND_RE = re.compile(
+_PROMPT_HOST_COMMAND_RE = re.compile(
     r"^(?:"
     r"policy(?:\s+\S{1,32}){0,2}"
     r"|policy\s+rule"
@@ -360,7 +358,7 @@ QuietOption = Annotated[
     typer.Option(
         "--quiet",
         "-q",
-        help="Suppress the once-mode activity line, per-tool lines, and the "
+        help="Suppress the activity line, per-tool lines, and the "
         "⚡ footer so the response is the only output (pipe-friendly).",
     ),
 ]
@@ -387,31 +385,31 @@ RawOption = Annotated[
         ),
     ),
 ]
-OnceApproveOption = Annotated[
+PromptApproveOption = Annotated[
     str,
     typer.Option(
         "--approve",
         help=(
             "Pre-arm approval for the request id the upcoming turn raises: "
-            "`lisa once --approve <request-id> 'continue'` dispatches "
+            "`lisa prompt --approve <request-id> 'continue'` dispatches "
             "/approve first, then runs the turn. Use with the durable id "
             "printed by a prior exit-3 run. `--approve` (bare) targets the "
             "single pending approval."
         ),
     ),
 ]
-OnceDenyOption = Annotated[
+PromptDenyOption = Annotated[
     str,
     typer.Option(
         "--deny",
         help=(
             "Pre-arm a denial for the upcoming turn: "
-            "`lisa once --deny <request-id> 'continue'` dispatches /deny first. "
+            "`lisa prompt --deny <request-id> 'continue'` dispatches /deny first. "
             "`--deny` (bare) targets the single pending approval."
         ),
     ),
 ]
-OnceRememberOption = Annotated[
+PromptRememberOption = Annotated[
     str,
     typer.Option(
         "--remember",
@@ -482,7 +480,7 @@ def _initialize_runtime(
     file; ``user_slug`` is left to the framework (it derives from the
     compiled plan's manifest name). The MCP pool is NOT started here —
     ``runtime.start()`` must be called inside the host's event loop (see
-    the once/verify paths).
+    the prompt/verify paths).
     """
     from host.bootstrap import build_runtime
 
@@ -524,8 +522,8 @@ def _render_runtime_error(
     """Render a runtime/startup error in a red Rich panel.
 
     The exception's first line is bolded up to its first colon so the cause
-    reads at a glance. (Migrated from the retired REPL module; the once and
-    startup paths are its remaining consumers.)
+    reads at a glance. (Migrated from the retired REPL module; the prompt
+    and startup paths are its remaining consumers.)
     """
     lines = str(exc).splitlines()
     if lines:
@@ -544,7 +542,7 @@ def _render_runtime_error(
 def _exit_restart_required() -> None:
     """Print a restart-required notice and exit for one-shot commands.
 
-    Used by ``once`` and ``pack install/uninstall/update`` after a successful
+    Used by ``prompt`` and ``pack install/uninstall/update`` after a successful
     pack lifecycle change. One-shot commands do NOT re-exec (re-running the
     same command would redo the mutation). Instead, print a clear notice and
     exit with :data:`_RESTART_REQUIRED_EXIT` on all platforms so the user
@@ -1130,13 +1128,13 @@ def _last_command(
     response_text = render_last_turn(runtime, turn.strip())
     if not console.is_terminal:
         # Piped/redirected: verbatim, no Markdown re-render — piped output
-        # stays machine-readable (the same contract as OnceTransport raw
+        # stays machine-readable (the same contract as PromptTransport raw
         # mode). highlight/markup off so Rich never interprets the body.
         console.print(response_text, highlight=False, markup=False, soft_wrap=False)
         return
     # Interactive: the same treatment the original answer gets — a
     # "Response" rule separator plus Rich Markdown rendering (colors,
-    # headings, code fences), mirroring OnceTransport.on_response.
+    # headings, code fences), mirroring PromptTransport.on_response.
     console.print(Rule(title="Response", style=_STYLE_RESPONSE))
     console.print(Markdown(response_text))
 
@@ -1392,7 +1390,7 @@ async def _run_pack_update_all(runtime: HostRuntime) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# once command
+# prompt command
 # ---------------------------------------------------------------------------
 
 # Prepended to the turn message in --raw mode: the response is consumed
@@ -1414,8 +1412,8 @@ _RAW_CONTRACT = (
 )
 
 
-def _once_prearmed_decision(approve: str, deny: str, remember: str) -> str | None:
-    """Build the pre-armed decision command for a once turn, or None.
+def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> str | None:
+    """Build the pre-armed decision command for a prompt turn, or None.
 
     ``--approve``/``--deny`` accept either a request id or, bare, the
     sentinel "pending" (resolving to the single pending approval via the
@@ -1432,9 +1430,6 @@ def _once_prearmed_decision(approve: str, deny: str, remember: str) -> str | Non
         console.print("[red]--remember requires --approve.[/red]")
         raise typer.Exit(code=2)
     if not approve and not deny:
-        if remember:
-            console.print("[red]--remember requires --approve.[/red]")
-            raise typer.Exit(code=2)
         return None
     if approve:
         target = approve if approve.lower() != _PENDING_APPROVAL_TARGET else ""
@@ -1446,10 +1441,10 @@ def _once_prearmed_decision(approve: str, deny: str, remember: str) -> str | Non
     return "/deny" + (f" {target}" if target else "")
 
 
-async def _run_once_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
+async def _run_prompt_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
     """Run one host-command message (no model turn), then close the pool.
 
-    Mirrors ``_run_once_with_teardown`` without transport rendering: the
+    Mirrors ``_run_prompt_with_teardown`` without transport rendering: the
     command path returns text (or a structured result) that this helper
     prints through the shared console. The MCP pool starts in this event
     loop and closes in the same one (anyio same-loop contract). A bare
@@ -1473,7 +1468,7 @@ async def _resolve_pending_approval_target(runtime: HostRuntime, command: str) -
     """Resolve a bare ``/approve`` / ``/deny`` to the single pending id.
 
     The approval store is process-durable and identity-scoped, so a fresh
-    once process sees the request a prior once run left pending. With
+    prompt process sees the request a prior prompt run left pending. With
     exactly one pending record the bare verb targets it; zero or multiple
     pendings leave the command untouched so the host replies with its own
     diagnostic (usage/expired/ambiguous).
@@ -1489,16 +1484,16 @@ async def _resolve_pending_approval_target(runtime: HostRuntime, command: str) -
     try:
         pending = await service.list_pending(approval_identity(runtime))
     except Exception as exc:  # pylint: disable=broad-except
-        logger.debug("once: pending-approval resolution failed: %s", exc)
+        logger.debug("prompt: pending-approval resolution failed: %s", exc)
         return command
     if len(pending) == 1:
         request_id = pending[0].invocation.request_id
-        logger.info("once: resolved bare %s to pending %s", verb, request_id[:8])
+        logger.info("prompt: resolved bare %s to pending %s", verb, request_id[:8])
         return f"{verb} {request_id}"
     return command
 
 
-def _run_once_host_command(command: str, **runtime_kwargs: Any) -> None:
+def _run_prompt_host_command(command: str, **runtime_kwargs: Any) -> None:
     """Run a host command (policy/approve/deny) through a fresh runtime.
 
     The CLI's runtime options are forwarded verbatim; the command string is
@@ -1515,7 +1510,7 @@ def _run_once_host_command(command: str, **runtime_kwargs: Any) -> None:
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    restart_required, text = asyncio.run(_run_once_host_command_turn(runtime, command))
+    restart_required, text = asyncio.run(_run_prompt_host_command_turn(runtime, command))
     if text:
         console.print(text)
     if restart_required:
@@ -1523,8 +1518,8 @@ def _run_once_host_command(command: str, **runtime_kwargs: Any) -> None:
     raise typer.Exit(code=0)
 
 
-def _compose_once_message(instruction: str, payload: str) -> str:
-    """Compose the once-mode turn message from the CLI instruction and stdin.
+def _compose_prompt_message(instruction: str, payload: str) -> str:
+    """Compose the prompt-mode turn message from the CLI instruction and stdin.
 
     When both are present the payload is wrapped in a ``<piped-input>`` block
     ahead of the instruction so the model can tell data from directive;
@@ -1537,19 +1532,19 @@ def _compose_once_message(instruction: str, payload: str) -> str:
     return payload or instruction
 
 
-@app.command("once", help="Run a single turn and print the response.")
-def _once_command(
+@app.command("prompt", help="Run a single turn and print the response.")
+def _prompt_command(
     message: str = typer.Argument(
         "",
         help=(
             "Message to route through the host. When stdin is piped (not a tty), "
             "its contents are attached as the turn payload, e.g. "
-            "`cat f.conf | lisa once -r 'fix this config'`. "
-            "Subcommands that skip the turn: `lisa once policy [mode M|bare on|off]`, "
-            "`lisa once policy rule add <list> [--tool T] [--effect E] [--pack P] "
+            "`cat f.conf | lisa prompt -r 'fix this config'`. "
+            "Subcommands that skip the turn: `lisa prompt policy [mode M|bare on|off]`, "
+            "`lisa prompt policy rule add <list> [--tool T] [--effect E] [--pack P] "
             "[--prefix PX] [--when EXPR] | rule remove <list>:<n> | rule list`, "
-            "`lisa once approve <id> [--remember <prefix>]`, "
-            "`lisa once deny <id>`."
+            "`lisa prompt approve <id> [--remember <prefix>]`, "
+            "`lisa prompt deny <id>`."
         ),
     ),
     stdin: StdinOption = True,
@@ -1568,24 +1563,25 @@ def _once_command(
     streaming: StreamingOption = "none",
     host_log: HostLogOption = "",
     quiet: QuietOption = False,
-    approve: OnceApproveOption = "",
-    deny: OnceDenyOption = "",
-    remember: OnceRememberOption = "",
+    approve: PromptApproveOption = "",
+    deny: PromptDenyOption = "",
+    remember: PromptRememberOption = "",
 ) -> None:
     # ── Decision subcommands (no model turn) ──────────────────────────
-    # `lisa once policy ...`, `lisa once approve <id>`, and
-    # `lisa once deny <id>` route through handle_message like the REPL's
-    # /policy, /approve, /deny: the host owns every decision and the
-    # recorded-owner identity fallback makes a cross-process decision
-    # valid. These run with no turn and exit 0 (or the command's error).
-    # The grammar guard keeps plain prose ("deny the claim", "approve my
-    # leave request") on the model path — only genuine command shapes
-    # (bare verb, verb + id/--remember args, or a policy subcommand) are
-    # intercepted. The host re-validates ids and flags anyway.
-    once_arg = message.strip()
-    if _ONCE_HOST_COMMAND_RE.match(once_arg.lower()):
-        return _run_once_host_command(
-            once_arg,
+    # `lisa prompt policy ...`, `lisa prompt approve <id>`, and
+    # `lisa prompt deny <id>` route through handle_message exactly like
+    # the host's /policy, /approve, /deny slash commands: the host owns
+    # every decision and the recorded-owner identity fallback makes a
+    # cross-process decision valid. These run with no turn and exit 0
+    # (or the command's error). The grammar guard keeps plain prose
+    # ("deny the claim", "approve my leave request") on the model path —
+    # only genuine command shapes (bare verb, verb + id/--remember args,
+    # or a policy subcommand) are intercepted. The host re-validates ids
+    # and flags anyway.
+    prompt_arg = message.strip()
+    if _PROMPT_HOST_COMMAND_RE.match(prompt_arg.lower()):
+        return _run_prompt_host_command(
+            prompt_arg,
             log_level=log_level,
             log_path=log,
             no_log=no_log,
@@ -1610,13 +1606,13 @@ def _once_command(
             raise typer.Exit(code=2) from exc
     # A pre-armed decision (--approve/--deny) carries no message and no
     # piped payload; it is consumed at the end of the turn.
-    decision_cmd = _once_prearmed_decision(approve, deny, remember)
+    decision_cmd = _prompt_prearmed_decision(approve, deny, remember)
     if not message.strip() and not payload.strip() and decision_cmd is None:
         console.print(
             "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
         )
         raise typer.Exit(code=2)
-    full_message = _compose_once_message(message, payload)
+    full_message = _compose_prompt_message(message, payload)
     if decision_cmd is not None:
         # Pre-arm: the decision rides ahead of the turn message so the host
         # dispatches /approve|/deny FIRST (host-command dispatch runs before
@@ -1644,7 +1640,7 @@ def _once_command(
     if runtime is None:
         return
     restart_required, transport = asyncio.run(
-        _run_once_with_teardown(runtime, full_message, quiet=quiet, raw=raw)
+        _run_prompt_with_teardown(runtime, full_message, quiet=quiet, raw=raw)
     )
     if transport.approval_unresolved:
         # The approval request id is durable; the operator must decide it in
@@ -1660,9 +1656,9 @@ def _once_command(
         _exit_restart_required()
 
 
-async def _run_once_with_teardown(
+async def _run_prompt_with_teardown(
     runtime: HostRuntime, message: str, *, quiet: bool = False, raw: bool = False
-) -> tuple[bool, OnceTransport]:
+) -> tuple[bool, PromptTransport]:
     """Run one turn, then close the MCP pool.
 
     Returns ``(restart_required, transport)`` — the transport is returned so
@@ -1675,11 +1671,11 @@ async def _run_once_with_teardown(
     A message whose FIRST line is exactly ``/approve`` or ``/deny`` (the
     ``--approve``/``--deny`` pre-arm prefix) is resolved against the
     pending-approval store before the turn runs, so a bare
-    ``lisa once --approve pending 'continue'`` targets the one stopped
+    ``lisa prompt --approve pending 'continue'`` targets the one stopped
     action without retyping its 32-hex id.
     """
     from host.handle_message import handle_message
-    from hosts.cli.transport import OnceTransport
+    from hosts.cli.transport import PromptTransport
 
     first_line, _, _rest = message.partition("\n")
     if first_line.strip() in {"/approve", "/deny"}:
@@ -1687,7 +1683,7 @@ async def _run_once_with_teardown(
             "\n\n" + _rest if _rest.strip() else ""
         )
     transport_console: Console = Console(stderr=True) if raw else console
-    transport = OnceTransport(console=transport_console, quiet=quiet, raw=raw)
+    transport = PromptTransport(console=transport_console, quiet=quiet, raw=raw)
     transport.start_turn(message)
     try:
         await runtime.start()
@@ -1741,22 +1737,21 @@ def _intake_command(
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# once-unknown pre-parse routing
+# prompt-unknown pre-parse routing
 # ---------------------------------------------------------------------------
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
-# Once-only flags: valid on the `once` subcommand but not at group level.
-# When once-unknown routing injects `once`, these are hoisted after it so
-# Typer parses them as once options (`lisa -r "fix it"` -> `lisa once -r "fix it"`).
-_ONCE_ONLY_FLAGS = frozenset({"-r", "--raw", "-q", "--quiet", "--stdin", "--no-stdin"})
+# Prompt-only flags: valid on the `prompt` subcommand but not at group
+# level. When prompt-unknown routing injects `prompt`, these are hoisted
+# after it so Typer parses them as prompt options
+# (`lisa -r "fix it"` -> `lisa prompt -r "fix it"`).
+_PROMPT_ONLY_FLAGS = frozenset({"-r", "--raw", "-q", "--quiet", "--stdin", "--no-stdin"})
 
 
-def _once_unknown_active(args: list[str]) -> bool:
-    """True if once-unknown routing is on (env var or --once-unknown flag)."""
-    if os.getenv(_ONCE_UNKNOWN_ENV, "").strip().lower() in _TRUTHY:
-        return True
-    return _ONCE_UNKNOWN_FLAG in args
+def _prompt_unknown_active() -> bool:
+    """True if prompt-unknown routing is on (LISA_PROMPT_UNKNOWN)."""
+    return os.getenv(_PROMPT_UNKNOWN_ENV, "").strip().lower() in _TRUTHY
 
 
 def _known_command_names() -> set[str]:
@@ -1769,10 +1764,10 @@ def _known_command_names() -> set[str]:
 def _first_positional_index(args: list[str]) -> int:
     """Index of the first positional (non-option) token.
 
-    The group callback takes no value-consuming options (only ``--version``
-    and the pre-parse-only ``--once-unknown``), so every ``--flag`` token
-    is standalone; a ``--flag=value`` form carries its value inline. Returns
-    -1 when there is no positional token (e.g. bare `lisa` or only options).
+    The group callback takes no value-consuming options (only ``--version``),
+    so every ``--flag`` token is standalone; a ``--flag=value`` form carries
+    its value inline. Returns -1 when there is no positional token
+    (e.g. bare `lisa` or only options).
     """
     i = 0
     n = len(args)
@@ -1787,32 +1782,26 @@ def _first_positional_index(args: list[str]) -> int:
     return -1
 
 
-def _maybe_route_to_once(args: list[str]) -> list[str]:
-    """Redirect an unrecognized first positional to the `once` subcommand.
+def _maybe_route_to_prompt(args: list[str]) -> list[str]:
+    """Redirect an unrecognized first positional to the `prompt` subcommand.
 
-    When once-unknown routing is active (``LISA_ONCE_UNKNOWN=1`` or the
-    ``--once-unknown`` flag) and the first positional token is not a known
-    subcommand, inject ``once`` before it so the trailing tokens become the
-    one-shot message::
+    When prompt-unknown routing is active (``LISA_PROMPT_UNKNOWN=1``) and
+    the first positional token is not a known subcommand, inject ``prompt``
+    before it so the trailing tokens become the one-shot message::
 
-        lisa continue                       -> lisa once continue
-        lisa "do something else"             -> lisa once "do something else"
-        lisa -r "fix it"                     -> lisa once -r "fix it"
+        lisa continue                       -> lisa prompt continue
+        lisa "do something else"             -> lisa prompt "do something else"
+        lisa -r "fix it"                     -> lisa prompt -r "fix it"
 
-    Once-only flags (``-r/--raw``, ``-q/--quiet``, ``--stdin/--no-stdin``)
+    Prompt-only flags (``-r/--raw``, ``-q/--quiet``, ``--stdin/--no-stdin``)
     appearing before the positional are hoisted to just after the injected
-    ``once`` token — Typer rejects them as unknown group options otherwise.
+    ``prompt`` token — Typer rejects them as unknown group options otherwise.
     Tokens after a bare ``--`` are positional content and are never hoisted.
 
     Known subcommands (e.g. `verify`, `pack`) are never rerouted, so the
-    flag is safe to leave on. The ``--once-unknown`` flag is stripped before
-    Typer sees argv (it is not a registered Typer option) so it never leaks
-    into a subcommand's option set.
+    env var is safe to leave on.
     """
-    active = _once_unknown_active(args)
-    # The flag is a pre-parse-only switch; strip it so Typer never sees it.
-    args = [a for a in args if a != _ONCE_UNKNOWN_FLAG]
-    if not active:
+    if not _prompt_unknown_active():
         return args
     idx = _first_positional_index(args)
     if idx < 0:
@@ -1821,18 +1810,18 @@ def _maybe_route_to_once(args: list[str]) -> list[str]:
         return args
     head = args[:idx]
     # A bare `--` terminates option parsing: tokens after it are positional
-    # content, never flags, so only hoist once-only flags before it.
+    # content, never flags, so only hoist prompt-only flags before it.
     sep = head.index("--") if "--" in head else len(head)
-    hoisted = [a for a in head[:sep] if a in _ONCE_ONLY_FLAGS]
+    hoisted = [a for a in head[:sep] if a in _PROMPT_ONLY_FLAGS]
     if hoisted:
-        kept = [a for a in head[:sep] if a not in _ONCE_ONLY_FLAGS]
-        return [*kept, *head[sep:], "once", *hoisted, *args[idx:]]
-    return [*args[:idx], "once", *args[idx:]]
+        kept = [a for a in head[:sep] if a not in _PROMPT_ONLY_FLAGS]
+        return [*kept, *head[sep:], "prompt", *hoisted, *args[idx:]]
+    return [*args[:idx], "prompt", *args[idx:]]
 
 
 def main() -> None:
     """CLI entry point for the Lisa terminal host."""
-    app(args=_maybe_route_to_once(list(sys.argv[1:])))
+    app(args=_maybe_route_to_prompt(list(sys.argv[1:])))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-"""Tests for once-mode piped stdin, ``--raw/-r``, and approval fail-fast.
+"""Tests for prompt-mode piped stdin, ``--raw/-r``, and approval fail-fast.
 
-Covers the three once-mode pipeline surfaces:
+Covers the three prompt-mode pipeline surfaces:
 
 - stdin attachment: piped stdin (non-tty) becomes a ``<piped-input>`` block
   ahead of the instruction; empty stdin + no message exits 2.
@@ -26,7 +26,7 @@ import pytest
 from rich.console import Console
 
 from hosts.cli import main as cli_main
-from hosts.cli.transport import OnceTransport
+from hosts.cli.transport import PromptTransport
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ def _make_runtime(tmp_path: Any) -> Any:
     return build_test_runtime(tmp_path, models_yaml="")
 
 
-def _invoke_once(
+def _invoke_prompt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
     argv: list[str],
@@ -46,7 +46,7 @@ def _invoke_once(
     captured: dict[str, Any] | None = None,
     console: Console | None = None,
 ) -> int | None:
-    """Invoke ``_once_command`` via the Typer app with a stubbed runtime.
+    """Invoke ``_prompt_command`` via the Typer app with a stubbed runtime.
 
     ``handle_message`` is stubbed so no model is called; the captured message
     is recorded in ``captured["message"]``. ``stdin_text`` (when given) is
@@ -84,7 +84,7 @@ def _invoke_once(
     if captured is not None:
         captured["console"] = console
     with patch.object(cli_main, "console", new=console):
-        result: int | None = cli_main.app(args=["once", *argv], standalone_mode=False)
+        result: int | None = cli_main.app(args=["prompt", *argv], standalone_mode=False)
     return result
 
 
@@ -96,7 +96,7 @@ def test_piped_stdin_wrapped_as_piped_input_block(
 ) -> None:
     """Piped stdin becomes a <piped-input> block ahead of the instruction."""
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["recommend improvements"],
@@ -113,7 +113,7 @@ def test_stdin_only_message_is_payload(
 ) -> None:
     """With no instruction, the stdin payload is the whole message."""
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, [], stdin_text="just data\n", captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, [], stdin_text="just data\n", captured=captured)
     assert captured["message"] == "just data"
 
 
@@ -122,7 +122,7 @@ def test_no_stdin_tty_uses_message_only(
 ) -> None:
     """A tty stdin is not read; the message passes through unchanged."""
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, ["plain message"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["plain message"], captured=captured)
     assert captured["message"] == "plain message"
 
 
@@ -130,14 +130,14 @@ def test_no_message_and_no_stdin_exits_2(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Neither message nor piped input is a usage error (exit 2)."""
-    result = _invoke_once(monkeypatch, tmp_path, [])
+    result = _invoke_prompt(monkeypatch, tmp_path, [])
     assert result == 2
 
 
 def test_no_stdin_flag_skips_pipe(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """--no-stdin leaves piped data unread; the message stands alone."""
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["--no-stdin", "instruction only"],
@@ -155,7 +155,7 @@ def test_raw_prepends_output_contract(
 ) -> None:
     """-r prepends the raw-mode output contract to the turn message."""
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, ["-r", "fix it"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["-r", "fix it"], captured=captured)
     assert captured["message"].startswith("OUTPUT CONTRACT (raw mode):")
     assert "fix it" in captured["message"]
 
@@ -165,7 +165,7 @@ def test_raw_wraps_stdin_payload_too(
 ) -> None:
     """-r + piped stdin: contract first, then payload block, then instruction."""
     captured: dict[str, Any] = {}
-    _invoke_once(
+    _invoke_prompt(
         monkeypatch,
         tmp_path,
         ["-r", "fix it"],
@@ -182,7 +182,7 @@ def test_raw_transport_gets_stderr_console(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """In raw mode the transport console is NOT the shared console; else it is."""
-    from hosts.cli.transport import OnceTransport as _OT
+    from hosts.cli.transport import PromptTransport as _OT
 
     created: dict[str, Any] = {}
     real_init = _OT.__init__
@@ -193,11 +193,11 @@ def test_raw_transport_gets_stderr_console(
 
     monkeypatch.setattr(_OT, "__init__", _spy_init)
     captured: dict[str, Any] = {}
-    _invoke_once(monkeypatch, tmp_path, ["-r", "fix it"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["-r", "fix it"], captured=captured)
     assert created["console"] is not captured["console"]
     # The non-raw path keeps the shared (patched-in) console.
     created.clear()
-    _invoke_once(monkeypatch, tmp_path, ["no raw"], captured=captured)
+    _invoke_prompt(monkeypatch, tmp_path, ["no raw"], captured=captured)
     assert created["console"] is captured["console"]
 
 
@@ -205,11 +205,11 @@ def test_raw_transport_gets_stderr_console(
 
 
 @pytest.mark.asyncio
-async def test_once_transport_yield_unresolved_skips_stdout(
+async def test_prompt_transport_yield_unresolved_skips_stdout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A yielded response writes nothing to stdout; the question goes to stderr."""
-    transport = OnceTransport(
+    transport = PromptTransport(
         console=Console(stderr=True, force_terminal=False, width=120), raw=True
     )
     await transport.on_response(
@@ -225,10 +225,10 @@ async def test_once_transport_yield_unresolved_skips_stdout(
 
 
 @pytest.mark.asyncio
-async def test_once_transport_yield_tty_shows_question_inline() -> None:
+async def test_prompt_transport_yield_tty_shows_question_inline() -> None:
     """A tty transport shows the question inline (no stderr fail-fast text)."""
     record = Console(record=True, force_terminal=True, width=100)
-    transport = OnceTransport(console=record)
+    transport = PromptTransport(console=record)
     await transport.on_response(
         "I need more detail.", {"yielded": "What detail do you need?"}
     )
@@ -236,7 +236,7 @@ async def test_once_transport_yield_tty_shows_question_inline() -> None:
     assert "What detail do you need?" in record.export_text()
 
 
-def test_yielded_once_exits_4(
+def test_yielded_prompt_exits_4(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A turn that ends in a yield exits _YIELD_UNRESOLVED_EXIT (4)."""
@@ -259,7 +259,7 @@ def test_yielded_once_exits_4(
     stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(sys, "stdin", stdin_obj)
     with patch.object(cli_main, "console", new=Console(quiet=True)):
-        result = cli_main.app(args=["once", "-r", "update the config"], standalone_mode=False)
+        result = cli_main.app(args=["prompt", "-r", "update the config"], standalone_mode=False)
     assert result == cli_main._YIELD_UNRESOLVED_EXIT
 
 
@@ -278,11 +278,11 @@ def _approval_payload() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_once_transport_flags_unresolved_approval() -> None:
+async def test_prompt_transport_flags_unresolved_approval() -> None:
     """A response carrying an approval payload sets approval_unresolved."""
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, width=120)
-    transport = OnceTransport(console=console)
+    transport = PromptTransport(console=console)
     await transport.on_response(
         "Approval required.", {"approval": _approval_payload()}
     )
@@ -293,29 +293,29 @@ async def test_once_transport_flags_unresolved_approval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_once_transport_approval_stderr_notice(
+async def test_prompt_transport_approval_stderr_notice(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Non-tty transport console: the approval notice goes to stderr.
 
-    The notice advertises the once-mode decision commands (no REPL needed)
-    rather than the bare /approve slash form.
+    The notice advertises the prompt-mode decision commands (no interactive
+    loop needed) rather than the bare /approve slash form.
     """
-    transport = OnceTransport(console=Console(force_terminal=False, width=120))
+    transport = PromptTransport(console=Console(force_terminal=False, width=120))
     await transport.on_response(
         "Approval required.", {"approval": _approval_payload()}
     )
     captured = capsys.readouterr()
-    assert 'lisa once "approve abc123def456"' in captured.err
+    assert 'lisa prompt "approve abc123def456"' in captured.err
     assert "Approval required" in captured.err
-    assert 'lisa once "deny abc123def456"' in captured.err
+    assert 'lisa prompt "deny abc123def456"' in captured.err
 
 
 @pytest.mark.asyncio
-async def test_once_transport_approval_panel_on_tty() -> None:
+async def test_prompt_transport_approval_panel_on_tty() -> None:
     """A tty transport console still renders the interactive panel."""
     record = Console(record=True, force_terminal=True, width=100)
-    transport = OnceTransport(console=record)
+    transport = PromptTransport(console=record)
     await transport.on_response(
         "Approval required.", {"approval": _approval_payload()}
     )
@@ -324,12 +324,12 @@ async def test_once_transport_approval_panel_on_tty() -> None:
 
 
 @pytest.mark.asyncio
-async def test_once_transport_raw_writes_verbatim_stdout(
+async def test_prompt_transport_raw_writes_verbatim_stdout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Raw on_response writes the text verbatim; footer goes to stderr."""
     # Mirror production raw wiring: the transport console is stderr.
-    transport = OnceTransport(
+    transport = PromptTransport(
         console=Console(stderr=True, force_terminal=False, width=120), raw=True
     )
     transport._status_turn_tokens = 4200

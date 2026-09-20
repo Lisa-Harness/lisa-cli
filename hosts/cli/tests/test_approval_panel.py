@@ -1,12 +1,12 @@
 """Tests for the CLI approval panel — render and transport capture.
 
 Covers the two surfaces of the policy-driven approval UX delivered to
-the once-mode host:
+the prompt-mode host:
 
 - ``hosts.cli.render.render_approval_panel`` — the panel render with the
-  sandbox containment badge (once mode renders it with ``keystrokes=False``;
-  the decision hints point at `lisa once "approve <id>"`).
-- ``OnceTransport.on_response`` — capturing ``data["approval"]`` into
+  sandbox containment badge; the decision hints point at
+  `lisa prompt "approve <id>"`.
+- ``PromptTransport.on_response`` — capturing ``data["approval"]`` into
   ``pending_approval`` + ``approval_unresolved`` and rendering the panel
   (instead of a bare text blob) on a tty console, or the fail-fast stderr
   notice when piped/redirected.
@@ -55,8 +55,8 @@ def test_render_approval_panel_includes_command_and_hints() -> None:
     text = console.export_text()
     assert "run a shell command" in text
     assert "ls -la" in text
-    assert "approve" in text and "deny" in text and "always" in text
-    assert "/approve abc123def456" in text
+    assert "approve" in text and "deny" in text
+    assert 'lisa prompt "approve abc123def456"' in text
     assert "execute action requires approval" in text
     assert "expires in 1m 30s" in text
     # Containment badge is shown and styled as contained.
@@ -101,11 +101,11 @@ def test_render_approval_panel_shows_immediate_expiry() -> None:
 
 
 def _make_transport() -> Any:
-    from hosts.cli.transport import OnceTransport
+    from hosts.cli.transport import PromptTransport
 
     # force_terminal=True so the transport takes its interactive branch and
     # renders the panel (a non-tty console gets the fail-fast stderr notice).
-    return OnceTransport(console=Console(record=True, width=100, force_terminal=True))
+    return PromptTransport(console=Console(record=True, width=100, force_terminal=True))
 
 
 @pytest.mark.asyncio

@@ -319,7 +319,7 @@ post_install_guidance() {
     fi
 
     printf "  Quick start (from any directory):\n"
-    printf "    lisa once \"Hello, Lisa!\"\n"
+    printf "    lisa prompt \"Hello, Lisa!\"\n"
     printf "\n"
 
     local is_ollama=false

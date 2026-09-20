@@ -1,10 +1,10 @@
-"""Tests for the once-mode transport.
+"""Tests for the prompt-mode transport.
 
-``once`` is one process, one turn — not a session with a screen — so
-``OnceTransport`` replaces the REPL's Live transcript with a transient
-one-line activity indicator and prints each tool/model event to scrollback
-as it *completes*. Tokens are per-turn (the turn/session split collapses in
-a one-process invocation) and the ⚡ footer replaces the Workflow panel.
+``prompt`` is one process, one turn — not a session with a screen — so
+``PromptTransport`` renders a transient one-line activity indicator and
+prints each tool/model event to scrollback as it *completes*. Tokens are
+per-turn (the turn/session split collapses in a one-process invocation)
+and the ⚡ footer replaces the Workflow panel.
 
 Consoles here are non-tty (``Console(file=io.StringIO())``), so the Live
 activity line never starts and assertions see only the printed lines.
@@ -18,13 +18,13 @@ import pytest
 
 from rich.console import Console
 
-from hosts.cli.transport import OnceTransport
+from hosts.cli.transport import PromptTransport
 
 
-def _make_transport() -> tuple[OnceTransport, io.StringIO]:
+def _make_transport() -> tuple[PromptTransport, io.StringIO]:
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, width=120)
-    return OnceTransport(console=console), buffer
+    return PromptTransport(console=console), buffer
 
 
 @pytest.mark.asyncio
@@ -143,7 +143,7 @@ async def test_footer_is_single_compact_line() -> None:
     assert "1 model" in footer
     assert "1 tool" in footer
     assert "4.1k tok" in footer
-    # once collapses the REPL's turn/session split: exactly one token figure.
+    # A prompt run collapses the REPL-era turn/session split: exactly one token figure.
     assert "session" not in footer
     assert "turn" not in footer
 
@@ -153,7 +153,7 @@ async def test_quiet_prints_response_only() -> None:
     """Quiet mode suppresses the activity line, per-tool lines, and the footer."""
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, width=120)
-    transport = OnceTransport(console=console, quiet=True)
+    transport = PromptTransport(console=console, quiet=True)
     transport.start_turn("do a thing")
     await transport.on_stage(
         "tool_dispatch",
