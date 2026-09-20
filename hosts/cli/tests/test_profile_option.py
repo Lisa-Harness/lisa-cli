@@ -102,7 +102,6 @@ def test_models_command_passes_profile_through(
             thread_dir="",
             no_thread=False,
             session_context="",
-            session_context_refresh=False,
             timezone="",
             state_snapshot="",
             streaming="none",
@@ -158,15 +157,14 @@ def test_intake_command_resolves_profiled_data_dir(
     assert Path(captured["data_dir"]) == (base / "profiles" / "taxes").resolve()
 
 
-# ── once-unknown pre-parse: --profile value is skipped ────────────────
+# ── once-unknown pre-parse ───────────────────────────────────────────
 
 
-def test_profile_value_not_mistaken_for_subcommand(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--profile taxes → 'taxes' is a value, not a rerouted positional."""
+def test_group_flag_is_not_rerouted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A leading unknown option (now group options are gone) does not confuse
+    the positional locator: the first positional after flags is what routes."""
     from hosts.cli import main as cli_main
 
     monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
-    out = cli_main._maybe_route_to_once(["--profile", "taxes", "verify"])
-    assert out == ["--profile", "taxes", "verify"]
+    out = cli_main._maybe_route_to_once(["--once-unknown", "continue"])
+    assert out == ["once", "continue"]

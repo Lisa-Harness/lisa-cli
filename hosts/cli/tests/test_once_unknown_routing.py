@@ -3,10 +3,10 @@
 When ``LISA_ONCE_UNKNOWN`` is set (or ``--once-unknown`` is passed), an
 unrecognized first positional is rerouted to the ``once`` subcommand so
 users can run ``lisa continue`` or ``lisa "do something else"`` without
-typing ``once``. Known subcommands are never rerouted, and group-level
-options (and their values) are skipped when locating the subcommand
-position so e.g. ``--log-level debug`` does not mistake ``debug`` for
-the subcommand.
+typing ``once``. Known subcommands are never rerouted. The group
+callback takes no value-consuming options (runtime options live on each
+subcommand), so every ``--flag`` token is standalone when locating the
+subcommand position.
 """
 
 from __future__ import annotations
@@ -45,31 +45,20 @@ def test_flag_unknown_positional_routed_to_once(
 def test_known_subcommand_not_routed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A registered subcommand is left in place even when routing is on."""
     monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
-    for known in ("verify", "pack", "once", "cli", "models", "intake", "help"):
+    for known in ("verify", "pack", "once", "models", "intake", "help"):
         assert cli_main._maybe_route_to_once([known]) == [known]
 
 
-def test_group_option_value_not_mistaken_for_subcommand(
+def test_unknown_flag_token_standalone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A group-level option value (e.g. `debug`) is skipped, not rerouted."""
+    """With no group value-options, a stray unknown flag is skipped as one
+    token: the first positional after it is what routes (and `debug` in
+    `--log-level debug` now reads as the positional it is — runtime
+    options belong after the subcommand)."""
     monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
-    # --log-level debug is a group option + value; `verify` is the real
-    # positional and is a known command, so no routing happens.
-    assert cli_main._maybe_route_to_once(["--log-level", "debug", "verify"]) == [
-        "--log-level",
-        "debug",
-        "verify",
-    ]
-
-
-def test_group_option_then_unknown_positional_routed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Group options before an unknown positional are preserved, then routed."""
-    monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
-    out = cli_main._maybe_route_to_once(["--log-level", "debug", "continue"])
-    assert out == ["--log-level", "debug", "once", "continue"]
+    out = cli_main._maybe_route_to_once(["--log-level", "debug"])
+    assert out == ["--log-level", "once", "debug"]
 
 
 def test_quoted_multiword_message_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,7 +68,7 @@ def test_quoted_multiword_message_preserved(monkeypatch: pytest.MonkeyPatch) -> 
     assert out == ["once", "do something else"]
 
 
-def test_equals_form_group_option_skipped(
+def test_equals_form_flag_token_standalone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`--data-dir=foo` is one token; the next positional is still found."""
@@ -148,14 +137,15 @@ def test_once_only_flag_without_routing_left_alone(
     assert cli_main._maybe_route_to_once(["-r", "fix it"]) == ["-r", "fix it"]
 
 
-def test_group_options_and_once_flags_coexist(
+def test_stray_flag_and_once_flags_coexist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Group options stay put; only once-only flags hoist after `once`."""
+    """An unknown leading flag stays put; only once-only flags hoist after
+    `once` (group value-options no longer exist, so the flag cannot swallow
+    the next token)."""
     monkeypatch.setenv(cli_main._ONCE_UNKNOWN_ENV, "1")
-    assert cli_main._maybe_route_to_once(
-        ["--log-level", "debug", "-r", "fix it"]
-    ) == ["--log-level", "debug", "once", "-r", "fix it"]
+    out = cli_main._maybe_route_to_once(["--log-level", "-r", "fix it"])
+    assert out == ["--log-level", "once", "-r", "fix it"]
 
 
 @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
@@ -185,7 +175,7 @@ def test_once_unknown_active_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_first_positional_index_basic() -> None:
     assert cli_main._first_positional_index(["verify"]) == 0
-    assert cli_main._first_positional_index(["--log-level", "debug", "verify"]) == 2
+    assert cli_main._first_positional_index(["--log-level", "verify"]) == 1
     assert (
         cli_main._first_positional_index(["--data-dir=/tmp", "verify"]) == 1
     )

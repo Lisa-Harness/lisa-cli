@@ -1,11 +1,5 @@
 """Tests for streaming option parsing (CLI config).
 
-Migrated from ``hosts/little_lisa/test_little_lisa_streaming.py``.
-
-The original test exercised ``little_lisa.parse_streaming_option`` and
-``little_lisa._initialize_runtime`` (which wrote to ``_RUNTIME_STATE``).
-In the new structure:
-
 - ``parse_streaming_option`` lives in ``host.config_resolver``.
 - Runtime configuration is a frozen ``HostConfig`` constructed via
   ``HostConfig.from_env(streaming=...)``; the streaming mode and delay
@@ -50,7 +44,7 @@ def test_host_config_applies_streaming_mode_and_delay() -> None:
 
 
 def test_streaming_config_default_is_hybrid() -> None:
-    """The CLI default is hybrid streaming (the thinking/streaming pane)."""
+    """The host default is hybrid streaming (hosts may use it for display)."""
     config = HostConfig.from_env()
     assert config.streaming.mode == "hybrid"
     assert config.streaming.enabled is True

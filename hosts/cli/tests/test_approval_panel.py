@@ -1,17 +1,17 @@
-"""Tests for the CLI approval panel — render, transport capture, keystrokes.
+"""Tests for the CLI approval panel — render and transport capture.
 
-Covers the three surfaces of the policy-driven approval UX delivered to the
-terminal host:
+Covers the two surfaces of the policy-driven approval UX delivered to
+the once-mode host:
 
-- ``hosts.cli.render.render_approval_panel`` — the keystroke panel render with
-  the sandbox containment badge.
-- ``RichTransport.on_response`` — capturing ``data["approval"]`` into
-  ``pending_approval`` and rendering the panel (instead of a bare text blob).
-- ``hosts.cli.keys._add_approval_bindings`` — the armed y/n/a/v/Esc bindings
-  that decide a pending approval with a single keystroke, submitting the
-  corresponding slash command as the prompt result.
+- ``hosts.cli.render.render_approval_panel`` — the panel render with the
+  sandbox containment badge (once mode renders it with ``keystrokes=False``;
+  the decision hints point at `lisa once "approve <id>"`).
+- ``OnceTransport.on_response`` — capturing ``data["approval"]`` into
+  ``pending_approval`` + ``approval_unresolved`` and rendering the panel
+  (instead of a bare text blob) on a tty console, or the fail-fast stderr
+  notice when piped/redirected.
 
-No MCP subprocess is ever spawned; the runtime and console are stubs.
+No MCP subprocess is ever spawned; the console is a recording stub.
 """
 
 from __future__ import annotations
@@ -101,9 +101,11 @@ def test_render_approval_panel_shows_immediate_expiry() -> None:
 
 
 def _make_transport() -> Any:
-    from hosts.cli.transport import RichTransport
+    from hosts.cli.transport import OnceTransport
 
-    return RichTransport(console=Console(record=True, width=100))
+    # force_terminal=True so the transport takes its interactive branch and
+    # renders the panel (a non-tty console gets the fail-fast stderr notice).
+    return OnceTransport(console=Console(record=True, width=100, force_terminal=True))
 
 
 @pytest.mark.asyncio
@@ -114,6 +116,7 @@ async def test_on_response_captures_approval_payload_and_renders_panel() -> None
     )
     assert transport.pending_approval is not None
     assert transport.pending_approval["request_id"] == "abc123def456"
+    assert transport.approval_unresolved is True
     # The panel rendered into the console recording.
     assert "CONTAINED" in transport.console.export_text()
 
@@ -123,6 +126,7 @@ async def test_on_response_without_approval_renders_text_not_panel() -> None:
     transport = _make_transport()
     await transport.on_response("just an answer", None)
     assert transport.pending_approval is None
+    assert transport.approval_unresolved is False
 
 
 @pytest.mark.asyncio
@@ -133,40 +137,3 @@ async def test_start_thinking_disarms_pending_approval() -> None:
     transport.start_thinking()
     assert transport.pending_approval is None
 
-
-# ── Armed keystroke bindings ──────────────────────────────────────────
-
-
-def _make_dispatcher_stub() -> Any:
-    class _Dispatcher:
-        def render_approval_view(self) -> None:
-            return None
-
-    return _Dispatcher()
-
-
-def test_armed_binding_condition_blocks_when_not_armed() -> None:
-    from prompt_toolkit.key_binding import KeyBindings
-
-    from hosts.cli.keys import _add_approval_bindings
-
-    transport = _make_transport()  # pending_approval is None -> not armed
-    transport.pending_approval = None
-    bindings = KeyBindings()
-    _add_approval_bindings(bindings, transport, _make_dispatcher_stub())
-    # The 'y' binding exists but is gated; with nothing armed the condition
-    # evaluates False so a typed 'y' is not intercepted.
-    assert bindings.get_bindings_for_keys(("y",)), "y binding must exist"
-
-
-def test_armed_bindings_registered_for_all_decision_keys() -> None:
-    from prompt_toolkit.key_binding import KeyBindings
-
-    from hosts.cli.keys import _add_approval_bindings
-
-    transport = _make_transport()
-    transport.pending_approval = _payload()
-    bindings = KeyBindings()
-    _add_approval_bindings(bindings, transport, _make_dispatcher_stub())
-    for key in ("y", "n", "a", "v", "escape"):
-        assert bindings.get_bindings_for_keys((key,)), f"missing {key} binding"

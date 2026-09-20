@@ -2,7 +2,9 @@
 
 This is the terminal-transport entry point for the Lisa framework. It
 wraps the transport-neutral :mod:`host` runtime with Typer commands
-and Rich/prompt_toolkit rendering.
+and Rich rendering. Every command is a one-shot process: turns run via
+``lisa once`` and lifecycle/inspection commands (verify, models, pack,
+mcp, last, intake) run once and exit.
 """
 
 from __future__ import annotations
@@ -127,18 +129,20 @@ logger = logging.getLogger(__name__)
 
 console = Console()
 app = typer.Typer(
-    no_args_is_help=False,
+    no_args_is_help=True,
     help="Run the Lisa framework terminal host.",
 )
 
 # Lisa palette accent for response separators (kept in sync with the shared
-# palette in repl.py / transport.py — the same value RichTransport uses for
-# the "Response" rule).
+# palette in transport.py — the same value OnceTransport uses for the
+# "Response" rule).
 _STYLE_RESPONSE = "dark_sea_green4"
 
 # Exit code returned when a restart is required (e.g. after a pack lifecycle
 # change). Scripts can detect this to distinguish "restart needed" from a
-# clean exit. Matches the BSD sysexits.h value for EX_UNAVAILABLE.
+# clean exit; re-running the command in a fresh process reloads entry points,
+# pack catalogs, and MCP manifests. Matches the BSD sysexits.h value for
+# EX_UNAVAILABLE.
 _RESTART_REQUIRED_EXIT = 69
 
 # Exit code returned when a `once` turn ends with an unresolved approval
@@ -152,11 +156,6 @@ _APPROVAL_REQUIRED_EXIT = 3
 # durable on the thread and printed to stderr; stdout gets nothing. Scripts
 # detect "needs input" and re-run with the missing information in the prompt.
 _YIELD_UNRESOLVED_EXIT = 4
-
-# Env var carrying a message to replay as the first turn on the next launch
-# after a restart. Set by `/pack install ... --resume <msg>` in
-# host.commands; consumed once on startup by the CLI host.
-_RESTART_RESUME_MESSAGE_ENV = "LISA_RESTART_RESUME_MESSAGE"
 
 # Env var (or --once-unknown flag) enabling lazy routing: an unrecognized
 # first positional is redirected to `lisa once <args...>` so users can run
@@ -188,42 +187,6 @@ _ONCE_HOST_COMMAND_RE = re.compile(
     r"|deny\s+" + _REQUEST_ID_SHAPE + r""
     r")$"
 )
-
-
-def _restart_current_process() -> None:
-    """Restart the CLI process after a runtime change.
-
-    - Unix (``os.name != "nt"``): true in-place re-exec via
-      :func:`os.execv`. The process keeps its terminal, stdin/stdout, and
-      environment; the new image re-enters :func:`main` with the same argv.
-    - Windows (``os.name == "nt"``): do NOT spawn a child. A spawned
-      process loses its parent terminal link and breaks the interactive
-      REPL. Instead, print a clear restart-required notice and exit with
-      :data:`_RESTART_REQUIRED_EXIT` so the user manually re-runs ``lisa``.
-
-    Uses :data:`sys.argv` (not ``sys.orig_argv``) for args continuity â€”
-    ``sys.orig_argv`` on Windows contains the Store launcher, not the
-    venv interpreter, which corrupts re-execs.
-    """
-    if os.name == "nt":
-        # Do not attempt to spawn a child process on Windows â€” it detaches
-        # from the parent terminal and breaks the interactive REPL. Just
-        # exit with a clear, script-detectable restart-required code.
-        console.print(
-            Panel(
-                "A runtime change requires a restart to reload entry points,\n"
-                "pack catalogs, and MCP manifests.\n\n"
-                "Please re-run [bold]lisa[/bold] manually to continue.",
-                title="Restart Required",
-                border_style="gold3",
-            )
-        )
-        raise typer.Exit(code=_RESTART_REQUIRED_EXIT)
-    else:
-        # True in-place exec replacement on Unix. The current process image
-        # is replaced; the terminal, file descriptors, and environment are
-        # preserved. os.execv does not return on success.
-        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def _get_version() -> str:
@@ -342,18 +305,11 @@ SessionContextOption = Annotated[
     typer.Option(
         "--session-context",
         help=(
-            "User context source: a slug name (content/user_contexts/<name>.md or downloaded from remote registry), "
-            "a single remote URL, a full .md file path, or a directory (all files concatenated). "
-            "Omit to skip session context."
+            "Path to a Markdown session plan file. "
+            "Overrides LISA_SESSION_CONTEXT_PATH. "
+            "Default: <data-dir>/config/session_context.md, else the bundled "
+            "core session."
         ),
-    ),
-]
-
-SessionContextRefreshOption = Annotated[
-    bool,
-    typer.Option(
-        "--session-context-refresh",
-        help="Force re-fetch of remote session context, ignoring local cache.",
     ),
 ]
 TimezoneOption = Annotated[
@@ -486,9 +442,8 @@ def _initialize_runtime(
     overlays_dir: str = "",
     thread_dir: str = "",
     no_thread: bool = False,
-    user_slug: str,
+    session_context: str = "",
     timezone: str = "",
-    session_context_refresh: bool = False,
     state_snapshot_path: str,
     streaming: str = "",
     host_log_path: str = "",
@@ -507,8 +462,11 @@ def _initialize_runtime(
     ``--data-dir`` and ``--profile`` are both CLI-level data-dir inputs —
     the framework's ``HostConfig.from_env`` only knows the env var.
 
-    The MCP pool is NOT started here â€” ``runtime.start()`` must be called
-    inside the host's event loop (see :func:`hosts.cli.repl.run_repl`).
+    ``session_context`` is the optional path to a Markdown session plan
+    file; ``user_slug`` is left to the framework (it derives from the
+    compiled plan's manifest name). The MCP pool is NOT started here —
+    ``runtime.start()`` must be called inside the host's event loop (see
+    the once/verify paths).
     """
     from host.bootstrap import build_runtime
 
@@ -521,10 +479,8 @@ def _initialize_runtime(
         overlays_dir=overlays_dir,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=user_slug,
         timezone=timezone,
-        session_context=user_slug,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         state_snapshot_path=state_snapshot_path,
         streaming=streaming,
         host_log_path=host_log_path,
@@ -542,95 +498,41 @@ def _initialize_runtime_or_exit(**kwargs: Any) -> HostRuntime | None:
     try:
         return _initialize_runtime(**kwargs)
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
-        from hosts.cli.repl import _render_runtime_error
-
         _render_runtime_error(console, exc, title="Startup Error")
         raise typer.Exit(code=2) from exc
 
 
-# ---------------------------------------------------------------------------
-# Default no-args mode
-# ---------------------------------------------------------------------------
-
-
-def _run_default_no_args_mode(
-    *,
-    log_level: str,
-    log: str,
-    no_log: bool,
-    data_dir: str,
-    profile: str,
-    overlays_dir: str,
-    thread_dir: str,
-    no_thread: bool,
-    session_context: str,
-    session_context_refresh: bool,
-    timezone: str,
-    state_snapshot: str,
-    streaming: str,
-    host_log: str,
+def _render_runtime_error(
+    console: Console, exc: Exception, *, title: str = "Error"
 ) -> None:
-    """Launch the REPL when no subcommand is given.
+    """Render a runtime/startup error in a red Rich panel.
 
-    The default no-args mode is the interactive REPL.
+    The exception's first line is bolded up to its first colon so the cause
+    reads at a glance. (Migrated from the retired REPL module; the once and
+    startup paths are its remaining consumers.)
     """
-    runtime = _initialize_runtime_or_exit(
-        log_level=log_level,
-        log_path=log,
-        no_log=no_log,
-        data_dir=data_dir,
-        profile=profile,
-        overlays_dir=overlays_dir,
-        thread_dir=thread_dir,
-        no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
-        timezone=timezone,
-        state_snapshot_path=state_snapshot,
-        streaming=streaming,
-        host_log_path=host_log,
-    )
-    if runtime is None:
-        return
-    _consume_restart_resume_message(runtime)
-    from hosts.cli.repl import run_repl
-
-    #                                   --version/modes/verify fast
-    restart_requested = asyncio.run(run_repl(runtime, console=console))
-    if restart_requested:
-        _restart_current_process()
+    lines = str(exc).splitlines()
+    if lines:
+        head, sep, tail = lines[0].partition(":")
+        if sep:
+            lines[0] = f"[bold]{head.strip()}[/bold]:{tail}"
+    body = "\n".join(lines) or exc.__class__.__name__
+    console.print(Panel(body, title=title, border_style="indian_red"))
 
 
 # ---------------------------------------------------------------------------
-# Restart helpers
+# Restart helper
 # ---------------------------------------------------------------------------
-
-
-def _consume_restart_resume_message(runtime: HostRuntime) -> None:
-    """Consume the resume-message env var on startup if present.
-
-    If ``LISA_RESTART_RESUME_MESSAGE`` is set (by a `/pack ... --resume <msg>`
-    command in the prior session), stash it on the runtime so the REPL can
-    replay it as the first turn, then clear the env var to avoid replay
-    loops on subsequent restarts.
-
-    Only consumed in interactive REPL startup; one-shot ``once``/``pack``
-    modes ignore it for deterministic one-shot UX.
-    """
-    resume_msg = os.environ.pop(_RESTART_RESUME_MESSAGE_ENV, "").strip()
-    if resume_msg:
-        runtime.session.pending_resume_message = resume_msg
 
 
 def _exit_restart_required() -> None:
     """Print a restart-required notice and exit for one-shot commands.
 
-    Used by ``once`` and ``pack install/uninstall`` after a successful
-    pack lifecycle change. Unlike the REPL path, one-shot commands do
-    NOT re-exec (re-running the same command would redo the mutation).
-    Instead, print a clear notice and exit with
-    :data:`_RESTART_REQUIRED_EXIT` on all platforms so the user manually
-    restarts the interactive session.
+    Used by ``once`` and ``pack install/uninstall/update`` after a successful
+    pack lifecycle change. One-shot commands do NOT re-exec (re-running the
+    same command would redo the mutation). Instead, print a clear notice and
+    exit with :data:`_RESTART_REQUIRED_EXIT` on all platforms so the user
+    manually re-runs the next command with a fresh process.
     """
     console.print(
         Panel(
@@ -645,99 +547,18 @@ def _exit_restart_required() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Typer callback (no-args default)
+# Typer callback
 # ---------------------------------------------------------------------------
 
 
-@app.callback(invoke_without_command=True)
+@app.callback()
 def _cli_callback(
     ctx: typer.Context,
     version: bool = _VERSION_OPTION,
-    log_level: LogLevelOption = "",
-    log: LogOption = "",
-    no_log: NoLogOption = False,
-    data_dir: DataDirOption = "",
-    profile: ProfileOption = "",
-    overlays_dir: OverlaysDirOption = "",
-    thread_dir: ThreadDirOption = "",
-    no_thread: NoThreadOption = False,
-    session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
-    timezone: TimezoneOption = "",
-    state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "hybrid",
-    host_log: HostLogOption = "",
 ) -> None:
     if version:
         console.print(f"lisa v{_get_version()}")
         raise typer.Exit()
-    if ctx.invoked_subcommand is not None:
-        return
-    _run_default_no_args_mode(
-        log_level=log_level,
-        log=log,
-        no_log=no_log,
-        data_dir=data_dir,
-        profile=profile,
-        overlays_dir=overlays_dir,
-        thread_dir=thread_dir,
-        no_thread=no_thread,
-        session_context=session_context,
-        session_context_refresh=session_context_refresh,
-        timezone=timezone,
-        state_snapshot=state_snapshot,
-        streaming=streaming,
-        host_log=host_log,
-    )
-
-
-# ---------------------------------------------------------------------------
-# cli command (REPL)
-# ---------------------------------------------------------------------------
-
-
-@app.command("cli", help="Run the interactive Lisa terminal REPL.")
-def _cli_command(
-    log_level: LogLevelOption = "",
-    log: LogOption = "",
-    no_log: NoLogOption = False,
-    data_dir: DataDirOption = "",
-    profile: ProfileOption = "",
-    overlays_dir: OverlaysDirOption = "",
-    thread_dir: ThreadDirOption = "",
-    no_thread: NoThreadOption = False,
-    session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
-    timezone: TimezoneOption = "",
-    state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "hybrid",
-    host_log: HostLogOption = "",
-) -> None:
-    runtime = _initialize_runtime_or_exit(
-        log_level=log_level,
-        log_path=log,
-        no_log=no_log,
-        data_dir=data_dir,
-        profile=profile,
-        overlays_dir=overlays_dir,
-        thread_dir=thread_dir,
-        no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
-        timezone=timezone,
-        state_snapshot_path=state_snapshot,
-        streaming=streaming,
-        host_log_path=host_log,
-    )
-    if runtime is None:
-        return
-    _consume_restart_resume_message(runtime)
-    from hosts.cli.repl import run_repl
-
-    #                                   --version/modes/verify fast
-    restart_requested = asyncio.run(run_repl(runtime, console=console))
-    if restart_requested:
-        _restart_current_process()
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +769,6 @@ def _verify_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -963,8 +783,7 @@ def _verify_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1017,7 +836,6 @@ def _modes_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1031,8 +849,7 @@ def _modes_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1053,8 +870,8 @@ def _modes_command(
     help=(
         "Manage the model manifest. ACTION defaults to 'show'. "
         "Subcommands: show, discover, apply, help. "
-        "(reload and edit are REPL-only; they have no durable effect as a "
-        "one-shot CLI invocation.)"
+        "(reload and edit only refresh transient state or print guidance; "
+        "they have no durable effect as a one-shot CLI invocation.)"
     ),
 )
 def _models_command(
@@ -1078,7 +895,6 @@ def _models_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1092,8 +908,7 @@ def _models_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1124,8 +939,7 @@ def _models_command(
             "[yellow]'models " + normalized + "' has no durable effect as a one-shot "
             "CLI command: it only refreshes in-process state or prints guidance, and "
             "the CLI runtime is discarded on exit.[/yellow]\n"
-            "Edit models.proposed.yaml by hand, then run 'lisa models apply'.\n"
-            "Use 'lisa' (REPL) for /models " + normalized + "."
+            "Edit models.proposed.yaml by hand, then run 'lisa models apply'."
         )
         return
 
@@ -1175,7 +989,6 @@ def _operations_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1189,8 +1002,7 @@ def _operations_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1222,7 +1034,6 @@ def _tools_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1236,8 +1047,7 @@ def _tools_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1274,7 +1084,6 @@ def _last_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1288,8 +1097,7 @@ def _last_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1312,7 +1120,7 @@ def _last_command(
         return
     # Interactive: the same treatment the original answer gets — a
     # "Response" rule separator plus Rich Markdown rendering (colors,
-    # headings, code fences), mirroring RichTransport.on_response.
+    # headings, code fences), mirroring OnceTransport.on_response.
     console.print(Rule(title="Response", style=_STYLE_RESPONSE))
     console.print(Markdown(response_text))
 
@@ -1340,8 +1148,8 @@ def _build_mcp_health(
     and torn down within ``_collect_mcp_tools``). Reads the same accessors
     (``warm_server_ids``, ``warm_failed_ids``, ``cold_failed_ids``,
     ``permanently_failed_ids``, ``restart_counts``, ``last_errors``,
-    ``tools_by_server``) so the CLI summary and the REPL ``/mcp`` command
-    show identical state.
+    ``tools_by_server``) so the CLI summary shows identical state to any
+    other host surface.
     """
     from host.introspect import gather_mcp_pool_health
 
@@ -1418,7 +1226,6 @@ def _mcp_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1432,8 +1239,7 @@ def _mcp_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1478,7 +1284,6 @@ def _pack_command(
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1492,8 +1297,7 @@ def _pack_command(
         profile=profile,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1683,10 +1487,11 @@ def _run_once_host_command(command: str, **runtime_kwargs: Any) -> None:
 
     The CLI's runtime options are forwarded verbatim; the command string is
     normalized to its slash form (``approve X`` -> ``/approve X``) and
-    dispatched via handle_message exactly as the REPL would send it, so the
-    host's command handling (identity fallback, policy writes, thread
-    entries) is identical in both modes. Prints the reply and applies the
-    restart-required exit contract when the runtime flags one.
+    dispatched via handle_message exactly as a persistent host would send
+    it, so the host's command handling (identity fallback, policy writes,
+    thread entries) is identical across invocation modes. Prints the reply
+    and applies the restart-required exit contract when the runtime flags
+    one.
     """
     verb, _, rest = command.partition(" ")
     if verb in {"approve", "deny", "policy"}:
@@ -1736,10 +1541,10 @@ def _once_command(
     no_log: NoLogOption = False,
     data_dir: DataDirOption = "",
     profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
     thread_dir: ThreadDirOption = "",
     no_thread: NoThreadOption = False,
     session_context: SessionContextOption = "",
-    session_context_refresh: SessionContextRefreshOption = False,
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "none",
@@ -1768,10 +1573,10 @@ def _once_command(
             no_log=no_log,
             data_dir=data_dir,
             profile=profile,
+            overlays_dir=overlays_dir,
             thread_dir=thread_dir,
             no_thread=no_thread,
-            user_slug=session_context,
-            session_context_refresh=session_context_refresh,
+            session_context=session_context,
             timezone=timezone,
             state_snapshot_path=state_snapshot,
             streaming=streaming,
@@ -1808,10 +1613,10 @@ def _once_command(
         no_log=no_log,
         data_dir=data_dir,
         profile=profile,
+        overlays_dir=overlays_dir,
         thread_dir=thread_dir,
         no_thread=no_thread,
-        user_slug=session_context,
-        session_context_refresh=session_context_refresh,
+        session_context=session_context,
         timezone=timezone,
         state_snapshot_path=state_snapshot,
         streaming=streaming,
@@ -1917,29 +1722,9 @@ def _intake_command(
 # main entry point
 # ---------------------------------------------------------------------------
 
-
 # ---------------------------------------------------------------------------
 # once-unknown pre-parse routing
 # ---------------------------------------------------------------------------
-
-# Group-level callback options that consume the following token as their
-# value. Used by _first_positional_index to skip option values when locating
-# the subcommand position. Keep in sync with the options on _cli_callback.
-_VALUE_TAKING_GROUP_FLAGS = frozenset(
-    {
-        "--log-level",
-        "--log",
-        "--data-dir",
-        "--profile",
-        "--overlays-dir",
-        "--thread-dir",
-        "--session-context",
-        "--timezone",
-        "--state-snapshot",
-        "--streaming",
-        "--host-log",
-    }
-)
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -1966,9 +1751,10 @@ def _known_command_names() -> set[str]:
 def _first_positional_index(args: list[str]) -> int:
     """Index of the first positional (non-option) token.
 
-    Skips group-level options and their values so a value like `debug` in
-    `--log-level debug` is not mistaken for the subcommand. Returns -1 when
-    there is no positional token (e.g. bare `lisa` or only options).
+    The group callback takes no value-consuming options (only ``--version``
+    and the pre-parse-only ``--once-unknown``), so every ``--flag`` token
+    is standalone; a ``--flag=value`` form carries its value inline. Returns
+    -1 when there is no positional token (e.g. bare `lisa` or only options).
     """
     i = 0
     n = len(args)
@@ -1977,13 +1763,7 @@ def _first_positional_index(args: list[str]) -> int:
         if tok == "--":
             return i + 1 if i + 1 < n else -1
         if tok.startswith("-") and tok != "-":
-            if "=" in tok:
-                i += 1
-                continue
-            if tok in _VALUE_TAKING_GROUP_FLAGS:
-                i += 2  # flag + its value
-                continue
-            i += 1  # bool flag or unknown flag
+            i += 1  # bool flag, inline-value flag, or unknown flag
             continue
         return i
     return -1
@@ -1999,7 +1779,6 @@ def _maybe_route_to_once(args: list[str]) -> list[str]:
 
         lisa continue                       -> lisa once continue
         lisa "do something else"             -> lisa once "do something else"
-        lisa --log-level debug continue      -> lisa --log-level debug once continue
         lisa -r "fix it"                     -> lisa once -r "fix it"
 
     Once-only flags (``-r/--raw``, ``-q/--quiet``, ``--stdin/--no-stdin``)

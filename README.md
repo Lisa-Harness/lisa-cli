@@ -24,9 +24,9 @@ pip install lisa-host-cli
 ## Usage
 
 ```bash
-lisa            # start the REPL
+lisa            # show help (every command is one-shot)
+lisa once "summarize the thread"   # run a single turn
 lisa verify     # run the diagnostic smoke check
-lisa once "summarize the thread"   # run a single turn non-interactively
 lisa --help     # show all commands
 ```
 
@@ -76,18 +76,8 @@ impossible, re-run with the missing information included in the prompt.
 
 Commands execute without an approval prompt only when the bash pack reports a
 working, contained Bubblewrap sandbox. Missing, degraded, or unknown sandbox
-state fails closed and shows an approval panel instead. In the REPL, use `y` to
-approve, `n` to deny, `a` to approve and remember a command prefix, `v` to show
-the panel again, or `Esc` to dismiss it. Explicit commands remain available:
-
-```bash
-/approve <request-id>
-/deny <request-id>
-/approve <request-id> --remember [command-prefix]
-```
-
-Once mode decides with the same host machinery (the request id survives the
-process boundary):
+state fails closed and shows an approval panel instead. Once mode decides
+with the host machinery (the request id survives the process boundary):
 
 ```bash
 lisa once "approve <request-id>"                        # decide + re-run
@@ -95,10 +85,10 @@ lisa once "deny <request-id>"
 lisa once "approve <request-id> --remember [prefix]"
 ```
 
-### Policy (`/policy`, `lisa once policy`)
+### Policy (`lisa once policy`)
 
-Inspect and change the approval policy without hand-editing YAML. In the
-REPL it is `/policy`; in scripts it is `lisa once policy`:
+Inspect and change the approval policy without hand-editing YAML. The command is
+`lisa once policy` (also reachable as the `policy` decision subcommand):
 
 ```bash
 lisa once policy                     # show the active document
@@ -128,12 +118,12 @@ lisa --once-unknown continue          # one-shot, no env var
 ```
 
 Registered subcommands (`verify`, `pack`, `models`, …) are never rerouted,
-so the flag is safe to leave on. Group-level options and their values
-(e.g. `--log-level debug`) are skipped when locating the subcommand
-position. Once-only flags (`-r/--raw`, `-q/--quiet`, `--stdin/--no-stdin`)
-are hoisted after the injected `once` token, so `lisa -r "fix it"` parses as
-`lisa once -r "fix it"`. The env var is the intended default; the flag is
-redundant and exists only for discoverability.
+so the flag is safe to leave on. Runtime options belong to each subcommand
+(`lisa once --log-level debug …`). Once-only flags (`-r/--raw`, `-q/--quiet`,
+`--stdin/--no-stdin`) appearing before the positional are hoisted after the
+injected `once` token, so `lisa -r "fix it"` parses as `lisa once -r "fix it"`.
+The env var is the intended default; the flag is redundant and exists only
+for discoverability.
 
 ### Profiles (`--profile`, `LISA_PROFILE`)
 
@@ -181,7 +171,7 @@ categories; the names live in one place (`sdk.layout`):
 │              recovery-items.json · code-change-artifacts.json ·
 │              repl_history.txt · models.proposed.yaml
 ├── data/      memory.db · threads/ · files/ · backups/
-├── cache/     fetch/ · session_context_cache/ · layers/    (rm-safe)
+├── cache/     fetch/ · layers/    (rm-safe)
 ├── logs/      host.jsonl · mcp/<server_id>.jsonl · token-usage.jsonl
 ├── run/       per-session execution state, keyed by session hash:
 │              jobs/ · scratch/ · profile/ · sandbox-facts.json · logs (rm-safe)
@@ -223,8 +213,9 @@ uv run lisa --help
 ## Architecture
 
 `lisa-host-cli` wraps the transport-neutral `host` runtime (from `lisa-host-runtime`)
-with a Typer + Rich + prompt_toolkit terminal interface. The CLI implements
-`TransportCallbacks` to render turns in the terminal; the runtime never imports
+with a Typer + Rich terminal interface. Every command is a one-shot process; turns
+run through `lisa once` and its `OnceTransport` renders the turn trajectory to
+scrollback. The CLI implements `TransportCallbacks`; the runtime never imports
 Rich, Typer, or any transport-specific code.
 
 See `../lisa/docs/BOUNDARIES.md` for the full architecture.
