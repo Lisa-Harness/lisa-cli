@@ -1781,8 +1781,7 @@ def _intake_command(
     state = asyncio.run(run_intake(data_dir=resolved_data_dir))
     console.print(
         f"[green]Intake tick complete.[/green] "
-        f"{len(state.signal_snapshots)} signal(s), "
-        f"{len(state.active_alerts)} alert(s). "
+        f"{len(state.context_items)} context item(s). "
         f"State written to {resolved_data_dir / 'state' / 'state.json'}"
     )
 

@@ -134,8 +134,7 @@ def test_intake_command_resolves_profiled_data_dir(
 
         class _State:
             # RUF012: simple mutable defaults on a throwaway stub class
-            signal_snapshots: list = []  # noqa: RUF012
-            active_alerts: list = []  # noqa: RUF012
+            context_items: list = []  # noqa: RUF012
 
         return _State()
 
