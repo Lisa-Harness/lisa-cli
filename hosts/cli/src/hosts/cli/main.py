@@ -68,6 +68,11 @@ try:
 
     # Module-level search order, shared with _verify_check_env (which reads
     # this constant so monkeypatched tests and the loader stay in sync).
+    # TEST CONTRACT: this import-time load runs during pytest collection,
+    # before any fixture can intervene, so operator .env values DO land in
+    # os.environ inside test processes. hosts/cli/tests/conftest.py scrubs
+    # them (autouse _hermetic_env) — tests own their environment; anything
+    # ambient is treated as noise, not config.
     _ENV_SEARCH_CANDIDATES = (
         Path.cwd() / ".env",
         _default_env_dir / ".env",
