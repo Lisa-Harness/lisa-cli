@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from kernel.models import McpServerHealth
 from kernel.tools.mcp_client import MCPToolSpec
+from rich.box import SIMPLE_HEAD
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -77,7 +78,24 @@ STYLE_CONTAINMENT_NONE = "indian_red"
 STYLE_TEXT_MUTED = "grey58"
 STYLE_TEXT_PRIMARY = "bright_white"
 STYLE_ROW_MODEL = "dark_sea_green4"
+STYLE_TABLE_HEADER = "bold steel_blue3"
+STYLE_TABLE_ZEBRA = "grey15"
 _SECONDS_PER_MINUTE = 60
+
+
+def _styled_table(title: str) -> Table:
+    """Build a catalog table with the shared Lisa presentation defaults.
+
+    Minimal-head box (title rule + header rule only), bold steel-blue
+    headers, and zebra striping — the single biggest "looks like a real
+    product" trick for dense ID tables (modes/tools/operations).
+    """
+    return Table(
+        title=title,
+        box=SIMPLE_HEAD,
+        header_style=STYLE_TABLE_HEADER,
+        row_styles=["", STYLE_TABLE_ZEBRA],
+    )
 
 
 def render_modes(runtime: HostRuntime, *, console: Console | None = None) -> Table:
@@ -92,7 +110,7 @@ def render_modes(runtime: HostRuntime, *, console: Console | None = None) -> Tab
 
     _ = runtime  # catalog is global; runtime kept for future per-host scoping
     catalog = get_workflow_catalog()
-    table = Table(title="Lisa Modes")
+    table = _styled_table("Lisa Modes")
     table.add_column("Mode", style="bold")
     table.add_column("Kind")
     table.add_column("Command")
@@ -121,7 +139,7 @@ def render_models(runtime: HostRuntime, *, console: Console | None = None) -> Ta
 
     path = runtime.paths.models_path
     manifest = load_model_manifest(path)
-    table = Table(title="Lisa Models")
+    table = _styled_table("Lisa Models")
     table.add_column("Model", style="bold")
     table.add_column("Provider")
     table.add_column("Aliases")
@@ -176,7 +194,7 @@ def render_operations(runtime: HostRuntime, *, console: Console | None = None) -
 
     _ = runtime  # catalog is global; runtime kept for future per-host scoping
     catalog = get_operation_catalog()
-    table = Table(title="Lisa Operations")
+    table = _styled_table("Lisa Operations")
     table.add_column("Operation ID", style="bold")
     table.add_column("Kind")
     table.add_column("Description")
@@ -205,7 +223,7 @@ def render_tools(
     are listed by the dedicated ``lisa mcp`` command (and REPL ``/mcp``).
     """
     _ = runtime  # catalog is global; runtime kept for future per-host scoping
-    table = Table(title="Lisa Internal Tools")
+    table = _styled_table("Lisa Internal Tools")
     table.add_column("Tool ID", style="bold")
     table.add_column("Description")
     table.add_column("Max/Turn")
@@ -242,7 +260,7 @@ def render_mcp_servers(
     server that failed to start shows ``failed`` with the failure reason,
     not ``cold``.
     """
-    table = Table(title="MCP Servers")
+    table = _styled_table("MCP Servers")
     table.add_column("Server", style="bold")
     table.add_column("Status")
     table.add_column("Transport")
@@ -261,7 +279,7 @@ def render_mcp_servers(
         tool_display = "—" if (h.status == "cold" and h.tool_count == 0) else str(h.tool_count)
         table.add_row(
             server_id,
-            f"[{status_style}]{h.status}[/]",
+            f"[{status_style}]{_status_pill(h.status)}[/]",
             h.transport,
             endpoint,
             tool_display,
@@ -287,7 +305,7 @@ def render_mcp_server_tools(
     per-server ``tool_policy.allowed_tools`` / ``denied_tools`` in
     ``mcp_servers.yaml``.
     """
-    table = Table(title=f"MCP Server: {health.server_id}")
+    table = _styled_table(f"MCP Server: {health.server_id}")
     table.add_column("Tool", style="bold", overflow="fold")
     table.add_column("Description", overflow="fold")
     table.add_column("Required args", overflow="fold")
@@ -311,6 +329,12 @@ def _status_style(status: str) -> str:
     if status == "cold":
         return "yellow"
     return "grey58"
+
+
+def _status_pill(status: str) -> str:
+    """Render an MCP server status as a glyph pill (``● warm``)."""
+    glyph = {"warm": "●", "cold": "○", "failed": "✗"}.get(status, "·")
+    return f"{glyph} {status}"
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -354,14 +378,47 @@ def render_markdown_panel(
     return panel
 
 
+#: Diff-detection thresholds: minimum hunk-header count and combined +/- lines
+#: for the approval preview to render as a colored diff instead of flat text.
+_DIFF_MIN_HUNKS = 1
+_DIFF_MIN_CHANGED_LINES = 2
+_DIFF_MIN_TOTAL_LINES = 3
+
+
+def _looks_like_diff(text: str) -> bool:
+    """Heuristic: does this approval preview carry a unified diff?"""
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    if len(lines) < _DIFF_MIN_TOTAL_LINES:
+        return False
+    hunk = sum(1 for ln in lines if ln.startswith("@@"))
+    adds = sum(1 for ln in lines if ln.startswith("+"))
+    dels = sum(1 for ln in lines if ln.startswith("-"))
+    return hunk >= _DIFF_MIN_HUNKS and (adds + dels) >= _DIFF_MIN_CHANGED_LINES
+
+
+def _diff_text(text: str) -> Text:
+    """Render a unified diff with per-line colors (adds/dels/hunk headers)."""
+    out = Text()
+    for line in text.strip().splitlines():
+        if line.startswith("+"):
+            out.append(line + "\n", style="green3")
+        elif line.startswith("-"):
+            out.append(line + "\n", style="indian_red")
+        elif line.startswith("@@"):
+            out.append(line + "\n", style="steel_blue3")
+        else:
+            out.append(line + "\n", style=STYLE_TEXT_MUTED)
+    return out
+
+
 def _containment_badge(containment: str) -> tuple[str, str]:
     """Return (label, style) for a sandbox containment state."""
     state = (containment or "unknown").strip().lower()
     if state == "contained":
-        return "CONTAINED (sandbox)", STYLE_CONTAINMENT_CONTAINED
+        return "● CONTAINED (sandbox)", STYLE_CONTAINMENT_CONTAINED
     if state == "degraded":
-        return "DEGRADED — sandbox cannot run", STYLE_CONTAINMENT_DEGRADED
-    return "NOT SANDBOXED", STYLE_CONTAINMENT_NONE
+        return "▲ DEGRADED — sandbox cannot run", STYLE_CONTAINMENT_DEGRADED
+    return "✗ NOT SANDBOXED", STYLE_CONTAINMENT_NONE
 
 
 def _format_approval_expiry(seconds: object) -> str:
@@ -410,7 +467,14 @@ def render_approval_panel(
     expiry = _format_approval_expiry(payload.get("expires_in_seconds"))
 
     body = Text()
-    body.append(f"{preview or 'Run an action'}\n", style=STYLE_TEXT_PRIMARY)
+    if _looks_like_diff(preview or ""):
+        # A file-edit approval ships a unified diff — color the diff lines
+        # directly into the body (green adds, red dels, cyan hunk headers)
+        # so edits read at a glance instead of as a flat preview block.
+        body.append(_diff_text(preview))
+        body.append("\n")
+    else:
+        body.append(f"{preview or 'Run an action'}\n", style=STYLE_TEXT_PRIMARY)
     if command:
         body.append("\n$ ", style=STYLE_TEXT_MUTED)
         body.append(command + "\n", style="bright_white")

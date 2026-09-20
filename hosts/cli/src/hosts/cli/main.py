@@ -385,6 +385,20 @@ RawOption = Annotated[
         ),
     ),
 ]
+ToolDetailOption = Annotated[
+    int,
+    typer.Option(
+        "--tool-detail",
+        "-v",
+        count=True,
+        help=(
+            "Show more tool-call detail: -v adds the result preview under "
+            "each completed tool row; -v -v also prints the full call "
+            "arguments and the multi-line result snippet. Default: compact "
+            "one-line rows."
+        ),
+    ),
+]
 PromptApproveOption = Annotated[
     str,
     typer.Option(
@@ -816,7 +830,14 @@ def _verify_command(
         ("Paths", *_verify_check_paths(runtime)),
     ]
 
-    table = Table(title="lisa verify")
+    from rich.box import SIMPLE_HEAD  # noqa: PLC0415
+
+    table = Table(
+        title="lisa verify",
+        box=SIMPLE_HEAD,
+        header_style="bold steel_blue3",
+        row_styles=["", "grey15"],
+    )
     table.add_column("Check", style="bold")
     table.add_column("Status")
     table.add_column("Detail", overflow="fold", no_wrap=False)
@@ -1563,6 +1584,7 @@ def _prompt_command(
     streaming: StreamingOption = "none",
     host_log: HostLogOption = "",
     quiet: QuietOption = False,
+    tool_detail: ToolDetailOption = 0,
     approve: PromptApproveOption = "",
     deny: PromptDenyOption = "",
     remember: PromptRememberOption = "",
@@ -1640,7 +1662,9 @@ def _prompt_command(
     if runtime is None:
         return
     restart_required, transport = asyncio.run(
-        _run_prompt_with_teardown(runtime, full_message, quiet=quiet, raw=raw)
+        _run_prompt_with_teardown(
+            runtime, full_message, quiet=quiet, raw=raw, tool_detail=tool_detail
+        )
     )
     if transport.approval_unresolved:
         # The approval request id is durable; the operator must decide it in
@@ -1657,7 +1681,12 @@ def _prompt_command(
 
 
 async def _run_prompt_with_teardown(
-    runtime: HostRuntime, message: str, *, quiet: bool = False, raw: bool = False
+    runtime: HostRuntime,
+    message: str,
+    *,
+    quiet: bool = False,
+    raw: bool = False,
+    tool_detail: int = 0,
 ) -> tuple[bool, PromptTransport]:
     """Run one turn, then close the MCP pool.
 
@@ -1683,7 +1712,10 @@ async def _run_prompt_with_teardown(
             "\n\n" + _rest if _rest.strip() else ""
         )
     transport_console: Console = Console(stderr=True) if raw else console
-    transport = PromptTransport(console=transport_console, quiet=quiet, raw=raw)
+    transport = PromptTransport(
+        console=transport_console, quiet=quiet, raw=raw, tool_detail=tool_detail
+    )
+    transport.model_prices = _collect_model_prices(runtime)
     transport.start_turn(message)
     try:
         await runtime.start()
@@ -1692,6 +1724,29 @@ async def _run_prompt_with_teardown(
         transport.stop_activity()
         await runtime.aclose()
     return runtime.session.restart_required, transport
+
+
+def _collect_model_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]]:
+    """Read per-model per-token USD prices from the model manifest.
+
+    Returns ``{model_id: (prompt_price, completion_price)}`` — the same
+    fields ``render_models``'s Cost column formats. Empty dict on any
+    failure: the transport omits the cost footer rather than blocking the
+    turn on an unreadable manifest.
+    """
+    try:
+        from host.model_manifest import load_model_manifest  # noqa: PLC0415
+
+        manifest = load_model_manifest(runtime.paths.models_path)
+    except Exception:  # pylint: disable=broad-except
+        return {}
+    prices: dict[str, tuple[float, float]] = {}
+    for model in manifest.models:
+        prompt_price = float(getattr(model, "prompt_price", 0.0) or 0.0)
+        completion_price = float(getattr(model, "completion_price", 0.0) or 0.0)
+        if prompt_price > 0.0 or completion_price > 0.0:
+            prices[str(model.model_id)] = (prompt_price, completion_price)
+    return prices
 
 
 # ---------------------------------------------------------------------------
@@ -1746,7 +1801,9 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # level. When prompt-unknown routing injects `prompt`, these are hoisted
 # after it so Typer parses them as prompt options
 # (`lisa -r "fix it"` -> `lisa prompt -r "fix it"`).
-_PROMPT_ONLY_FLAGS = frozenset({"-r", "--raw", "-q", "--quiet", "--stdin", "--no-stdin"})
+_PROMPT_ONLY_FLAGS = frozenset(
+    {"-r", "--raw", "-q", "--quiet", "--stdin", "--no-stdin", "-v", "--tool-detail"}
+)
 
 
 def _prompt_unknown_active() -> bool:

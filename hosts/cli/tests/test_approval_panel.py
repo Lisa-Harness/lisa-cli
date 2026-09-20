@@ -97,6 +97,45 @@ def test_render_approval_panel_shows_immediate_expiry() -> None:
     assert "expires now" in console.export_text()
 
 
+def test_render_approval_panel_diff_preview_not_duplicated() -> None:
+    """A unified-diff preview renders once (as the colored diff block)."""
+    diff = (
+        "--- a/config.yaml\n"
+        "+++ b/config.yaml\n"
+        "@@ -1,3 +1,4 @@\n"
+        " key: value\n"
+        "-old: line\n"
+        "+new: line\n"
+        " other: entry"
+    )
+    console = Console(record=True, width=100)
+    render_mod.render_approval_panel(_payload(preview=diff), console=console)
+    text = console.export_text()
+    # The hunk header and changed lines render exactly once (diff block, not
+    # flat preview + diff).
+    assert text.count("@@ -1,3 +1,4 @@") == 1
+    assert text.count("+new: line") == 1
+    assert text.count("-old: line") == 1
+
+
+def test_render_approval_panel_plain_preview_untouched() -> None:
+    """Non-diff prose previews keep the flat bright-white render."""
+    console = Console(record=True, width=100)
+    render_mod.render_approval_panel(
+        _payload(preview="run a shell command with [brackets]"), console=console
+    )
+    assert "run a shell command with [brackets]" in console.export_text()
+
+
+def test_render_approval_panel_badge_glyphs() -> None:
+    """The containment badge carries its status glyph (●/▲/✗)."""
+    console = Console(record=True, width=100)
+    render_mod.render_approval_panel(_payload(), console=console)
+    assert "● CONTAINED" in console.export_text()
+    render_mod.render_approval_panel(_payload(containment="none"), console=console)
+    assert "✗ NOT SANDBOXED" in console.export_text()
+
+
 # ── Transport capture ─────────────────────────────────────────────────
 
 
