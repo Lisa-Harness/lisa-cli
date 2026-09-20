@@ -173,16 +173,27 @@ _PENDING_APPROVAL_TARGET = "pending"
 
 # Grammar for `lisa once` decision subcommands (matched against the
 # lowercased message). `policy` accepts a bare verb or up to two short
-# arg tokens (subcommand word + value; the host validates the vocabulary).
-# approve/deny require the first argument to look like a request id (the
-# host mints 32-hex ids) or start a --remember flag whose value is
-# free-form. Prose like "deny the claim" or "approve my leave request"
-# fails the id shape and stays on the model path. The host re-validates
-# the exact id anyway.
+# arg tokens (subcommand word + value; the host validates the vocabulary),
+# OR the `rule` branch: `policy rule` requires an add|remove|list verb next
+# (prose like "policy rule of thumb" must NOT match), `add` takes a short
+# list name + short flag tokens and then an optional free-form `--`-flag
+# tail (the `--remember` idiom — a CEL `--when` expression can contain
+# spaces and quotes), `remove` takes one short `list:n` token, `list`
+# terminates. approve/deny require the first argument to look like a
+# request id (the host mints 32-hex ids) or start a --remember flag whose
+# value is free-form. Prose like "deny the claim" or "approve my leave
+# request" fails the id shape and stays on the model path. The host
+# re-validates the exact id anyway.
 _REQUEST_ID_SHAPE = r"[0-9a-f]{8,64}"
 _ONCE_HOST_COMMAND_RE = re.compile(
     r"^(?:"
     r"policy(?:\s+\S{1,32}){0,2}"
+    r"|policy\s+rule"
+    r"(?:\s+list"
+    r"|\s+remove\s+\S{1,32}"
+    r"|\s+add\s+\S{1,32}(?:\s+--?[\w-]{1,32}\s+\S{1,32}){0,4}"
+    r"(?:\s+--[\w-]{1,32}(?:\s.*)?)?"
+    r")"
     r"|approve(?:\s+" + _REQUEST_ID_SHAPE + r")?(?:\s+--remember\b.*)?"
     r"|deny\s+" + _REQUEST_ID_SHAPE + r""
     r")$"
@@ -1530,6 +1541,8 @@ def _once_command(
             "its contents are attached as the turn payload, e.g. "
             "`cat f.conf | lisa once -r 'fix this config'`. "
             "Subcommands that skip the turn: `lisa once policy [mode M|bare on|off]`, "
+            "`lisa once policy rule add <list> [--tool T] [--effect E] [--pack P] "
+            "[--prefix PX] [--when EXPR] | rule remove <list>:<n> | rule list`, "
             "`lisa once approve <id> [--remember <prefix>]`, "
             "`lisa once deny <id>`."
         ),

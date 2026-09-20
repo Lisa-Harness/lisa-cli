@@ -157,6 +157,85 @@ def test_once_prose_is_not_intercepted(
     assert captured["messages"] == ["approve my leave request"]
 
 
+# ── `policy rule` management subcommands ──────────────────────────────
+
+
+def test_once_policy_rule_add_dispatches_slash_form(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lisa once "policy rule add ..."` sends the rule command verbatim.
+
+    The free-form `--when` tail (a CEL expression with spaces and quoted
+    string literals) must survive the grammar guard intact.
+    """
+    captured: dict[str, Any] = {}
+    _invoke_once(
+        monkeypatch,
+        tmp_path,
+        ['policy rule add allow --tool bash_run --when action.argv[0] == "git"'],
+        captured=captured,
+    )
+    assert captured["messages"] == [
+        '/policy rule add allow --tool bash_run --when action.argv[0] == "git"'
+    ]
+
+
+def test_once_policy_rule_add_multiple_flags_with_when(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Several matchers before the --when expression all pass through."""
+    captured: dict[str, Any] = {}
+    _invoke_once(
+        monkeypatch,
+        tmp_path,
+        [
+            "policy rule add ask --effect external_write --pack lisa-pack-github "
+            "--when action.parameters.base_branch == 'main'"
+        ],
+        captured=captured,
+    )
+    assert captured["messages"] == [
+        "/policy rule add ask --effect external_write --pack lisa-pack-github "
+        "--when action.parameters.base_branch == 'main'"
+    ]
+
+
+def test_once_policy_rule_remove_dispatches_slash_form(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    _invoke_once(
+        monkeypatch, tmp_path, ["policy rule remove allow:2"], captured=captured
+    )
+    assert captured["messages"] == ["/policy rule remove allow:2"]
+
+
+def test_once_policy_rule_list_dispatches_slash_form(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    _invoke_once(monkeypatch, tmp_path, ["policy rule list"], captured=captured)
+    assert captured["messages"] == ["/policy rule list"]
+
+
+def test_once_policy_rule_prose_is_not_intercepted(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prose mentioning `policy rule` stays on the model path.
+
+    The grammar guard must not grow prose false-positives: "policy rule of
+    thumb" and friends route to the model turn like any other message.
+    """
+    for prose in (
+        "policy rule of thumb says less is more",
+        "policy rules should be simple to audit",
+        "tell me about policy rule engines and their design",
+    ):
+        captured: dict[str, Any] = {}
+        _invoke_once(monkeypatch, tmp_path, [prose], captured=captured)
+        assert captured["messages"] == [prose]
+
+
 # ── Bare verb resolves the single pending approval ────────────────────
 
 
