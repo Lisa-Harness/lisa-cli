@@ -239,8 +239,14 @@ class _StubRuntime:
     """
 
     def __init__(self, *, warm: int, cold: int, pool: _FakePool | None) -> None:
-        self.mcp_warm_configs = [object() for _ in range(warm)]
-        self.mcp_cold_configs = [object() for _ in range(cold)]
+        # Config stand-ins carry server_ids so the collector's warm-id
+        # derivation sees them (the real MCPClientConfig always has one).
+        self.mcp_warm_configs = [
+            type("_Cfg", (), {"server_id": f"warm-{idx}"})() for idx in range(warm)
+        ]
+        self.mcp_cold_configs = [
+            type("_Cfg", (), {"server_id": f"cold-{idx}"})() for idx in range(cold)
+        ]
         self._pool = pool
         self.started = False
         self.closed = False

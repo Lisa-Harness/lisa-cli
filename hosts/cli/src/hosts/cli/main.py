@@ -24,7 +24,8 @@ import typer
 # LISA_DATA_DIR (and LISA_PACKS_VENV) are honored when resolving the
 # packs venv (``<data_dir>/venv``) location. The loader only needs framework_root() and
 # default_data_dir(), both of which are env-independent, so it can run
-# safely before any host import. Search order:
+# safely before any host import. Search order (lowest precedence first —
+# every existing candidate is loaded, later ones overriding earlier ones):
 #   (1) CWD — for repo-mode dev sessions
 #   (2) ~/.lisa/.env — for tool-install mode (uv tool install lisa)
 #   (3) project root — repo-mode back-compat
@@ -68,6 +69,19 @@ try:
 
     # Module-level search order, shared with _verify_check_env (which reads
     # this constant so monkeypatched tests and the loader stay in sync).
+    # Ordered lowest-precedence first; _load_env_candidates applies them in
+    # this order so later (more authoritative) entries win.
+    #
+    # CWD first is deliberate — repo-mode dev sessions expect the checkout's
+    # own .env to be the base. It is NOT an early-return: loading only the
+    # first hit let an incidental CWD .env (a stale repo copy, or any
+    # directory the operator happens to be in) shadow the machine-level
+    # data-dir .env completely. That silently dropped every setting the
+    # authoritative file carries but the shadowing one lacks — the
+    # 2026-09-21 headroom incident: HEADROOM_MCP_BIN expanded to "" from the
+    # repo .env, so the pack's optional BINARY server failed to compile and
+    # `lisa prompt` died with a Startup Error panel.
+    #
     # TEST CONTRACT: this import-time load runs during pytest collection,
     # before any fixture can intervene, so operator .env values DO land in
     # os.environ inside test processes. hosts/cli/tests/conftest.py scrubs
@@ -80,10 +94,29 @@ try:
         _FRAMEWORK_ROOT / "hosts" / "little_lisa" / ".env",
     )
 
-    for _env_candidate in _ENV_SEARCH_CANDIDATES:
-        if _env_candidate.exists():
-            load_dotenv(dotenv_path=_env_candidate, override=False)
-            break
+    def _load_env_candidates(candidates: tuple[Path, ...]) -> Path | None:
+        """Load every existing candidate .env; return the last one loaded.
+
+        Later candidates are more authoritative than earlier ones: they are
+        applied with ``override=True`` so a machine-level data-dir .env can
+        fill in (and correct) whatever a lower-precedence file got wrong.
+        Within a single file the first definition still wins, so the
+        documented "``LISA_DATA_DIR`` above wins when both are set" behavior
+        is preserved by ``python-dotenv``'s own no-override default.
+        """
+        loaded: Path | None = None
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            if loaded is not None:
+                # More authoritative than everything loaded so far.
+                load_dotenv(dotenv_path=candidate, override=True)
+            else:
+                load_dotenv(dotenv_path=candidate, override=False)
+            loaded = candidate
+        return loaded
+
+    _load_env_candidates(_ENV_SEARCH_CANDIDATES)
 except ImportError:  # pragma: no cover — python-dotenv is optional
     pass
 
@@ -1174,6 +1207,31 @@ tool detail.
 """
 
 
+def _mcp_configs(runtime: Any, *, warm: bool) -> list[Any]:
+    """Return the runtime's warm or cold MCP configs.
+
+    Reads ``runtime.resources.mcp_warm_configs`` / ``mcp_cold_configs`` on a
+    real :class:`HostRuntime`. Falls back to flat ``mcp_warm_configs`` /
+    ``mcp_cold_configs`` attributes so test stubs need not model the
+    ``resources`` indirection.
+    """
+    attr = "mcp_warm_configs" if warm else "mcp_cold_configs"
+    resources = getattr(runtime, "resources", None)
+    configs = getattr(resources, attr, None)
+    if configs is None:
+        configs = getattr(runtime, attr, None)
+    return list(configs or [])
+
+
+def _mcp_tool_pool(runtime: Any) -> Any:
+    """Return the runtime's MCP tool pool (``resources`` indirection tolerated)."""
+    resources = getattr(runtime, "resources", None)
+    pool = getattr(resources, "mcp_tool_pool", None)
+    if pool is None:
+        pool = getattr(runtime, "mcp_tool_pool", None)
+    return pool
+
+
 def _build_mcp_health(
     pool: Any,
     is_alias: dict[str, bool],
@@ -1198,34 +1256,103 @@ def _build_mcp_health(
     return health
 
 
-async def _collect_mcp_tools(runtime: HostRuntime) -> McpIntrospection:
+async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30.0) -> None:
+    """Tear a runtime down without ever hanging the one-shot CLI command.
+
+    ``runtime.aclose()`` closes the MCP pool's anyio contexts and terminates
+    proxy subprocesses. When those teardown awaits stall (the 2026-09-21
+    headroom incident: the loop sat idle in select after sequential anyio
+    task-group exits), a plain ``await runtime.aclose()`` never returns and
+    the CLI prints nothing. Bound the graceful path with
+    :func:`asyncio.wait_for`; on timeout, fall back to terminating every
+    tracked MCP/proxy subprocess directly so no orphans survive.
+    """
+    try:
+        await asyncio.wait_for(runtime.aclose(), timeout=timeout_s)
+        return
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Runtime teardown exceeded %.0fs; falling back to direct "
+            "subprocess termination",
+            timeout_s,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # pylint: disable=broad-except
+        logger.debug("Runtime aclose raised during bounded teardown", exc_info=True)
+        return
+    # Forced cleanup: kill every subprocess the pools still track.
+    resources = runtime.resources
+    pools: list[Any] = []
+    proxy_pool = getattr(resources, "_proxy_pool", None)
+    if proxy_pool is not None:
+        pools.append(proxy_pool)
+    tool_pool = getattr(resources, "_mcp_tool_pool", None)
+    if tool_pool is not None:
+        pools.append(tool_pool)
+    for pool in pools:
+        for process in list(getattr(pool, "_processes", {}).values()):
+            try:
+                if process.returncode is None:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            except Exception:  # pylint: disable=broad-except
+                logger.debug("Process kill failed during forced teardown", exc_info=True)
+        for stack in list(getattr(tool_pool, "_child_stacks", {}).values()) if tool_pool else []:
+            try:
+                await stack.aclose()
+            except Exception:  # pylint: disable=broad-except
+                logger.debug("Child stack close failed during forced teardown", exc_info=True)
+
+
+async def _collect_mcp_tools(
+    runtime: HostRuntime,
+    *,
+    connect_server_ids: set[str] | None = None,
+) -> McpIntrospection:
     """Warm the MCP pool, return per-server health + discovered tool specs.
 
     MCP tool names are only discoverable by calling ``tools/list`` on each
-    server, which requires a live session. This starts the pool (warm + cold
-    configs), reads the discovered tool specs and per-server health, and
-    tears the pool down — all inside one ``asyncio.run`` event loop to honor
-    anyio's same-loop contract (the pool's async context managers must be
-    entered and exited in the same loop). Cold servers that fail to start
-    are skipped by the pool; their tools are simply absent from the
-    returned list.
+    server, which requires a live session. This starts the pool, reads the
+    discovered tool specs and per-server health, and tears the pool down —
+    all inside one ``asyncio.run`` event loop to honor anyio's same-loop
+    contract (the pool's async context managers must be entered and exited
+    in the same loop).
+
+    By default ONLY warm servers are connected: ``list_tools`` lazily
+    connects cold servers, and sequentially exiting several cold stdio
+    anyio task groups in one task poisons that task — every subsequent
+    await is cancelled by a stale anyio cancel scope (the 2026-09-21
+    headroom incident: ``lisa mcp`` printed nothing and exited 1). Cold
+    servers stay disconnected in the summary (status ``cold``); ``lisa mcp
+    <server_id>`` drill-down passes the single target via
+    ``connect_server_ids`` so at most one cold context is ever opened and
+    closed in the CLI's task.
 
     Returns an empty :data:`McpIntrospection` when the runtime has no MCP
     servers configured or when pool startup fails, so the ``tools``/``mcp``
     commands degrade to showing only the internal tool catalog instead of
     crashing.
     """
-    if not runtime.resources.mcp_warm_configs and not runtime.resources.mcp_cold_configs:
+    warm_ids = {
+        c.server_id
+        for c in _mcp_configs(runtime, warm=True)
+        if hasattr(c, "server_id")
+    }
+    if not warm_ids and not _mcp_configs(runtime, warm=False):
         return ({}, {})
+    allowed = warm_ids | (connect_server_ids or set())
+    health: dict[str, Any] = {}
+    tools_by_server: dict[str, list[MCPToolSpec]] = {}
     try:
         await runtime.start()
-        pool = runtime.resources.mcp_tool_pool
+        pool = _mcp_tool_pool(runtime)
         if pool is None:
             return ({}, {})
-        tools = await pool.list_tools()
+        tools = await pool.list_tools(allowed_server_ids=allowed)
         # Capture is_alias flags BEFORE aclose() clears _synthetic_handlers.
         is_alias = {spec.name: pool.is_synthetic_tool(spec.name) for spec in tools}
-        tools_by_server: dict[str, list[MCPToolSpec]] = {}
         for spec in tools:
             tools_by_server.setdefault(spec.server_id, []).append(spec)
         health = _build_mcp_health(pool, is_alias)
@@ -1233,7 +1360,7 @@ async def _collect_mcp_tools(runtime: HostRuntime) -> McpIntrospection:
         logger.debug("MCP tool collection failed: %s", exc)
         return ({}, {})
     finally:
-        await runtime.aclose()
+        await _aclose_runtime_bounded(runtime)
     return (health, tools_by_server)
 
 
@@ -1284,11 +1411,20 @@ def _mcp_command(
     )
     if runtime is None:
         return
-    mcp_health, mcp_tools_by_server = asyncio.run(_collect_mcp_tools(runtime))
+    server_id = target.strip()
+    # Warm servers only by default — cold servers stay disconnected so the
+    # one-shot command never sequentially exits multiple cold stdio task
+    # groups in one task (anyio cancel-scope poison, 2026-09-21). Drill-down
+    # adds exactly ONE cold target to the same pass: a single cold context
+    # open/close in the CLI's task is safe (verified), while a second
+    # in-process runtime init is not (stale global tool catalog breaks the
+    # operation-catalog re-validation on the second boot).
+    mcp_health, mcp_tools_by_server = asyncio.run(
+        _collect_mcp_tools(runtime, connect_server_ids={server_id} if server_id else None)
+    )
     if not mcp_health:
         console.print("[yellow]No MCP server tools discovered.[/yellow]")
         return
-    server_id = target.strip()
     if server_id:
         specs = mcp_tools_by_server.get(server_id, [])
         health = mcp_health.get(server_id)
