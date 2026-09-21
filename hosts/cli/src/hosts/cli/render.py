@@ -79,22 +79,21 @@ STYLE_TEXT_MUTED = "grey58"
 STYLE_TEXT_PRIMARY = "bright_white"
 STYLE_ROW_MODEL = "dark_sea_green4"
 STYLE_TABLE_HEADER = "bold steel_blue3"
-STYLE_TABLE_ZEBRA = "grey15"
 _SECONDS_PER_MINUTE = 60
 
 
 def _styled_table(title: str) -> Table:
     """Build a catalog table with the shared Lisa presentation defaults.
 
-    Minimal-head box (title rule + header rule only), bold steel-blue
-    headers, and zebra striping — the single biggest "looks like a real
-    product" trick for dense ID tables (modes/tools/operations).
+    Minimal-head box (title rule + header rule only) and bold steel-blue
+    headers. Deliberately NO zebra striping: terminal backgrounds are
+    unknown — dark-grey rows vanish on black consoles, and a lighter pick
+    inverts the problem on light ones. The box rules carry the structure.
     """
     return Table(
         title=title,
         box=SIMPLE_HEAD,
         header_style=STYLE_TABLE_HEADER,
-        row_styles=["", STYLE_TABLE_ZEBRA],
     )
 
 

@@ -832,11 +832,13 @@ def _verify_command(
 
     from rich.box import SIMPLE_HEAD  # noqa: PLC0415
 
+    # No zebra row_styles here either: terminal backgrounds are unknown and
+    # dark-grey rows vanish on black consoles (same rationale as
+    # render._styled_table).
     table = Table(
         title="lisa verify",
         box=SIMPLE_HEAD,
         header_style="bold steel_blue3",
-        row_styles=["", "grey15"],
     )
     table.add_column("Check", style="bold")
     table.add_column("Status")
