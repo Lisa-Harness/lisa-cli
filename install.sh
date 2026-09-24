@@ -9,7 +9,7 @@
 # Usage examples:
 #   curl -fsSL https://raw.githubusercontent.com/Lisa-Framework/lisa-host-cli/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --provider ollama,openai
-#   curl -fsSL ... | bash -s -- --provider anthropic --skip-diagnostics
+#   curl -fsSL ... | bash -s -- --provider anthropic --no-verify
 #
 # Until the packages are published on PyPI, the installer resolves them
 # straight from git (default) or from local checkouts of both repos:
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
         --lisa-repo)      LISA_REPO="$2";      shift 2 ;;
         --cli-repo)       CLI_REPO="$2";       shift 2 ;;
         --provider)       IFS=',' read -ra PROVIDERS <<< "$2"; shift 2 ;;
-        --skip-diagnostics) SKIP_DIAGNOSTICS=true; shift ;;
+        --no-verify)      SKIP_DIAGNOSTICS=true; shift ;;
         --help|-h)
             cat <<HELP
 Usage: install.sh [OPTIONS]
@@ -58,7 +58,7 @@ Options:
                           DIR/../cli relative to --lisa-repo).
   --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,
                           anthropic,google,openrouter,aws (default: \$LISA_PROVIDER or ollama)
-  --skip-diagnostics      Skip running lisa verify after install
+  --no-verify             Do not run lisa verify after install
   --help, -h              Show this help
 
 Examples:
@@ -66,7 +66,7 @@ Examples:
   install.sh --source git                      # same, explicit
   install.sh --source local --lisa-repo ~/Code/lisa
   install.sh --provider ollama,openai
-  install.sh --provider anthropic --skip-diagnostics
+  install.sh --provider anthropic --no-verify
 HELP
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -329,8 +329,8 @@ post_install_guidance() {
     if $is_ollama; then
         printf "  Ollama selected — make sure it's installed and models pulled:\n"
         printf "    curl -fsSL https://ollama.com/install.sh | sh\n"
-        printf "    ollama pull llama3.2:latest\n"
-        printf "    ollama pull gemma4:cloud\n"
+        printf "    ollama pull glm-5.3-flash:cloud\n"
+        printf "    ollama pull glm-5.3:cloud\n"
         printf "\n"
         printf "  Then refresh the manifest:\n"
         printf "    lisa models discover && lisa models apply\n"
