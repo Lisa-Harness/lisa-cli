@@ -14,11 +14,9 @@ dev = [
     "ruff>=0.8.0",
     "types-PyYAML>=6.0",
 ]
-coding = ["lisa-pack-coding"]
 markdown = ["lisa-pack-markdown"]
 personas = ["lisa-pack-personas"]
-okf = ["lisa-pack-okf"]
-search = ["lisa-pack-serper", "lisa-pack-search"]
+search = ["lisa-pack-search"]
 
 [tool.uv]
 package = false
