@@ -240,7 +240,7 @@ def _get_version() -> str:
     try:
         from importlib.metadata import version as _pkg_version
 
-        return _pkg_version("lisa-harness-cli")
+        return _pkg_version("lisa-cli")
     except Exception:  # pylint: disable=broad-except
         return "0.1.0"
 

@@ -10,8 +10,8 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "lisa-harness-cli",
-    "lisa-harness-cli-root",
+    "lisa-cli",
+    "lisa-cli-root",
 ]
 
 [[package]]
@@ -624,7 +624,7 @@ wheels = [
 ]
 
 [[package]]
-name = "lisa-harness-cli"
+name = "lisa-cli"
 version = "0.1.0"
 source = { editable = "hosts/cli" }
 dependencies = [
@@ -680,11 +680,11 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "lisa-harness-cli-root"
+name = "lisa-cli-root"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "lisa-harness-cli" },
+    { name = "lisa-cli" },
 ]
 
 [package.optional-dependencies]
@@ -706,7 +706,7 @@ search = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lisa-harness-cli", editable = "hosts/cli" },
+    { name = "lisa-cli", editable = "hosts/cli" },
     { name = "lisa-pack-markdown", marker = "extra == 'markdown'", editable = "../../lisa-packs/markdown" },
     { name = "lisa-pack-personas", marker = "extra == 'personas'", editable = "../../lisa-packs/personas" },
     { name = "lisa-pack-search", marker = "extra == 'search'", editable = "../../lisa-packs/search" },

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [project]
-name = "lisa-harness-cli"
+name = "lisa-cli"
 version = "0.1.0"
 description = "Terminal CLI for the Lisa Harness"
 requires-python = ">=3.11"

@@ -7,7 +7,7 @@
 # directory — no checkout, no `uv run`.
 #
 # Usage examples:
-#   curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --provider ollama,openai
 #   curl -fsSL ... | bash -s -- --provider anthropic --no-verify
 #
@@ -76,7 +76,7 @@ done
 # --- Constants ---------------------------------------------------------------
 
 # Package source repos (git mode).
-CLI_REPO_URL="https://github.com/Lisa-Harness/lisa-harness-cli.git"
+CLI_REPO_URL="https://github.com/Lisa-Harness/lisa-cli.git"
 LISA_REPO_URL="https://github.com/Lisa-Harness/lisa.git"
 
 # Data dir: tool-mode lisa loads .env from here (load order: CWD → ~/.lisa).
@@ -182,10 +182,10 @@ install_lisa() {
             --with "lisa-pack-introspect @ $LISA_REPO/sdk/packs/introspect"
             --with "lisa-pack-recovery @ $LISA_REPO/sdk/packs/recovery"
         )
-        cli_requirement="lisa-harness-cli @ $CLI_REPO/hosts/cli"
+        cli_requirement="lisa-cli @ $CLI_REPO/hosts/cli"
         WITHS=("${local_withs[@]}")
     else
-        cli_requirement="lisa-harness-cli @ git+${CLI_REPO_URL}#subdirectory=hosts/cli"
+        cli_requirement="lisa-cli @ git+${CLI_REPO_URL}#subdirectory=hosts/cli"
         WITHS=("${git_withs[@]}")
     fi
 

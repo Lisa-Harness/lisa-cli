@@ -1,4 +1,4 @@
-# lisa-harness-cli
+# lisa-cli
 
 [Lisa Harness](https://github.com/Lisa-Harness/lisa) CLI interface.
 
@@ -25,7 +25,7 @@ Create the `~/.lisa` directory and copy/edit the [.env.example](.env.example) in
 ### Run the installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash
 ```
 
 The installer accepts the same options as a direct `uv tool install`
@@ -35,9 +35,9 @@ Or with pip / uv directly:
 
 ```bash
 # Either
-pip install lisa-harness-cli
+pip install lisa-cli
 # or
-uv tool install lisa-harness-cli
+uv tool install lisa-cli
 ```
 
 ## Usage
@@ -308,7 +308,7 @@ uv run lisa --help
 
 ## Architecture
 
-`lisa-harness-cli` wraps the transport-neutral `host` runtime (from `lisa-host-runtime`)
+`lisa-cli` wraps the transport-neutral `host` runtime (from `lisa-host-runtime`)
 with a Typer + Rich terminal interface. Every command is a one-shot process; turns
 run through `lisa prompt` and its `PromptTransport` renders the turn trajectory to
 scrollback. The CLI implements `TransportCallbacks`; the runtime never imports

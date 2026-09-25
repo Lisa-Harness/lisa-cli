@@ -12,8 +12,8 @@
     execution (`irm ... | iex`), use the env-var equivalents (LISA_SOURCE,
     LISA_PROVIDER, ...) or pass arguments through the iex string:
 
-        irm https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.ps1 | iex
-        iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.ps1) } -Provider anthropic"
+        irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
+        iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Provider anthropic"
 
     Until the packages are published on PyPI, the installer resolves them
     straight from git (default) or from local checkouts of both repos:
@@ -61,7 +61,7 @@
     .\install.ps1 -SkipDiagnostics
 
 .LINK
-    https://github.com/Lisa-Harness/lisa-harness-cli
+    https://github.com/Lisa-Harness/lisa-cli
 #>
 
 [CmdletBinding()]
@@ -284,7 +284,7 @@ function Install-LisaTool {
     Set-StrictMode -Version Latest
 
     $lisaRepoUrl = "https://github.com/Lisa-Harness/lisa.git"
-    $cliRepoUrl = "https://github.com/Lisa-Harness/lisa-harness-cli.git"
+    $cliRepoUrl = "https://github.com/Lisa-Harness/lisa-cli.git"
     $frameworkMembers = [ordered]@{
         "lisa-host-runtime"    = "host"
         "lisa-kernel"          = "kernel"
@@ -304,13 +304,13 @@ function Install-LisaTool {
         }
         if (-not (Test-Path $CliRepo)) { throw "CLI repo not found: $CliRepo (pass -CliRepo)" }
 
-        $cliRequirement = "lisa-harness-cli @ $(Join-Path $CliRepo "hosts\cli")"
+        $cliRequirement = "lisa-cli @ $(Join-Path $CliRepo "hosts\cli")"
         $withArgs = @($frameworkMembers.Keys | ForEach-Object {
             "--with", "$_ @ $(Join-Path $LisaRepo $frameworkMembers[$_])"
         })
     }
     else {
-        $cliRequirement = "lisa-harness-cli @ git+$cliRepoUrl#subdirectory=hosts/cli"
+        $cliRequirement = "lisa-cli @ git+$cliRepoUrl#subdirectory=hosts/cli"
         $withArgs = @($frameworkMembers.Keys | ForEach-Object {
             "--with", "$_ @ git+$lisaRepoUrl#subdirectory=$($frameworkMembers[$_])"
         })
