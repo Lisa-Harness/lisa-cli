@@ -6,15 +6,15 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [project]
-name = "lisa-host-cli"
+name = "lisa-harness-cli"
 version = "0.1.0"
-description = "Terminal CLI host for the Lisa framework"
+description = "Terminal CLI for the Lisa Harness"
 requires-python = ">=3.11"
 dependencies = [
-    "lisa-host-runtime",
-    "lisa-kernel",
-    "lisa-sdk",
-    "lisa-mcp-servers",
+    "lisa-harness-runtime",
+    "lisa-harness-kernel",
+    "lisa-harness-sdk",
+    "lisa-harness-mcp-servers",
     "lisa-pack-core",
     "lisa-pack-introspect",
     "lisa-pack-memory",

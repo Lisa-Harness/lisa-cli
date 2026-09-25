@@ -1,10 +1,10 @@
 [project]
-name = "lisa-host-cli-umbrella"
+name = "lisa-harness-cli-root"
 version = "0.1.0"
-description = "Workspace for the Lisa terminal CLI host package"
+description = "Workspace for the Lisa terminal CLI"
 requires-python = ">=3.11"
 dependencies = [
-    "lisa-host-cli",
+    "lisa-harness-cli",
 ]
 
 [project.optional-dependencies]
@@ -25,23 +25,17 @@ package = false
 members = ["hosts/cli"]
 
 [tool.uv.sources]
-lisa-host-cli = { workspace = true }
-lisa-host-runtime = { path = "../../lisa/host", editable = true }
-lisa-kernel = { path = "../../lisa/kernel", editable = true }
-lisa-sdk = { path = "../../lisa/sdk", editable = true }
-lisa-mcp-servers = { path = "../../lisa/mcp_server", editable = true }
+lisa-harness-cli = { workspace = true }
+lisa-harness-runtime = { path = "../../lisa/host", editable = true }
+lisa-harness-kernel = { path = "../../lisa/kernel", editable = true }
+lisa-harness-sdk = { path = "../../lisa/sdk", editable = true }
+lisa-harness-mcp-servers = { path = "../../lisa/mcp_server", editable = true }
 lisa-pack-memory = { path = "../../lisa/sdk/packs/memory", editable = true }
 lisa-pack-core = { path = "../../lisa/sdk/packs/core", editable = true }
 lisa-pack-introspect = { path = "../../lisa/sdk/packs/introspect", editable = true }
 lisa-pack-recovery = { path = "../../lisa/sdk/packs/recovery", editable = true }
-lisa-pack-okf = { path = "../../lisa-packs/okf", editable = true }
-lisa-pack-brave = { path = "../../lisa-packs/brave", editable = true }
-lisa-pack-serper = { path = "../../lisa-packs/serper", editable = true }
-lisa-pack-tavily = { path = "../../lisa-packs/tavily", editable = true }
 lisa-pack-search = { path = "../../lisa-packs/search", editable = true }
 lisa-pack-markdown = { path = "../../lisa-packs/markdown", editable = true }
-lisa-pack-coding = { path = "../../lisa-packs-wip/coding", editable = true }
-lisa-pack-github = { path = "../../lisa-packs-wip/github", editable = true }
 lisa-pack-personas = { path = "../../lisa-packs/personas", editable = true }
 
 [tool.ruff]
