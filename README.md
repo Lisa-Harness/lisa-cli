@@ -1,13 +1,13 @@
 # lisa-harness-cli
 
-Terminal CLI host for the [Lisa framework](https://github.com/Lisa-Harness/lisa).
+[Lisa Harness](https://github.com/Lisa-Harness/lisa) CLI interface.
 
 ## Install
 
 ### Give Lisa model access
 
-Lisa supports several providers out-of-the-box.
-However, each provider requires some environment variables for Lisa to use it:
+The Lisa Harness supports several providers out-of-the-box.
+To use one (or more), set the requisite environment variables:
 
 | Provider       | Environment variables                                                                          |
 | -------------- | ---------------------------------------------------------------------------------------------- |
@@ -19,13 +19,13 @@ However, each provider requires some environment variables for Lisa to use it:
 | `aws`          | `LISA_AWS_ACCESS_KEY_ID`, `LISA_AWS_SECRET_ACCESS_KEY`, `LISA_AWS_REGION`                      |
 | `ollama`       | `LISA_OLLAMA_HOST` *(optional)*                                                                |
 
-Either set the corresponding variable in the shell running lisa or,
+Either in the shell that will run Lisa or,
 Create the `~/.lisa` directory and copy/edit the [.env.example](.env.example) into it.
 
 ### Run the installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.sh | bash
 ```
 
 The installer accepts the same options as a direct `uv tool install`

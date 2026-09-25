@@ -12,8 +12,8 @@
     execution (`irm ... | iex`), use the env-var equivalents (LISA_SOURCE,
     LISA_PROVIDER, ...) or pass arguments through the iex string:
 
-        irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
-        iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Provider anthropic"
+        irm https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.ps1 | iex
+        iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-harness-cli/main/install.ps1) } -Provider anthropic"
 
     Until the packages are published on PyPI, the installer resolves them
     straight from git (default) or from local checkouts of both repos:
@@ -61,7 +61,7 @@
     .\install.ps1 -SkipDiagnostics
 
 .LINK
-    https://github.com/Lisa-Harness/lisa-cli
+    https://github.com/Lisa-Harness/lisa-harness-cli
 #>
 
 [CmdletBinding()]
@@ -284,7 +284,7 @@ function Install-LisaTool {
     Set-StrictMode -Version Latest
 
     $lisaRepoUrl = "https://github.com/Lisa-Harness/lisa.git"
-    $cliRepoUrl = "https://github.com/Lisa-Harness/lisa-cli.git"
+    $cliRepoUrl = "https://github.com/Lisa-Harness/lisa-harness-cli.git"
     $frameworkMembers = [ordered]@{
         "lisa-host-runtime"    = "host"
         "lisa-kernel"          = "kernel"
