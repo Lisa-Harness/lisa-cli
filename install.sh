@@ -7,7 +7,7 @@
 # directory — no checkout, no `uv run`.
 #
 # Usage examples:
-#   curl -fsSL https://raw.githubusercontent.com/Lisa-Framework/lisa-host-cli/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --provider ollama,openai
 #   curl -fsSL ... | bash -s -- --provider anthropic --no-verify
 #
@@ -17,7 +17,7 @@
 #   ./install.sh --source local --lisa-repo /home/me/Code/lisa
 #
 # Requires: git (for git-mode installs) and network access to
-# github.com/Lisa-Framework/{lisa-host-cli,lisa}.
+# github.com/Lisa-Harness/{lisa-cli,lisa}.
 
 set -euo pipefail
 
@@ -76,8 +76,8 @@ done
 # --- Constants ---------------------------------------------------------------
 
 # Package source repos (git mode).
-CLI_REPO_URL="https://github.com/Lisa-Framework/lisa-host-cli.git"
-LISA_REPO_URL="https://github.com/Lisa-Framework/lisa.git"
+CLI_REPO_URL="https://github.com/Lisa-Harness/lisa-cli.git"
+LISA_REPO_URL="https://github.com/Lisa-Harness/lisa.git"
 
 # Data dir: tool-mode lisa loads .env from here (load order: CWD → ~/.lisa).
 LISA_HOME="${LISA_DATA_DIR:-$HOME/.lisa}"
@@ -182,10 +182,10 @@ install_lisa() {
             --with "lisa-pack-introspect @ $LISA_REPO/sdk/packs/introspect"
             --with "lisa-pack-recovery @ $LISA_REPO/sdk/packs/recovery"
         )
-        cli_requirement="lisa-host-cli @ $CLI_REPO/hosts/cli"
+        cli_requirement="lisa-harness-cli @ $CLI_REPO/hosts/cli"
         WITHS=("${local_withs[@]}")
     else
-        cli_requirement="lisa-host-cli @ git+${CLI_REPO_URL}#subdirectory=hosts/cli"
+        cli_requirement="lisa-harness-cli @ git+${CLI_REPO_URL}#subdirectory=hosts/cli"
         WITHS=("${git_withs[@]}")
     fi
 
