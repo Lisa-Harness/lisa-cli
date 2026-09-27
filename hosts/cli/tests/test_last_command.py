@@ -9,7 +9,7 @@ the shell-side twin of the REPL's `/last`. Covers:
 - the empty-thread friendly message.
 
 The runtime builder is stubbed (no MCP subprocess, no model call); the
-rendering goes through the real `host.commands.render_last_turn` so the
+rendering goes through the real `runtime.commands.render_last_turn` so the
 CLI and REPL share one code path.
 """
 
@@ -28,7 +28,7 @@ from hosts.cli import main as cli_main
 
 
 def _make_runtime(tmp_path: Any) -> Any:
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -73,7 +73,7 @@ def test_last_replays_previous_model_response(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`lisa last` prints the previous model turn's response verbatim."""
-    from host.thread import append_thread_entry
+    from runtime.thread import append_thread_entry
 
     runtime = _make_runtime(tmp_path)
     append_thread_entry(
@@ -92,7 +92,7 @@ def test_last_replays_previous_model_response(
 
 def test_last_explicit_turn_index(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """`lisa last 1` replays turn 1's response."""
-    from host.thread import append_thread_entry
+    from runtime.thread import append_thread_entry
 
     runtime = _make_runtime(tmp_path)
     append_thread_entry(
@@ -155,7 +155,7 @@ def test_last_tty_renders_markdown_like_the_original_answer(
     a ``Response`` rule separator plus Rich Markdown rendering (headings,
     bold, code fences) — not the plain unstyled print.
     """
-    from host.thread import append_thread_entry
+    from runtime.thread import append_thread_entry
 
     runtime = _make_runtime(tmp_path)
     append_thread_entry(

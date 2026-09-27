@@ -1,8 +1,8 @@
 """Tests for the CLI ``pack update`` action.
 
 The CLI ``lisa pack update`` command mirrors the in-REPL ``/pack update``
-command by delegating to :func:`host.commands.run_pack_update` (single
-pack) or :func:`host.commands.run_pack_update_all` (``--all``). These
+command by delegating to :func:`runtime.commands.run_pack_update` (single
+pack) or :func:`runtime.commands.run_pack_update_all` (``--all``). These
 tests verify the dispatch wiring, argument validation, exit codes, and
 the restart-required contract without paying the full
 ``_initialize_runtime`` cost: we stub the runtime builder and the core
@@ -17,13 +17,13 @@ from typing import Any
 from unittest.mock import patch
 
 import typer
-from host.runtime import HostRuntime
+from runtime.runtime import HostRuntime
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -85,15 +85,15 @@ def _invoke_pack_update(
             return_value=runtime,
         ),
         patch(
-            "host.commands.run_pack_update",
+            "runtime.commands.run_pack_update",
             new=_fake_update,
         ),
         patch(
-            "host.commands.run_pack_update_all",
+            "runtime.commands.run_pack_update_all",
             new=_fake_update_all,
         ),
         patch(
-            "host.commands.run_pack_install",
+            "runtime.commands.run_pack_install",
             new=_fake_install,
         ),
         patch.object(cli_main, "console", new=console),

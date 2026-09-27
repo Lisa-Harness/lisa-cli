@@ -1,7 +1,7 @@
 """Prompt-mode Rich transport for the CLI host.
 
 This is the terminal-transport implementation of
-:class:`host.callbacks.TransportCallbacks` for ``lisa prompt`` — the CLI's
+:class:`runtime.callbacks.TransportCallbacks` for ``lisa prompt`` — the CLI's
 only turn path. A prompt run is input/output in the caller's shell: another
 pipeline stage, not a session with a screen. Instead of a persistent Live
 transcript it renders:

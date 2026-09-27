@@ -153,7 +153,7 @@ install_lisa() {
     # Until lisa-sdk is published, the foreign PyPI package of the same name
     # is irrelevant: the explicit requirement always wins over the index.
     local -a git_withs=(
-        --with "lisa-host-runtime @ git+${LISA_REPO_URL}#subdirectory=host"
+        --with "lisa-harness-runtime @ git+${LISA_REPO_URL}#subdirectory=runtime"
         --with "lisa-kernel @ git+${LISA_REPO_URL}#subdirectory=kernel"
         --with "lisa-sdk @ git+${LISA_REPO_URL}#subdirectory=sdk"
         --with "lisa-mcp-servers @ git+${LISA_REPO_URL}#subdirectory=mcp_server"
@@ -173,7 +173,7 @@ install_lisa() {
         [[ -d "$CLI_REPO" ]] || error_exit "CLI repo not found: $CLI_REPO (pass --cli-repo)"
 
         local -a local_withs=(
-            --with "lisa-host-runtime @ $LISA_REPO/host"
+            --with "lisa-harness-runtime @ $LISA_REPO/runtime"
             --with "lisa-kernel @ $LISA_REPO/kernel"
             --with "lisa-sdk @ $LISA_REPO/sdk"
             --with "lisa-mcp-servers @ $LISA_REPO/mcp_server"

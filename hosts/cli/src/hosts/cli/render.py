@@ -2,7 +2,7 @@
 
 These functions build Rich renderables (Tables, Panels, Text) from the
 transport-neutral data surfaced by ``host``. They are the CLI-host
-analogue of the plain-text renderers in ``host.commands`` — the core
+analogue of the plain-text renderers in ``runtime.commands`` — the core
 returns Markdown strings, and here we wrap them in Rich panels/tables for
 the terminal.
 
@@ -26,9 +26,9 @@ if TYPE_CHECKING:
     # ``HostRuntime`` is used only as a string annotation (stringified by
     # ``from __future__ import annotations``); the runtime symbols are
     # passed in at call time. Deferring this import keeps ``render`` from
-    # dragging in ``host.runtime`` -> ``kernel.ipsar_fsm`` -> ``openai``
+    # dragging in ``runtime.runtime`` -> ``kernel.ipsar_fsm`` -> ``openai``
     # (~2s) at module load.
-    from host.runtime import HostRuntime as HostRuntime
+    from runtime.runtime import HostRuntime as HostRuntime
 
 
 def _format_tokens(tokens: int) -> str:
@@ -101,10 +101,10 @@ def render_modes(runtime: HostRuntime, *, console: Console | None = None) -> Tab
     """Build a Rich Table of supported modes from the live workflow catalog.
 
     Uses ``kernel.ipsar_fsm.get_workflow_catalog`` (wired by
-    ``host.mcp_pool.setup_framework``) and ``mode_support_gap`` to
+    ``runtime.mcp_pool.setup_framework``) and ``mode_support_gap`` to
     separate supported from unsupported modes.
     """
-    from host.commands import mode_support_gap
+    from runtime.commands import mode_support_gap
     from kernel.ipsar_fsm import get_workflow_catalog
 
     _ = runtime  # catalog is global; runtime kept for future per-host scoping
@@ -131,10 +131,10 @@ def render_modes(runtime: HostRuntime, *, console: Console | None = None) -> Tab
 def render_models(runtime: HostRuntime, *, console: Console | None = None) -> Table:
     """Build a Rich Table of configured models from the model manifest.
 
-    Uses ``host.model_manifest.load_model_manifest`` against the
+    Uses ``runtime.model_manifest.load_model_manifest`` against the
     canonical runtime data-dir path.
     """
-    from host.model_manifest import load_model_manifest
+    from runtime.model_manifest import load_model_manifest
 
     path = runtime.paths.models_path
     manifest = load_model_manifest(path)
@@ -163,12 +163,12 @@ def render_models(runtime: HostRuntime, *, console: Console | None = None) -> Ta
 
 
 def render_pack_list_panel(runtime: HostRuntime, *, console: Console | None = None) -> Panel:
-    """Render the pack activation list from ``host.commands.render_pack_list``.
+    """Render the pack activation list from ``runtime.commands.render_pack_list``.
 
     The core returns a Markdown string; we wrap it in a Rich Panel for the
     terminal host.
     """
-    from host.commands import render_pack_list
+    from runtime.commands import render_pack_list
     from rich.markdown import Markdown
 
     markdown_text = render_pack_list(runtime)

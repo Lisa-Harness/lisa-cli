@@ -1,6 +1,6 @@
 """Tests for streaming option parsing (CLI config).
 
-- ``parse_streaming_option`` lives in ``host.config_resolver``.
+ ``parse_streaming_option`` lives in ``runtime.config_resolver``.
 - Runtime configuration is a frozen ``HostConfig`` constructed via
   ``HostConfig.from_env(streaming=...)``; the streaming mode and delay
   are exposed as ``config.streaming.mode`` and
@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-from host.config import HostConfig
-from host.config_resolver import parse_streaming_option
+from runtime.config import HostConfig
+from runtime.config_resolver import parse_streaming_option
 
 
 def test_parse_streaming_option_accepts_mode_and_optional_delay() -> None:

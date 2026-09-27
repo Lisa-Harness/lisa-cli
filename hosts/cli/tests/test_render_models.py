@@ -13,7 +13,7 @@ from pathlib import Path
 from rich.console import Console
 
 from hosts.cli.render import render_models
-from host.testing import build_test_runtime
+from runtime.testing import build_test_runtime
 
 
 def test_render_models_shows_context_cost_capabilities(tmp_path: Path) -> None:

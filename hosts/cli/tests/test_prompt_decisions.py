@@ -33,7 +33,7 @@ from hosts.cli import main as cli_main
 
 
 def _make_runtime(tmp_path: Any) -> Any:
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -63,7 +63,7 @@ def _invoke_prompt(
         return runtime
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
-    import host.handle_message as hm_module
+    import runtime.handle_message as hm_module
 
     monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
     stdin_obj: Any = io.StringIO()
@@ -417,7 +417,7 @@ def test_prompt_policy_does_not_read_stdin(
         return runtime
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
-    import host.handle_message as hm_module
+    import runtime.handle_message as hm_module
 
     monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
     stdin_obj = io.StringIO(stdin_text)

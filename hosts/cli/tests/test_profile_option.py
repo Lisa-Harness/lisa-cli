@@ -29,13 +29,13 @@ def test_explicit_data_dir_wins_over_profile(monkeypatch: pytest.MonkeyPatch) ->
 def test_profile_resolves_to_profiles_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """--profile <name> → <base>/profiles/<name> via host.config."""
+    """--profile <name> → <base>/profiles/<name> via runtime.config."""
     from hosts.cli import main as cli_main
 
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.delenv("LISA_PROFILE", raising=False)
     base = tmp_path / ".lisa"
-    with patch("host.config.default_data_dir", return_value=base):
+    with patch("runtime.config.default_data_dir", return_value=base):
         got = cli_main._resolve_profiled_data_dir("", "taxes")
     assert Path(got) == (base / "profiles" / "taxes").resolve()
 
@@ -63,7 +63,7 @@ def test_invalid_profile_name_raises() -> None:
 def _capture_runtime_kwargs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
     """Patch _initialize_runtime_or_exit to capture its kwargs."""
 
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     from hosts.cli import main as cli_main
 
@@ -89,7 +89,7 @@ def test_models_command_passes_profile_through(
     fake_handler = _fake_handler()
     with (
         patch.object(cli_main, "render_models", side_effect=RuntimeError("no manifest")),
-        patch("host.commands.handle_models_command", new=fake_handler),
+        patch("runtime.commands.handle_models_command", new=fake_handler),
     ):
         cli_main._models_command(
             action="discover",
@@ -140,11 +140,11 @@ def test_intake_command_resolves_profiled_data_dir(
 
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.delenv("LISA_PROFILE", raising=False)
-    mod = types.ModuleType("host.intake")
+    mod = types.ModuleType("runtime.intake")
     mod.run_intake = _fake_intake
-    monkeypatch.setitem(sys.modules, "host.intake", mod)
+    monkeypatch.setitem(sys.modules, "runtime.intake", mod)
     with (
-        patch("host.config.default_data_dir", return_value=base),
+            patch("runtime.config.default_data_dir", return_value=base),
         patch.object(cli_main, "console", Console(quiet=True)),
     ):
         cli_main._intake_command(

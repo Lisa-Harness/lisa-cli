@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from host.runtime import HostRuntime
+from runtime.runtime import HostRuntime
 from hosts.cli import render as render_mod
 from kernel.models import OperationDefinition, ToolDefinition
 from kernel.operations import registry as operations_registry
@@ -27,7 +27,7 @@ from rich.console import Console
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 

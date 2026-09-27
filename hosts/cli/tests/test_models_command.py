@@ -2,7 +2,7 @@
 
 The CLI ``lisa models`` command mirrors the in-REPL ``/models`` command by
 delegating the workflow subcommands (discover/apply/reload/edit/help) to
-:func:`host.commands.handle_models_command`. ``show`` keeps the Rich
+:func:`runtime.commands.handle_models_command`. ``show`` keeps the Rich
 table renderer. These tests verify the dispatch wiring without paying the
 full ``_initialize_runtime`` cost: we stub the runtime builder and the core
 handler, then invoke the Typer callback directly.
@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from host.runtime import HostRuntime
+from runtime.runtime import HostRuntime
 from rich.console import Console
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -56,7 +56,7 @@ def _invoke_models(
             return_value=runtime,
         ),
         patch(
-            "host.commands.handle_models_command",
+            "runtime.commands.handle_models_command",
             new=_fake_handle_models,
         ),
         patch.object(cli_main, "console", new=Console(quiet=True)),
@@ -172,7 +172,7 @@ def _invoke_rejected_models(
             return_value=runtime,
         ),
         patch(
-            "host.commands.handle_models_command",
+            "runtime.commands.handle_models_command",
             new=_fake_handle_models,
         ),
         patch.object(cli_main, "console", new=_CapturingConsole()),

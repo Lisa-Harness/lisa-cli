@@ -26,7 +26,7 @@ members = ["hosts/cli"]
 
 [tool.uv.sources]
 lisa-cli = { workspace = true }
-lisa-harness-runtime = { path = "../lisa/host", editable = true }
+lisa-harness-runtime = { path = "../lisa/runtime", editable = true }
 lisa-harness-kernel = { path = "../lisa/kernel", editable = true }
 lisa-harness-sdk = { path = "../lisa/sdk", editable = true }
 lisa-harness-mcp-servers = { path = "../lisa/mcp_server", editable = true }

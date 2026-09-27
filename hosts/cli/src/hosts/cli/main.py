@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
+from kernel.models import McpServerHealth
+from kernel.tools.mcp_client import MCPToolSpec
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 # Load .env BEFORE injecting the packs venv site-packages so that
 # LISA_DATA_DIR (and LISA_PACKS_VENV) are honored when resolving the
@@ -30,21 +35,16 @@ import typer
 #   (2) ~/.lisa/.env — for tool-install mode (uv tool install lisa)
 #   (3) project root — repo-mode back-compat
 #   (4) hosts/little_lisa/.env — legacy repo-mode back-compat
-from host.paths import (
+from runtime.paths import (
     framework_root as _framework_root,
 )
-from kernel.models import McpServerHealth
-from kernel.tools.mcp_client import MCPToolSpec
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 
 try:
     from dotenv import load_dotenv
 
     _FRAMEWORK_ROOT = _framework_root()
-    from host.config import default_data_dir as _default_data_dir
-    from host.config import profile_data_dir as _profile_data_dir
+    from runtime.config import default_data_dir as _default_data_dir
+    from runtime.config import profile_data_dir as _profile_data_dir
 
     # Honor LISA_DATA_DIR (and LISA_PROFILE) here so tool-mode installs
     # configured with a custom data dir find their .env before any
@@ -124,13 +124,14 @@ except ImportError:  # pragma: no cover — python-dotenv is optional
 # host so that importlib.metadata.entry_points discovers packs
 # installed via /pack install into the packs venv. This must run
 # before any host / kernel import that triggers entry-point scanning.
-from host.paths import (
+from runtime.paths import (
     inject_packs_venv_site_packages as _inject_packs_venv_site_packages,
 )
 
 _inject_packs_venv_site_packages()
 
-from host.config import default_data_dir
+from runtime.config import default_data_dir
+
 from hosts.cli.render import (
     render_mcp_server_tools,
     render_mcp_servers,
@@ -146,10 +147,10 @@ from hosts.cli.render import (
 # The runtime construction happens inside ``_initialize_runtime``, which
 # imports ``HostRuntime`` + the mcp_pool / state_provider symbols lazily so
 # ``--version`` (which exits in the eager Typer callback before any command
-# body runs) does not pay the ~2s ``host.runtime`` ->
+# body runs) does not pay the ~2s ``runtime.runtime`` ->
 # ``kernel.ipsar_fsm`` -> ``openai`` import chain.
 if TYPE_CHECKING:
-    from host.runtime import HostRuntime as HostRuntime
+    from runtime.runtime import HostRuntime as HostRuntime
 
     from hosts.cli.transport import PromptTransport as PromptTransport
 
@@ -488,7 +489,7 @@ def _resolve_profiled_data_dir(data_dir: str, profile: str) -> str:
     name = profile.strip()
     if not name:
         return ""
-    from host.config import profile_data_dir
+    from runtime.config import profile_data_dir
 
     return str(profile_data_dir(name))
 
@@ -512,7 +513,7 @@ def _initialize_runtime(
 ) -> HostRuntime:
     """Build and wire a HostRuntime from CLI args + env vars.
 
-    Thin adapter over :func:`host.bootstrap.build_runtime` that
+    Thin adapter over :func:`runtime.bootstrap.build_runtime` that
     stamps ``host_kind="cli"`` and forwards every CLI argument. The
     composition sequence (config -> runtime -> state snapshot -> framework
     wiring -> MCP config compilation) lives in the shared bootstrap so
@@ -529,7 +530,7 @@ def _initialize_runtime(
     ``runtime.start()`` must be called inside the host's event loop (see
     the prompt/verify paths).
     """
-    from host.bootstrap import build_runtime
+    from runtime.bootstrap import build_runtime
 
     return build_runtime(
         host_kind="cli",
@@ -664,7 +665,7 @@ def _verify_check_env(runtime: HostRuntime) -> tuple[str, str]:
 
 
 def _verify_check_manifest(runtime: HostRuntime) -> tuple[str, str]:
-    from host.model_manifest import load_model_manifest
+    from runtime.model_manifest import load_model_manifest
 
     try:
         path = runtime.paths.models_path
@@ -1018,8 +1019,8 @@ def _models_command(
     # command uses), so behavior stays identical across hosts. We
     # synthesize the equivalent '/models <sub> [--force]' slash string
     # and print the returned Markdown text in a Rich panel.
-    from host.commands import handle_models_command
     from rich.markdown import Markdown
+    from runtime.commands import handle_models_command
 
     if normalized == "discover" and force:
         stripped = "/models discover --force"
@@ -1032,7 +1033,7 @@ def _models_command(
     # is started inside the host's event loop. Start it here, run the
     # handler, and tear the pool down in finally — all within one
     # asyncio.run loop so anyio cancel scopes are entered and exited in
-    # the same task (per host.runtime invariants).
+    # the same task (per runtime.runtime invariants).
     async def _run_models_command() -> str:
         try:
             await runtime.start()
@@ -1175,11 +1176,11 @@ def _last_command(
     )
     if runtime is None:
         return
-    from host.commands import (  # noqa: PLC0415  # lazy: defers host.commands startup cost
-        render_last_turn,
-    )
     from rich.markdown import Markdown  # noqa: PLC0415  # lazy: defers startup cost
     from rich.rule import Rule  # noqa: PLC0415  # lazy: defers startup cost
+    from runtime.commands import (  # noqa: PLC0415  # lazy: defers runtime.commands startup cost
+        render_last_turn,
+    )
 
     response_text = render_last_turn(runtime, turn.strip())
     if not console.is_terminal:
@@ -1238,7 +1239,7 @@ def _build_mcp_health(
 ) -> dict[str, McpServerHealth]:
     """Build a per-server health dict from the live pool's introspection accessors.
 
-    Mirrors :func:`host.introspect.gather_mcp_pool_health` but runs
+    Mirrors :func:`runtime.introspect.gather_mcp_pool_health` but runs
     in the CLI's short-lived ``asyncio.run`` event loop (the pool is started
     and torn down within ``_collect_mcp_tools``). Reads the same accessors
     (``warm_server_ids``, ``warm_failed_ids``, ``cold_failed_ids``,
@@ -1246,7 +1247,7 @@ def _build_mcp_health(
     ``tools_by_server``) so the CLI summary shows identical state to any
     other host surface.
     """
-    from host.introspect import gather_mcp_pool_health
+    from runtime.introspect import gather_mcp_pool_health
 
     health = gather_mcp_pool_health(pool)
     # Annotate alias tools on the tool_names so the render layer can mark
@@ -1270,7 +1271,7 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
     try:
         await asyncio.wait_for(runtime.aclose(), timeout=timeout_s)
         return
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "Runtime teardown exceeded %.0fs; falling back to direct "
             "subprocess termination",
@@ -1522,28 +1523,28 @@ def _finish_pack_mutation(runtime: HostRuntime, result: tuple[bool, str]) -> Non
 
 async def _run_pack_install(runtime: HostRuntime, spec: str) -> tuple[bool, str]:
     """Install a pack by spec (delegates to host pack management)."""
-    from host.commands import run_pack_install
+    from runtime.commands import run_pack_install
 
     return await run_pack_install(runtime, spec)
 
 
 async def _run_pack_uninstall(runtime: HostRuntime, package_name: str) -> tuple[bool, str]:
     """Uninstall a pack by package name."""
-    from host.commands import run_pack_uninstall
+    from runtime.commands import run_pack_uninstall
 
     return await run_pack_uninstall(runtime, package_name)
 
 
 async def _run_pack_update(runtime: HostRuntime, package_name: str) -> tuple[bool, str]:
     """Upgrade one installed pack in place from its recorded install source."""
-    from host.commands import run_pack_update
+    from runtime.commands import run_pack_update
 
     return await run_pack_update(runtime, package_name)
 
 
 async def _run_pack_update_all(runtime: HostRuntime) -> tuple[bool, str]:
     """Upgrade every runtime-installed pack with a recorded install source."""
-    from host.commands import run_pack_update_all
+    from runtime.commands import run_pack_update_all
 
     return await run_pack_update_all(runtime)
 
@@ -1610,8 +1611,8 @@ async def _run_prompt_host_command_turn(runtime: HostRuntime, command: str) -> t
     ``/approve`` / ``/deny`` (no id) resolves to the single pending
     approval first — the "decide the thing that just stopped me" case.
     """
-    from host import NullTransport
-    from host.handle_message import handle_message
+    from runtime import NullTransport
+    from runtime.handle_message import handle_message
 
     command = await _resolve_pending_approval_target(runtime, command)
     try:
@@ -1638,7 +1639,7 @@ async def _resolve_pending_approval_target(runtime: HostRuntime, command: str) -
     service = getattr(runtime.services, "approval_service", None)
     if service is None or not hasattr(service, "list_pending"):
         return command
-    from host.approval import approval_identity
+    from runtime.approval import approval_identity
 
     try:
         pending = await service.list_pending(approval_identity(runtime))
@@ -1798,7 +1799,7 @@ def _prompt_command(
         in_process_mcp=True,
     )
     if runtime is None:
-        return
+        return None
     restart_required, transport = asyncio.run(
         _run_prompt_with_teardown(
             runtime, full_message, quiet=quiet, raw=raw, tool_detail=tool_detail
@@ -1841,7 +1842,8 @@ async def _run_prompt_with_teardown(
     ``lisa prompt --approve pending 'continue'`` targets the one stopped
     action without retyping its 32-hex id.
     """
-    from host.handle_message import handle_message
+    from runtime.handle_message import handle_message
+
     from hosts.cli.transport import PromptTransport
 
     first_line, _, _rest = message.partition("\n")
@@ -1873,7 +1875,7 @@ def _collect_model_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]
     turn on an unreadable manifest.
     """
     try:
-        from host.model_manifest import load_model_manifest  # noqa: PLC0415
+        from runtime.model_manifest import load_model_manifest  # noqa: PLC0415
 
         manifest = load_model_manifest(runtime.paths.models_path)
     except Exception:  # pylint: disable=broad-except
@@ -1911,7 +1913,7 @@ def _intake_command(
         else default_data_dir()
     )
     try:
-        from host.intake import run_intake
+        from runtime.intake import run_intake
     except ImportError:
         console.print("[red]intake module not available in this host.[/red]")
         raise typer.Exit(code=2)

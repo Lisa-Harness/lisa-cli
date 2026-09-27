@@ -32,7 +32,7 @@ def _make_runtime(tmp_path: Path) -> Any:
     passes. Does NOT call setup_framework (which triggers a pre-existing
     operation-catalog validation issue with the markdown pack).
     """
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path)
 

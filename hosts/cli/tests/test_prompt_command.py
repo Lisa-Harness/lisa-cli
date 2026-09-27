@@ -32,7 +32,7 @@ from hosts.cli.transport import PromptTransport
 
 
 def _make_runtime(tmp_path: Any) -> Any:
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
@@ -74,8 +74,8 @@ def _invoke_prompt(
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
     # Patch the module object (not the string path): the host package's lazy
-    # __getattr__ resolves `host.handle_message` to the function itself.
-    import host.handle_message as hm_module
+    # __getattr__ resolves `runtime.handle_message` to the function itself.
+    import runtime.handle_message as hm_module
 
     monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
     monkeypatch.setattr(sys, "stdin", stdin_obj)
@@ -251,7 +251,7 @@ def test_yielded_prompt_exits_4(
     def _fake_init(**_kwargs):
         return runtime
 
-    import host.handle_message as hm_module
+    import runtime.handle_message as hm_module
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
     monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)

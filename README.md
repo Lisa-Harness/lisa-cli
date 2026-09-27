@@ -308,7 +308,7 @@ uv run lisa --help
 
 ## Architecture
 
-`lisa-cli` wraps the transport-neutral `host` runtime (from `lisa-host-runtime`)
+`lisa-cli` wraps the transport-neutral `runtime` package (from `lisa-harness-runtime`)
 with a Typer + Rich terminal interface. Every command is a one-shot process; turns
 run through `lisa prompt` and its `PromptTransport` renders the turn trajectory to
 scrollback. The CLI implements `TransportCallbacks`; the runtime never imports

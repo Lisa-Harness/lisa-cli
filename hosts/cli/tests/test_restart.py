@@ -10,14 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from host.runtime import HostRuntime
+from runtime.runtime import HostRuntime
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
 def _make_runtime(tmp_path: Path) -> HostRuntime:
     """Build a HostRuntime whose data_dir is tmp_path."""
-    from host.testing import build_test_runtime
+    from runtime.testing import build_test_runtime
 
     return build_test_runtime(tmp_path, models_yaml="")
 
