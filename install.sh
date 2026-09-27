@@ -154,9 +154,9 @@ install_lisa() {
     # is irrelevant: the explicit requirement always wins over the index.
     local -a git_withs=(
         --with "lisa-harness-runtime @ git+${LISA_REPO_URL}#subdirectory=runtime"
-        --with "lisa-kernel @ git+${LISA_REPO_URL}#subdirectory=kernel"
-        --with "lisa-sdk @ git+${LISA_REPO_URL}#subdirectory=sdk"
-        --with "lisa-mcp-servers @ git+${LISA_REPO_URL}#subdirectory=mcp_server"
+        --with "lisa-harness-kernel @ git+${LISA_REPO_URL}#subdirectory=kernel"
+        --with "lisa-harness-sdk @ git+${LISA_REPO_URL}#subdirectory=sdk"
+        --with "lisa-harness-mcp-servers @ git+${LISA_REPO_URL}#subdirectory=mcp_server"
         --with "lisa-pack-core @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/core"
         --with "lisa-pack-memory @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/memory"
         --with "lisa-pack-introspect @ git+${LISA_REPO_URL}#subdirectory=sdk/packs/introspect"
@@ -174,9 +174,9 @@ install_lisa() {
 
         local -a local_withs=(
             --with "lisa-harness-runtime @ $LISA_REPO/runtime"
-            --with "lisa-kernel @ $LISA_REPO/kernel"
-            --with "lisa-sdk @ $LISA_REPO/sdk"
-            --with "lisa-mcp-servers @ $LISA_REPO/mcp_server"
+            --with "lisa-harness-kernel @ $LISA_REPO/kernel"
+            --with "lisa-harness-sdk @ $LISA_REPO/sdk"
+            --with "lisa-harness-mcp-servers @ $LISA_REPO/mcp_server"
             --with "lisa-pack-core @ $LISA_REPO/sdk/packs/core"
             --with "lisa-pack-memory @ $LISA_REPO/sdk/packs/memory"
             --with "lisa-pack-introspect @ $LISA_REPO/sdk/packs/introspect"
@@ -319,7 +319,7 @@ post_install_guidance() {
     fi
 
     printf "  Quick start (from any directory):\n"
-    printf "    lisa prompt \"Hello, Lisa!\"\n"
+    printf "    lisa prompt \"Let's get started!\"\n"
     printf "\n"
 
     local is_ollama=false
@@ -327,8 +327,11 @@ post_install_guidance() {
         [[ "$prov" == "ollama" ]] && { is_ollama=true; break; }
     done
     if $is_ollama; then
-        printf "  Ollama selected — make sure it's installed and models pulled:\n"
-        printf "    curl -fsSL https://ollama.com/install.sh | sh\n"
+        printf "  Ollama selected — make sure it's installed and models pulled, e.g.:\n"
+        printf "\n"
+        printf "    ollama show\n"
+        printf "    ollama pull ornith:latest\n"
+        printf "    ollama signin # sign in to use Ollama cloud models\n"
         printf "    ollama pull glm-5.3-flash:cloud\n"
         printf "    ollama pull glm-5.3:cloud\n"
         printf "\n"

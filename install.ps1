@@ -286,14 +286,14 @@ function Install-LisaTool {
     $lisaRepoUrl = "https://github.com/Lisa-Harness/lisa.git"
     $cliRepoUrl = "https://github.com/Lisa-Harness/lisa-cli.git"
     $frameworkMembers = [ordered]@{
-        "lisa-harness-runtime" = "runtime"
-        "lisa-kernel"          = "kernel"
-        "lisa-sdk"             = "sdk"
-        "lisa-mcp-servers"     = "mcp_server"
-        "lisa-pack-core"       = "sdk/packs/core"
-        "lisa-pack-memory"     = "sdk/packs/memory"
-        "lisa-pack-introspect" = "sdk/packs/introspect"
-        "lisa-pack-recovery"   = "sdk/packs/recovery"
+        "lisa-harness-kernel"      = "kernel"
+        "lisa-harness-runtime"     = "runtime"
+        "lisa-harness-sdk"         = "sdk"
+        "lisa-harness-mcp-servers" = "mcp_server"
+        "lisa-pack-core"           = "sdk/packs/core"
+        "lisa-pack-memory"         = "sdk/packs/memory"
+        "lisa-pack-introspect"     = "sdk/packs/introspect"
+        "lisa-pack-recovery"       = "sdk/packs/recovery"
     }
 
     if ($Source -eq "local") {
@@ -473,12 +473,14 @@ function Write-PostInstallGuidance {
     }
 
     Write-Host "  Quick start (from any directory):"
-    Write-Host "    lisa prompt `"Hello, Lisa!`""
+    Write-Host "    lisa prompt `"Let's get started, Lisa!`""
     Write-Host ""
 
     if ($Provider -contains "ollama") {
         Write-Host "  Ollama selected - make sure it's installed and models pulled:"
         Write-Host "    winget install Ollama.Ollama"
+        Write-Host "    ollama show"
+        Write-Host "    ollama signin # sign in to use Ollama cloud models"
         Write-Host "    ollama pull glm-5.3-flash:cloud"
         Write-Host "    ollama pull glm-5.3:cloud"
         Write-Host ""
