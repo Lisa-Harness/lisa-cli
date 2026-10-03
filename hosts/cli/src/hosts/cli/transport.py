@@ -674,14 +674,18 @@ class PromptTransport:
         """One-line shape of what the tool returned (``⎿ 14 lines``).
 
         Prefers the streamed-line count observed this dispatch (tools that
-        declare ``stream_output``), falls back to a compact char count of
-        the kernel-provided ``result_preview`` (200-char result snippet),
-        else "". The summary rides inline on the completion row — muted, so
-        it reads as metadata rather than content.
+        declare ``stream_output``), falls back to the kernel-provided
+        ``result_chars`` (true output size) or a compact char count of the
+        ``result_preview`` snippet, else "". The summary rides inline on the
+        completion row — muted, so it reads as metadata rather than content.
         """
         if row_data.get("stream_output") and self._last_tool_output_lines > 0:
             n = self._last_tool_output_lines
             return f"⎿ {n} line{'s' if n != 1 else ''}"
+        with contextlib.suppress(TypeError, ValueError):
+            chars = int(complete.get("result_chars") or 0)
+            if chars > 0:
+                return f"⎿ {_format_tokens(chars)} chars"
         preview = str(complete.get("result_preview") or "").strip()
         if preview and preview != "Done":
             return f"⎿ {_format_tokens(len(preview))} chars"
@@ -706,9 +710,11 @@ class PromptTransport:
     ) -> None:
         """Detail level >= 1: print the result preview under the row.
 
-        The kernel sends ``result_preview`` (first 200 chars of the tool
-        output) on every completion; at level 2 the full snippet shows as
-        a plain indented block. Level 1 shows only the first line.
+        The kernel sends ``result_preview`` on every completion: a compact
+        payload-first summary for JSON-object outputs (content quoted
+        first, then short scalars), else the first 200 chars of raw text.
+        At level 2 the full snippet shows as a plain indented block;
+        level 1 shows only the first line.
         """
         preview = str(complete.get("result_preview") or "").strip()
         if preview and preview != "Done":

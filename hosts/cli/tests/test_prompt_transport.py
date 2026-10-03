@@ -232,6 +232,33 @@ async def test_result_summary_uses_preview_when_not_streaming() -> None:
 
 
 @pytest.mark.asyncio
+async def test_result_summary_prefers_true_result_chars() -> None:
+    """``result_chars`` reports the whole output, not the 200-char preview.
+
+    JSON envelope tools (thread archive pages) produce previews that are
+    compact summaries, so their length understates the result; the
+    kernel stamps ``result_chars`` with the true size and the row shows
+    that.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "tool_dispatch",
+        {"tool": "thread_read_content", "tool_kind": "mcp_tool", "arguments": {}},
+    )
+    await transport.on_stage(
+        "tool_dispatch_complete",
+        {
+            "tool": "thread_read_content",
+            "ok": True,
+            "duration_ms": 84,
+            "result_preview": "content=stored tool output offset_chars=0 total_chars=5412",
+            "result_chars": 5412,
+        },
+    )
+    assert "⎿ 5.412k chars" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
 async def test_tool_detail_level_1_prints_result_preview_line() -> None:
     """-v prints the kernel result preview (first line) under the row."""
     buffer = io.StringIO()
@@ -254,6 +281,41 @@ async def test_tool_detail_level_1_prints_result_preview_line() -> None:
     assert "⎿ hi" in out
     # Level 1 shows only the FIRST preview line.
     assert "⎿ there" not in out
+
+
+@pytest.mark.asyncio
+async def test_tool_detail_level_1_shows_payload_first_json_summary() -> None:
+    """-v detail lines show envelope content, not serialized JSON metadata.
+
+    The 2026-10-02 regression: thread-read pages serialize ``ref`` +
+    ``source`` provenance ahead of ``content``, so a raw first-200-chars
+    preview rendered as raw JSON in verbose output. The kernel now sends
+    a payload-first ``key=value`` summary; the transport prints it as-is.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, width=120)
+    transport = PromptTransport(console=console, tool_detail=1)
+    await transport.on_stage(
+        "tool_dispatch",
+        {"tool": "thread_read_content", "tool_kind": "mcp_tool", "arguments": {}},
+    )
+    await transport.on_stage(
+        "tool_dispatch_complete",
+        {
+            "tool": "thread_read_content",
+            "ok": True,
+            "duration_ms": 84,
+            "result_preview": (
+                "content=The reviewer found the config parser drops duplicate "
+                "keys offset_chars=0 total_chars=5412"
+            ),
+            "result_chars": 5412,
+        },
+    )
+    out = buffer.getvalue()
+    assert "⎿ content=The reviewer found the config parser drops duplicate keys" in out
+    assert '"ref"' not in out
+    assert '"stored_tool_result"' not in out
 
 
 @pytest.mark.asyncio
