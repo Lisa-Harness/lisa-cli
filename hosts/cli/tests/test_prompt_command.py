@@ -298,7 +298,7 @@ async def test_prompt_transport_approval_stderr_notice(
 ) -> None:
     """Non-tty transport console: the approval notice goes to stderr.
 
-    The notice advertises the prompt-mode decision commands (no interactive
+    The notice advertises the top-level decision commands (no interactive
     loop needed) rather than the bare /approve slash form.
     """
     transport = PromptTransport(console=Console(force_terminal=False, width=120))
@@ -306,9 +306,9 @@ async def test_prompt_transport_approval_stderr_notice(
         "Approval required.", {"approval": _approval_payload()}
     )
     captured = capsys.readouterr()
-    assert 'lisa prompt "approve abc123def456"' in captured.err
+    assert "lisa approve abc123def456" in captured.err
     assert "Approval required" in captured.err
-    assert 'lisa prompt "deny abc123def456"' in captured.err
+    assert "lisa deny abc123def456" in captured.err
 
 
 @pytest.mark.asyncio

@@ -449,9 +449,9 @@ def render_approval_panel(
     tier, the proposed command, the sandbox containment badge, and the
     decision hints. The host decides approve/ask/deny and owns the policy
     write; this function only renders — it never decides. The hints are
-    the ``lisa prompt "approve <id>"`` commands, so the operator can decide
-    from the same shell that raised the request (the CLI has no interactive
-    loop; keystroke hints went with the retired REPL).
+    the ``lisa approve <id>`` / ``lisa deny <id>`` commands, so the operator
+    can decide from the same shell that raised the request (the CLI has no
+    interactive loop; keystroke hints went with the retired REPL).
     """
 
     target = f"{payload.get('pack_id') or ''}:{payload.get('target_id') or ''}".strip(":")
@@ -496,15 +496,15 @@ def render_approval_panel(
 
     body.append("\nDecide from the same shell, without a session:\n", style=STYLE_TEXT_MUTED)
     body.append(
-        f'  lisa prompt "approve {request_id}"          # run it\n',
+        f'  lisa approve {request_id}                # run it\n',
         style=STYLE_TEXT_PRIMARY,
     )
     body.append(
-        f'  lisa prompt "approve {request_id} --remember <prefix>"\n',
+        f'  lisa approve {request_id} --remember <prefix>\n',
         style=STYLE_TEXT_MUTED,
     )
     body.append(
-        f'  lisa prompt "deny {request_id}"   ·   lisa prompt policy\n',
+        f'  lisa deny {request_id}   ·   lisa policy\n',
         style=STYLE_TEXT_MUTED,
     )
 

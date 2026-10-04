@@ -542,7 +542,7 @@ class PromptTransport:
         """Capture a pending approval and surface the decision path.
 
         A tty console renders the approval panel (the hints point at
-        `lisa prompt "approve <id>"`); a piped/redirected console
+        `lisa approve <id>`); a piped/redirected console
         fails fast on stderr instead of printing a panel the operator can
         never answer.
         """
@@ -560,9 +560,9 @@ class PromptTransport:
         err_console = Console(stderr=True, width=200)
         err_console.print(
             f"[red]Approval required for {target} (request {request_id}).\n"
-            f'Decide without a session: lisa prompt "approve {request_id}" '
-            f'or lisa prompt "deny {request_id}"\n'
-            f'(add --remember <prefix> to approve-and-persist), '
+            f"Decide without a session: lisa approve {request_id} "
+            f"or lisa deny {request_id}\n"
+            f"(add --remember <prefix> to approve-and-persist), "
             f"then re-run the original command.[/red]"
         )
 

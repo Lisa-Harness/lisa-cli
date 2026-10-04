@@ -74,12 +74,12 @@ with code `3`, so pipelines never mistake an un-decided approval for a
 completed turn. Decide it from the same shell — no session needed — and re-run:
 
 ```bash
-lisa prompt "approve <request-id>"           # run the paused action
-lisa prompt "approve <request-id> --remember git status"   # persist an allow rule
-lisa prompt "deny <request-id>"
+lisa approve <request-id>                    # decide; no new model turn
+lisa approve <request-id> --remember "git status"  # decide + persist allow rule
+lisa deny <request-id>
 ```
 
-(Bare `lisa prompt approve` with no id resolves to the single pending request.
+(A bare `lisa approve` with no id resolves to the single pending request.
 A pre-armed decision also works in one shot:
 `lisa prompt --approve <request-id> "continue the task"` dispatches the approval
 first, then runs the turn.)
@@ -106,7 +106,8 @@ rule, followed by the `⚡` footer (time · tools · models · tokens · cost).
 `text` (the forming answer), or `hybrid` (the model's thinking, default).
 Non-tty output (pipes, redirects, CI) never renders any of it — just the
 completed event lines and the final answer.
-Slash commands (`lisa run` and `lisa /...`)
+
+### Slash commands (`lisa run` and `lisa /...`)
 
 Many host operations are runtime *slash commands* — `/models`, `/policy`,
 `/approve`, `/settings`, `/tokens`, `/modes`, `/pack`, `/intake`, and any
@@ -144,13 +145,13 @@ By default, commands execute without an approval prompt only when the bash pack
 reports a working, contained Bubblewrap sandbox — or when an explicit `allow`
 rule matches (rules are evaluated ahead of the sandbox downgrade). Missing,
 degraded, or unknown sandbox state fails closed and shows an approval panel
-instead. A prompt run decides with the host machinery (the request id
-survives the process boundary):
+instead. Decide with the top-level host command (the request id survives the
+process boundary):
 
 ```bash
-lisa prompt "approve <request-id>"                        # decide + re-run
-lisa prompt "deny <request-id>"
-lisa prompt "approve <request-id> --remember [prefix]"
+lisa approve <request-id>                                  # decide only
+lisa deny <request-id>
+lisa approve <request-id> --remember "git status"          # decide + persist narrow allow
 ```
 
 The panel badges the sandbox state and shows the policy reason and effect tier
@@ -158,24 +159,23 @@ that fired, so you can see which rule or guard drove the prompt. `--remember`
 persists an allow rule scoped to the tool and the command prefix — the default
 prefix is the command's first two tokens (`git status` from `git status -sb`) —
 rather than granting broad shell access; manage the accumulated rules with
-`lisa prompt policy rule list` and `rule remove`.
+`lisa policy rule list` and `lisa policy rule remove`.
 
-### Policy (`lisa prompt policy`)
+### Policy (`lisa policy`)
 
 The approval policy is a CEL-backed YAML document at
 `<data_dir>/config/policy.yaml` that decides which actions need operator
-approval before they run. Inspect and change it from the same shell — no
-session, no hand-editing (the host owns every policy write; the CLI just
-sends the command text):
+approval before they run. Inspect and change it from Typer commands — no
+model turn or hand-editing (the host owns every policy write):
 
 ```bash
-lisa prompt policy                        # show the active document (+ any load errors)
-lisa prompt "policy mode trust"           # auto-allow write/execute (ask|trust|plan)
-lisa prompt "policy bare off"             # stop prompting for unsandboxed execute
-lisa prompt "policy rule list"            # rules with their remove addresses
-lisa prompt 'policy rule add allow --tool bash_run --when action.argv[0] == "git" && action.argv.size() <= 2'
-lisa prompt 'policy rule add deny --when ("rm" in action.argv) || ("sudo" in action.argv)'
-lisa prompt "policy rule remove allow:1"  # drop rule 1 of the allow list
+lisa policy                               # show the active document (+ any load errors)
+lisa policy mode trust                   # auto-allow write/execute (ask|trust|plan)
+lisa policy bare off                     # stop prompting for unsandboxed execute
+lisa policy rule list                    # rules with their remove addresses
+lisa policy rule add allow --tool bash_run --when 'action.argv[0] == "git" && action.argv.size() <= 2'
+lisa policy rule add deny --when '("rm" in action.argv) || ("sudo" in action.argv)'
+lisa policy rule remove allow:1          # drop rule 1 of the allow list
 ```
 
 Changes take effect immediately — the engine re-reads `policy.yaml` on every
@@ -230,7 +230,7 @@ unsandboxed `execute` prompts even under `trust` while
 
 **Fail closed.** A missing, invalid, or non-mapping `policy.yaml` — or one
 whose `when` expression does not compile — loads as ask-mode defaults with no
-rules, and `lisa prompt policy` renders the load error. An expression that
+rules, and `lisa policy` renders the load error. An expression that
 fails at evaluation time prompts instead of skipping the rule (a skipped
 `deny` would be an allowed `rm`). `rule add` compile-checks `--when` before
 the write, so a bad add is rejected rather than poisoning the document.

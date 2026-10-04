@@ -35,7 +35,17 @@ def test_env_unknown_positional_routed_to_prompt(
 def test_known_subcommand_not_routed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A registered subcommand is left in place even when routing is on."""
     monkeypatch.setenv(cli_main._PROMPT_UNKNOWN_ENV, "1")
-    for known in ("verify", "pack", "prompt", "models", "intake", "help"):
+    for known in (
+        "verify",
+        "pack",
+        "prompt",
+        "models",
+        "intake",
+        "policy",
+        "approve",
+        "deny",
+        "help",
+    ):
         assert cli_main._maybe_route_to_prompt([known]) == [known]
 
 

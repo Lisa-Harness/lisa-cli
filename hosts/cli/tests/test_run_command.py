@@ -1,12 +1,12 @@
 """Tests for the generic ``run`` slash-command escape hatch.
 
 ``lisa run '/slash args'`` normalizes whatever the operator typed to a
-single slash-command string and forwards it to ``_run_prompt_host_command`` —
+single slash-command string and forwards it to ``_run_host_command`` —
 the same one-shot host dispatch path used by the curated ``approve`` /
 ``deny`` / ``policy`` shims — so runtime slash handlers remain the single
 source of truth.
 
-These tests stub ``_run_prompt_host_command`` and record the dispatched string;
+These tests stub ``_run_host_command`` and record the dispatched string;
 no runtime is built, no MCP subprocess is spawned, and no model is
 called.
 """
@@ -34,7 +34,7 @@ def _captured(monkeypatch: pytest.MonkeyPatch) -> Any:
     def _fake_run(command: str, **_kwargs: Any) -> None:
         captured["commands"].append(command)
 
-    monkeypatch.setattr(cli_main, "_run_prompt_host_command", _fake_run)
+    monkeypatch.setattr(cli_main, "_run_host_command", _fake_run)
     return captured
 
 
@@ -83,7 +83,7 @@ def test_run_forwards_shared_runtime_options(_captured: Any, monkeypatch: pytest
         kwargs_seen["cmd"] = command
         kwargs_seen.update(kwargs)
 
-    monkeypatch.setattr(cli_main, "_run_prompt_host_command", _fake_run)
+    monkeypatch.setattr(cli_main, "_run_host_command", _fake_run)
     runner.invoke(
         cli_main.app,
         [
@@ -119,7 +119,7 @@ def test_run_silently_handles_restart_required(_captured: Any, monkeypatch: pyte
     """A restart-required response surfaces the console notice and exit 69."""
     monkeypatch.setattr(
         cli_main,
-        "_run_prompt_host_command",
+        "_run_host_command",
         lambda _cmd, **_kw: cli_main._exit_restart_required(),
     )
     with patch.object(cli_main, "console", new=Console(quiet=True, record=True)):

@@ -5,7 +5,7 @@ the prompt-mode host:
 
 - ``hosts.cli.render.render_approval_panel`` — the panel render with the
   sandbox containment badge; the decision hints point at
-  `lisa prompt "approve <id>"`.
+  `lisa approve <id>`.
 - ``PromptTransport.on_response`` — capturing ``data["approval"]`` into
   ``pending_approval`` + ``approval_unresolved`` and rendering the panel
   (instead of a bare text blob) on a tty console, or the fail-fast stderr
@@ -56,7 +56,7 @@ def test_render_approval_panel_includes_command_and_hints() -> None:
     assert "run a shell command" in text
     assert "ls -la" in text
     assert "approve" in text and "deny" in text
-    assert 'lisa prompt "approve abc123def456"' in text
+    assert 'lisa approve abc123def456' in text
     assert "execute action requires approval" in text
     assert "expires in 1m 30s" in text
     # Containment badge is shown and styled as contained.

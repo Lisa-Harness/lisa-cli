@@ -3,8 +3,8 @@
 This is the terminal-transport entry point for the Lisa framework. It
 wraps the transport-neutral :mod:`host` runtime with Typer commands
 and Rich rendering. Every command is a one-shot process: turns run via
-``lisa prompt`` and lifecycle/inspection commands (verify, models, pack,
-mcp, last, intake) run once and exit.
+``lisa prompt`` and lifecycle/inspection commands (verify, models, policy,
+pack, mcp, last, intake) run once and exit.
 """
 
 from __future__ import annotations
@@ -13,11 +13,10 @@ import asyncio
 import logging
 import os
 import platform
-import re
 import shlex
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import typer
 from kernel.models import McpServerHealth
@@ -172,6 +171,14 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Run the Lisa framework terminal host.",
 )
+policy_app = typer.Typer(
+    invoke_without_command=True,
+    no_args_is_help=False,
+    help="Inspect and manage approval policy without starting a model turn.",
+)
+policy_rule_app = typer.Typer(no_args_is_help=True, help="Manage allow, ask, and deny rules.")
+policy_app.add_typer(policy_rule_app, name="rule")
+app.add_typer(policy_app, name="policy")
 
 # Lisa palette accent for response separators (kept in sync with the shared
 # palette in transport.py — the same value PromptTransport uses for the
@@ -208,34 +215,6 @@ _PROMPT_UNKNOWN_ENV = "LISA_PROMPT_UNKNOWN"
 # service's list_pending (recorded-owner identity makes cross-process
 # pending records visible to a fresh process).
 _PENDING_APPROVAL_TARGET = "pending"
-
-# Grammar for `lisa prompt` decision subcommands (matched against the
-# lowercased message). `policy` accepts a bare verb or up to two short
-# arg tokens (subcommand word + value; the host validates the vocabulary),
-# OR the `rule` branch: `policy rule` requires an add|remove|list verb next
-# (prose like "policy rule of thumb" must NOT match), `add` takes a short
-# list name + short flag tokens and then an optional free-form `--`-flag
-# tail (the `--remember` idiom — a CEL `--when` expression can contain
-# spaces and quotes), `remove` takes one short `list:n` token, `list`
-# terminates. approve/deny require the first argument to look like a
-# request id (the host mints 32-hex ids) or start a --remember flag whose
-# value is free-form. Prose like "deny the claim" or "approve my leave
-# request" fails the id shape and stays on the model path. The host
-# re-validates the exact id anyway.
-_REQUEST_ID_SHAPE = r"[0-9a-f]{8,64}"
-_PROMPT_HOST_COMMAND_RE = re.compile(
-    r"^(?:"
-    r"policy(?:\s+\S{1,32}){0,2}"
-    r"|policy\s+rule"
-    r"(?:\s+list"
-    r"|\s+remove\s+\S{1,32}"
-    r"|\s+add\s+\S{1,32}(?:\s+--?[\w-]{1,32}\s+\S{1,32}){0,4}"
-    r"(?:\s+--[\w-]{1,32}(?:\s.*)?)?"
-    r")"
-    r"|approve(?:\s+" + _REQUEST_ID_SHAPE + r")?(?:\s+--remember\b.*)?"
-    r"|deny\s+" + _REQUEST_ID_SHAPE + r""
-    r")$"
-)
 
 
 def _get_version() -> str:
@@ -1605,7 +1584,7 @@ def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> str | N
     return "/deny" + (f" {target}" if target else "")
 
 
-async def _run_prompt_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
+async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
     """Run one host-command message (no model turn), then close the pool.
 
     Mirrors ``_run_prompt_with_teardown`` without transport rendering: the
@@ -1657,29 +1636,210 @@ async def _resolve_pending_approval_target(runtime: HostRuntime, command: str) -
     return command
 
 
-def _run_prompt_host_command(command: str, **runtime_kwargs: Any) -> None:
-    """Run a host command (policy/approve/deny) through a fresh runtime.
+def _run_host_command(command: str, **runtime_kwargs: Any) -> None:
+    """Run a host-owned admin command through a fresh runtime.
 
     The CLI's runtime options are forwarded verbatim; the command string is
-    normalized to its slash form (``approve X`` -> ``/approve X``) and
-    dispatched via handle_message exactly as a persistent host would send
-    it, so the host's command handling (identity fallback, policy writes,
-    thread entries) is identical across invocation modes. Prints the reply
-    and applies the restart-required exit contract when the runtime flags
-    one.
+    normalized to its slash form and dispatched via ``handle_message``
+    exactly as a persistent host would send it. This keeps policy writes and
+    approval decisions host-owned while bypassing the model-turn path. Prints
+    the reply and applies the restart-required exit contract when required.
     """
-    verb, _, rest = command.partition(" ")
-    if verb in {"approve", "deny", "policy"}:
+    verb = command.partition(" ")[0]
+    if verb in {"approve", "deny"}:
         command = f"/{command}"
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    restart_required, text = asyncio.run(_run_prompt_host_command_turn(runtime, command))
+    restart_required, text = asyncio.run(_run_host_command_turn(runtime, command))
     if text:
         console.print(text)
     if restart_required:
         _exit_restart_required()
     raise typer.Exit(code=0)
+
+
+def _run_policy_command(command: str, **runtime_kwargs: Any) -> None:
+    """Call the host policy API directly without starting MCP or a model turn."""
+    runtime = _initialize_runtime_or_exit(**runtime_kwargs)
+    if runtime is None:
+        return
+    from runtime.commands import (  # noqa: PLC0415  # lazy: avoids eager host import
+        handle_policy_command,
+    )
+
+    response = handle_policy_command(runtime, command, command)
+    console.print(response)
+    raise typer.Exit(code=0)
+
+
+@policy_app.callback()
+def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+    ctx: typer.Context,
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "none",
+    host_log: HostLogOption = "",
+) -> None:
+    """Set up shared host options for policy commands; bare `policy` shows status."""
+    ctx.obj = {
+        "log_level": log_level,
+        "log_path": log,
+        "no_log": no_log,
+        "data_dir": data_dir,
+        "profile": profile,
+        "overlays_dir": overlays_dir,
+        "thread_dir": thread_dir,
+        "no_thread": no_thread,
+        "session_context": session_context,
+        "timezone": timezone,
+        "state_snapshot_path": state_snapshot,
+        "streaming": streaming,
+        "host_log_path": host_log,
+    }
+    if ctx.invoked_subcommand is None:
+        _run_policy_command("/policy", **ctx.obj)
+
+
+@policy_app.command("mode", help="Set the fallback approval mode: ask, trust, or plan.")
+def _policy_mode(ctx: typer.Context, mode: Literal["ask", "trust", "plan"]) -> None:
+    _run_policy_command(f"/policy mode {mode}", **ctx.obj)
+
+
+@policy_app.command("bare", help="Toggle approval for unsandboxed execute actions.")
+def _policy_bare(ctx: typer.Context, setting: Literal["on", "off"]) -> None:
+    _run_policy_command(f"/policy bare {setting}", **ctx.obj)
+
+
+@policy_rule_app.command("list", help="List allow, ask, and deny rules with remove addresses.")
+def _policy_rule_list(ctx: typer.Context) -> None:
+    _run_policy_command("/policy rule list", **ctx.obj)
+
+
+@policy_rule_app.command("remove", help="Remove a rule by its list address, e.g. allow:1.")
+def _policy_rule_remove(ctx: typer.Context, address: str) -> None:
+    _run_policy_command(f"/policy rule remove {address}", **ctx.obj)
+
+
+@policy_rule_app.command("add", help="Add an allow, ask, or deny rule.")
+def _policy_rule_add(  # noqa: PLR0917  # Typer requires each rule matcher as a CLI option.
+    ctx: typer.Context,
+    rule_list: Literal["allow", "ask", "deny"],
+    tool: str = typer.Option("", "--tool", help="Exact capability tool ID."),
+    effect: str = typer.Option("", "--effect", help="Exact effect kind."),
+    pack: str = typer.Option("", "--pack", help="Exact owning pack ID."),
+    prefix: str = typer.Option("", "--prefix", help="Command prefix matcher."),
+    when: str = typer.Option("", "--when", help="CEL expression; quote the whole expression."),
+) -> None:
+    """Parse policy matchers with Typer and pass their values to the host policy writer."""
+    parts = ["/policy", "rule", "add", rule_list]
+    for flag, value in (
+        ("--tool", tool),
+        ("--effect", effect),
+        ("--pack", pack),
+        ("--prefix", prefix),
+    ):
+        if value:
+            parts.extend((flag, shlex.quote(value)))
+    if when:
+        parts.extend(("--when", shlex.quote(when)))
+    _run_policy_command(" ".join(parts), **ctx.obj)
+
+
+@app.command("approve", help="Approve one pending action without starting a model turn.")
+def _approve_command(  # noqa: PLR0917  # Match shared runtime options used by one-shot commands.
+    request_id: str = typer.Argument(
+        _PENDING_APPROVAL_TARGET,
+        help="Approval request ID, or omit it to target the single pending request.",
+    ),
+    remember: str = typer.Option(
+        "",
+        "--remember",
+        help="Persist an allow rule for the action's command prefix.",
+    ),
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "none",
+    host_log: HostLogOption = "",
+) -> None:
+    target = "" if request_id.lower() == _PENDING_APPROVAL_TARGET else request_id
+    command = "/approve" + (f" {target}" if target else "")
+    if remember:
+        command += f" --remember {remember}"
+    _run_host_command(
+        command,
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
+
+
+@app.command("deny", help="Deny one pending action without starting a model turn.")
+def _deny_command(  # noqa: PLR0917  # Match shared runtime options used by one-shot commands.
+    request_id: str = typer.Argument(
+        _PENDING_APPROVAL_TARGET,
+        help="Approval request ID, or omit it to target the single pending request.",
+    ),
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "none",
+    host_log: HostLogOption = "",
+) -> None:
+    target = "" if request_id.lower() == _PENDING_APPROVAL_TARGET else request_id
+    command = "/deny" + (f" {target}" if target else "")
+    _run_host_command(
+        command,
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
 
 
 @app.command(
@@ -1728,7 +1888,7 @@ def _run_command_command(  # noqa: PLR0917  # Match shared runtime options used 
         command_str = " ".join(shlex.quote(part) for part in parts)
     if not command_str.startswith("/"):
         command_str = "/" + command_str
-    _run_prompt_host_command(
+    _run_host_command(
         command_str,
         log_level=log_level,
         log_path=log,
@@ -1768,11 +1928,8 @@ def _prompt_command(
             "Message to route through the host. When stdin is piped (not a tty), "
             "its contents are attached as the turn payload, e.g. "
             "`cat f.conf | lisa prompt -r 'fix this config'`. "
-            "Subcommands that skip the turn: `lisa prompt policy [mode M|bare on|off]`, "
-            "`lisa prompt policy rule add <list> [--tool T] [--effect E] [--pack P] "
-            "[--prefix PX] [--when EXPR] | rule remove <list>:<n> | rule list`, "
-            "`lisa prompt approve <id> [--remember <prefix>]`, "
-            "`lisa prompt deny <id>`."
+            "Approval decisions that skip the turn: `lisa approve <id> "
+            "[--remember <prefix>]` and `lisa deny <id>`."
         ),
     ),
     stdin: StdinOption = True,
@@ -1796,36 +1953,8 @@ def _prompt_command(
     deny: PromptDenyOption = "",
     remember: PromptRememberOption = "",
 ) -> None:
-    # ── Decision subcommands (no model turn) ──────────────────────────
-    # `lisa prompt policy ...`, `lisa prompt approve <id>`, and
-    # `lisa prompt deny <id>` route through handle_message exactly like
-    # the host's /policy, /approve, /deny slash commands: the host owns
-    # every decision and the recorded-owner identity fallback makes a
-    # cross-process decision valid. These run with no turn and exit 0
-    # (or the command's error). The grammar guard keeps plain prose
-    # ("deny the claim", "approve my leave request") on the model path —
-    # only genuine command shapes (bare verb, verb + id/--remember args,
-    # or a policy subcommand) are intercepted. The host re-validates ids
-    # and flags anyway.
-    prompt_arg = message.strip()
-    if _PROMPT_HOST_COMMAND_RE.match(prompt_arg.lower()):
-        return _run_prompt_host_command(
-            prompt_arg,
-            log_level=log_level,
-            log_path=log,
-            no_log=no_log,
-            data_dir=data_dir,
-            profile=profile,
-            overlays_dir=overlays_dir,
-            thread_dir=thread_dir,
-            no_thread=no_thread,
-            session_context=session_context,
-            timezone=timezone,
-            state_snapshot_path=state_snapshot,
-            streaming=streaming,
-            host_log_path=host_log,
-        )
-
+    # Pre-armed decisions are handled below; standalone approve/deny
+    # commands are registered with Typer and never enter this function.
     payload = ""
     if stdin and not sys.stdin.isatty():
         try:
@@ -1867,7 +1996,7 @@ def _prompt_command(
         in_process_mcp=True,
     )
     if runtime is None:
-        return None
+        return
     restart_required, transport = asyncio.run(
         _run_prompt_with_teardown(
             runtime,
@@ -2029,8 +2158,9 @@ def _prompt_unknown_active() -> bool:
 
 
 def _known_command_names() -> set[str]:
-    """Names of every registered Typer subcommand plus the auto `help`."""
+    """Names of registered Typer commands/groups plus the auto `help`."""
     names = {cmd.name for cmd in app.registered_commands if cmd.name}
+    names.update(group.name for group in app.registered_groups if group.name)
     names.add("help")
     return names
 

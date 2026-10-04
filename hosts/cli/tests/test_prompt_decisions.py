@@ -1,12 +1,11 @@
-"""Tests for prompt-mode decision subcommands and pre-armed decisions.
+"""Tests for policy commands and prompt-mode pre-armed decisions.
 
-Covers the prompt-mode approval/policy surface added so `lisa prompt` can
-close the loop a persistent host closes with keystrokes:
+Policy management uses Typer commands and never routes through a model turn.
+Prompt-mode pre-armed approval/denial still closes the loop a persistent host
+closes with keystrokes:
 
-- `lisa prompt policy ...` / `lisa prompt approve <id>` / `lisa prompt deny
-  <id>` route through handle_message (the host's own command dispatch) with
-  no model turn; the grammar guard keeps plain prose ("deny the claim") on
-  the model path.
+- `lisa policy ...`, `lisa approve <id>`, and `lisa deny <id>` are parsed by
+    Typer and dispatched directly to host-owned handlers without a model turn.
 - `--approve/--deny [--remember]` pre-arm a decision that is dispatched
   ahead of the turn message; a bare `/approve` resolves to the single
   pending approval via the durable store.
@@ -76,7 +75,41 @@ def _invoke_prompt(
     return result
 
 
-# ── Subcommand routing (grammar guard) ────────────────────────────────
+def _invoke_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    *,
+    captured: dict[str, Any] | None = None,
+) -> int | None:
+    """Invoke the Typer policy group and capture its host command dispatch."""
+
+    def _fake_run(command: str, **_kwargs: Any) -> None:
+        if captured is not None:
+            captured.setdefault("commands", []).append(command)
+
+    monkeypatch.setattr(cli_main, "_run_policy_command", _fake_run)
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        return cli_main.app(args=["policy", *argv], standalone_mode=False)
+
+
+def _invoke_approval_command(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    *,
+    captured: dict[str, Any] | None = None,
+) -> int | None:
+    """Invoke a top-level approve/deny command and capture host dispatch."""
+
+    def _fake_run(command: str, **_kwargs: Any) -> None:
+        if captured is not None:
+            captured.setdefault("commands", []).append(command)
+
+    monkeypatch.setattr(cli_main, "_run_host_command", _fake_run)
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        return cli_main.app(args=argv, standalone_mode=False)
+
+
+# ── Direct policy command group ──────────────────────────────────────
 
 
 def _exit_code(result: int | None) -> int:
@@ -88,58 +121,123 @@ def _exit_code(result: int | None) -> int:
     return 0 if result is None else int(result)
 
 
-def test_prompt_policy_routes_to_host_command(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+def test_policy_without_subcommand_shows_current_policy(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`lisa prompt policy` dispatches /policy through handle_message."""
     captured: dict[str, Any] = {}
-    result = _invoke_prompt(monkeypatch, tmp_path, ["policy"], captured=captured)
+    result = _invoke_policy(monkeypatch, [], captured=captured)
     assert _exit_code(result) == 0
-    assert captured["messages"] == ["/policy"]
+    assert captured["commands"] == ["/policy"]
 
 
-def test_prompt_policy_mode_trust_dispatches_slash_form(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+def test_policy_mode_dispatches_directly(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`lisa prompt "policy mode trust"` sends the policy subcommand verbatim."""
     captured: dict[str, Any] = {}
-    _invoke_prompt(monkeypatch, tmp_path, ["policy mode trust"], captured=captured)
-    assert captured["messages"] == ["/policy mode trust"]
+    _invoke_policy(monkeypatch, ["mode", "trust"], captured=captured)
+    assert captured["commands"] == ["/policy mode trust"]
 
 
-def test_prompt_approve_subcommand_dispatches_slash_form(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+def test_policy_rule_add_preserves_cel_as_one_expression(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`lisa prompt "approve <id>"` dispatches /approve <id>."""
     captured: dict[str, Any] = {}
-    _invoke_prompt(
-        monkeypatch, tmp_path, ["approve abc123def456"], captured=captured
-    )
-    assert captured["messages"] == ["/approve abc123def456"]
-
-
-def test_prompt_approve_remember_dispatches_flag(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--remember rides along on the dispatched /approve."""
-    captured: dict[str, Any] = {}
-    _invoke_prompt(
+    _invoke_policy(
         monkeypatch,
-        tmp_path,
-        ["approve abc123def456 --remember git status"],
+        [
+            "rule",
+            "add",
+            "allow",
+            "--tool",
+            "coding_create_worktree",
+            "--effect",
+            "write",
+            "--pack",
+            "lisa-pack-coding",
+            "--when",
+            'identity.mode_id == "executor" && identity.workspace_id == "p920"',
+        ],
         captured=captured,
     )
-    assert captured["messages"] == ["/approve abc123def456 --remember git status"]
+    assert captured["commands"] == [
+        "/policy rule add allow --tool coding_create_worktree --effect write "
+        "--pack lisa-pack-coding --when "
+        "'identity.mode_id == \"executor\" && identity.workspace_id == \"p920\"'"
+    ]
 
 
-def test_prompt_deny_subcommand_dispatches_slash_form(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+def test_policy_rule_list_and_remove_dispatch_directly(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
-    _invoke_prompt(
-        monkeypatch, tmp_path, ["deny abc123def456"], captured=captured
+    _invoke_policy(monkeypatch, ["rule", "list"], captured=captured)
+    _invoke_policy(monkeypatch, ["rule", "remove", "allow:1"], captured=captured)
+    assert captured["commands"] == ["/policy rule list", "/policy rule remove allow:1"]
+
+
+def test_policy_command_calls_host_policy_api_without_message_dispatch(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: runtime)
+    from runtime import commands
+
+    def handle_policy(_runtime: Any, stripped: str, message: str) -> str:
+        captured["args"] = (stripped, message)
+        return "policy output"
+
+    monkeypatch.setattr(commands, "handle_policy_command", handle_policy)
+    import runtime.handle_message as message_module
+
+    def unexpected_message_dispatch(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("policy must not dispatch through handle_message")
+
+    monkeypatch.setattr(message_module, "handle_message", unexpected_message_dispatch)
+    with (
+        patch.object(cli_main, "console", new=Console(quiet=True)),
+        pytest.raises(cli_main.typer.Exit) as exit_info,
+    ):
+        cli_main._run_policy_command("/policy rule list")
+
+    assert exit_info.value.exit_code == 0
+    assert captured["args"] == ("/policy rule list", "/policy rule list")
+
+
+def test_top_level_approve_dispatches_host_command_without_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    _invoke_approval_command(monkeypatch, ["approve", "abc123def456"], captured=captured)
+    assert captured["commands"] == ["/approve abc123def456"]
+
+
+def test_top_level_approve_remember_dispatches_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    _invoke_approval_command(
+        monkeypatch,
+        ["approve", "abc123def456", "--remember", "git status"],
+        captured=captured,
     )
-    assert captured["messages"] == ["/deny abc123def456"]
+    assert captured["commands"] == ["/approve abc123def456 --remember git status"]
+
+
+def test_top_level_bare_approve_targets_single_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    _invoke_approval_command(monkeypatch, ["approve"], captured=captured)
+    assert captured["commands"] == ["/approve"]
+
+
+def test_top_level_deny_dispatches_host_command_without_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    _invoke_approval_command(monkeypatch, ["deny", "abc123def456"], captured=captured)
+    assert captured["commands"] == ["/deny abc123def456"]
 
 
 def test_prompt_prose_is_not_intercepted(
@@ -155,70 +253,15 @@ def test_prompt_prose_is_not_intercepted(
         monkeypatch, tmp_path, ["approve my leave request"], captured=captured
     )
     assert captured["messages"] == ["approve my leave request"]
+    captured = {}
+    _invoke_prompt(monkeypatch, tmp_path, ["approve abc123def456"], captured=captured)
+    assert captured["messages"] == ["approve abc123def456"]
+    captured = {}
+    _invoke_prompt(monkeypatch, tmp_path, ["deny abc123def456"], captured=captured)
+    assert captured["messages"] == ["deny abc123def456"]
 
 
-# ── `policy rule` management subcommands ──────────────────────────────
-
-
-def test_prompt_policy_rule_add_dispatches_slash_form(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`lisa prompt "policy rule add ..."` sends the rule command verbatim.
-
-    The free-form `--when` tail (a CEL expression with spaces and quoted
-    string literals) must survive the grammar guard intact.
-    """
-    captured: dict[str, Any] = {}
-    _invoke_prompt(
-        monkeypatch,
-        tmp_path,
-        ['policy rule add allow --tool bash_run --when action.argv[0] == "git"'],
-        captured=captured,
-    )
-    assert captured["messages"] == [
-        '/policy rule add allow --tool bash_run --when action.argv[0] == "git"'
-    ]
-
-
-def test_prompt_policy_rule_add_multiple_flags_with_when(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Several matchers before the --when expression all pass through."""
-    captured: dict[str, Any] = {}
-    _invoke_prompt(
-        monkeypatch,
-        tmp_path,
-        [
-            "policy rule add ask --effect external_write --pack lisa-pack-github "
-            "--when action.parameters.base_branch == 'main'"
-        ],
-        captured=captured,
-    )
-    assert captured["messages"] == [
-        "/policy rule add ask --effect external_write --pack lisa-pack-github "
-        "--when action.parameters.base_branch == 'main'"
-    ]
-
-
-def test_prompt_policy_rule_remove_dispatches_slash_form(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: dict[str, Any] = {}
-    _invoke_prompt(
-        monkeypatch, tmp_path, ["policy rule remove allow:2"], captured=captured
-    )
-    assert captured["messages"] == ["/policy rule remove allow:2"]
-
-
-def test_prompt_policy_rule_list_dispatches_slash_form(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: dict[str, Any] = {}
-    _invoke_prompt(monkeypatch, tmp_path, ["policy rule list"], captured=captured)
-    assert captured["messages"] == ["/policy rule list"]
-
-
-def test_prompt_policy_rule_prose_is_not_intercepted(
+def test_policy_text_in_prompt_is_not_treated_as_admin_command(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Prose mentioning `policy rule` stays on the model path.
@@ -227,6 +270,7 @@ def test_prompt_policy_rule_prose_is_not_intercepted(
     thumb" and friends route to the model turn like any other message.
     """
     for prose in (
+        'policy rule add allow --tool bash_run --when action.argv[0] == "git"',
         "policy rule of thumb says less is more",
         "policy rules should be simple to audit",
         "tell me about policy rule engines and their design",
@@ -234,21 +278,6 @@ def test_prompt_policy_rule_prose_is_not_intercepted(
         captured: dict[str, Any] = {}
         _invoke_prompt(monkeypatch, tmp_path, [prose], captured=captured)
         assert captured["messages"] == [prose]
-
-
-# ── Bare verb resolves the single pending approval ────────────────────
-
-
-def test_prompt_approve_bare_resolves_single_pending(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`lisa prompt approve` targets the one pending record in the store."""
-    captured: dict[str, Any] = {}
-    _invoke_prompt(monkeypatch, tmp_path, ["approve"], captured=captured)
-    # The pending store is empty here so the bare verb passes through
-    # unresolved and the host replies with usage — no crash, exit 0. The
-    # dispatched command is normalized to the slash form.
-    assert captured["messages"] == ["/approve"]
 
 
 # ── Pre-armed decision flags ──────────────────────────────────────────
@@ -399,31 +428,14 @@ def test_bare_decision_with_explicit_id_is_untouched(tmp_path: Any) -> None:
 # ── Decision-subcommand run path is turn-free ─────────────────────────
 
 
-def test_prompt_policy_does_not_read_stdin(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+def test_policy_command_does_not_read_stdin(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The subcommand path never consumes piped stdin (nothing to attach)."""
+    """The policy command never reads prompt input or starts a model turn."""
     captured: dict[str, Any] = {}
-    stdin_text = "should-be-ignored\n"
-
-    runtime = _make_runtime(tmp_path)
-
-    async def _fake_handle_message(_runtime, message, _transport):
-        captured["messages"] = [message]
-        return "ok"
-
-    def _fake_init(**_kwargs):
-        captured["runtime"] = runtime
-        return runtime
-
-    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
-    import runtime.handle_message as hm_module
-
-    monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
-    stdin_obj = io.StringIO(stdin_text)
+    stdin_obj = io.StringIO("should-be-ignored\n")
     stdin_obj.isatty = lambda: False  # type: ignore[method-assign]
     monkeypatch.setattr(sys, "stdin", stdin_obj)
-    with patch.object(cli_main, "console", new=Console(quiet=True)):
-        result = cli_main.app(args=["prompt", "policy"], standalone_mode=False)
+    result = _invoke_policy(monkeypatch, ["rule", "list"], captured=captured)
     assert _exit_code(result) == 0
-    assert captured["messages"] == ["/policy"]
+    assert captured["commands"] == ["/policy rule list"]
