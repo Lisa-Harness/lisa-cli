@@ -384,7 +384,10 @@ StreamingOption = Annotated[
         "--streaming",
         help=(
             "Streaming mode: none, stage, text, hybrid (default hybrid). "
-            "Optionally append ':<ms>' for per-character delay (e.g. hybrid:50)."
+            "text streams the answer, hybrid streams thinking, into a "
+            "bounded box under the status line; the final answer always "
+            "re-renders with full markdown. Append ':<ms>' for "
+            "per-character delay (e.g. hybrid:50)."
         ),
     ),
 ]
@@ -1867,7 +1870,12 @@ def _prompt_command(
         return None
     restart_required, transport = asyncio.run(
         _run_prompt_with_teardown(
-            runtime, full_message, quiet=quiet, raw=raw, tool_detail=tool_detail
+            runtime,
+            full_message,
+            quiet=quiet,
+            raw=raw,
+            tool_detail=tool_detail,
+            streaming_mode=runtime.config.streaming.mode,
         )
     )
     if transport.approval_unresolved:
@@ -1891,6 +1899,7 @@ async def _run_prompt_with_teardown(
     quiet: bool = False,
     raw: bool = False,
     tool_detail: int = 0,
+    streaming_mode: str = "none",
 ) -> tuple[bool, PromptTransport]:
     """Run one turn, then close the MCP pool.
 
@@ -1918,7 +1927,11 @@ async def _run_prompt_with_teardown(
         )
     transport_console: Console = Console(stderr=True) if raw else console
     transport = PromptTransport(
-        console=transport_console, quiet=quiet, raw=raw, tool_detail=tool_detail
+        console=transport_console,
+        quiet=quiet,
+        raw=raw,
+        tool_detail=tool_detail,
+        streaming_mode=streaming_mode,
     )
     transport.model_prices = _collect_model_prices(runtime)
     transport.start_turn(message)

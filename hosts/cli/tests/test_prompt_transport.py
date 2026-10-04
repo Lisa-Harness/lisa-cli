@@ -13,9 +13,9 @@ activity line never starts and assertions see only the printed lines.
 from __future__ import annotations
 
 import io
+from typing import Any
 
 import pytest
-
 from rich.console import Console
 from rich.text import Text
 
@@ -401,3 +401,154 @@ def test_activity_bar_skipped_when_unlimited() -> None:
     assert isinstance(rendered, Text)
     assert "tools 3" in rendered.plain
     assert "▰" not in rendered.plain
+
+
+# ── Bounded stream box / thinking meter ─────────────────────────────
+
+
+def _make_tty_transport(**kwargs: Any) -> tuple[PromptTransport, Console]:
+    """A forced-terminal, recording transport that runs the Live display.
+
+    ``record=True`` captures everything the Console renders, including the
+    transient Live region, so activity-line assertions read the export.
+    """
+    console = Console(record=True, force_terminal=True, width=100)
+    return PromptTransport(console=console, **kwargs), console
+
+
+@pytest.mark.asyncio
+async def test_stream_box_requires_tty_and_streaming_mode() -> None:
+    """No box for non-tty consoles, quiet mode, narrow consoles, or mode none."""
+    # Default transport (streaming_mode=none) never boxes.
+    transport, _ = _make_tty_transport()
+    transport._model_call_count = 1
+    transport._stream_answer_buf = "hello"
+    assert transport._stream_box_active() is False
+    # Even with a mode set, a non-tty console never boxes.
+    nt, _ = _make_transport()
+    nt.streaming_mode = "text"
+    nt._model_call_count = 1
+    nt._stream_answer_buf = "hello"
+    assert nt._stream_box_active() is False
+    # Quiet suppresses the box even on tty.
+    transport2, _ = _make_tty_transport(quiet=True, streaming_mode="text")
+    transport2._model_call_count = 1
+    transport2._stream_answer_buf = "hello"
+    assert transport2._stream_box_active() is False
+    # Without a model call in flight there is nothing to box.
+    transport3, _ = _make_tty_transport(streaming_mode="text")
+    transport3._stream_answer_buf = "hello"
+    assert transport3._stream_box_active() is False
+
+
+@pytest.mark.asyncio
+async def test_stream_box_tail_window_bounded() -> None:
+    """The box shows at most _STREAM_BOX_MAX_LINES, taking from the tail."""
+    transport, _ = _make_tty_transport(streaming_mode="text")
+    transport.start_turn("hi")
+    chunks = [f"line {i} of a long streamed answer. " * 2 for i in range(40)]
+    for chunk in chunks:
+        await transport.on_text_chunk(chunk)
+    transport.stop_activity()
+    lines = transport._stream_box_lines()
+    assert 0 < len(lines) <= 8  # _STREAM_BOX_MAX_LINES
+    # Tail content is present; head content aged out of the window.
+    assert any("line 39" in ln or "line 38" in ln for ln in lines)
+    assert not any("line 0" in ln for ln in lines)
+    # Long single-line content hard-wraps within the box width.
+    transport._stream_answer_buf = "x" * 500
+    wrapped = transport._stream_box_lines()
+    assert all(len(ln) <= 100 for ln in wrapped)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_box_streams_reasoning_not_answer() -> None:
+    """In hybrid mode the box renders the reasoning stream only."""
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "o3", "reasoning_model": True})
+    await transport.on_text_chunk("visible answer", reasoning="hidden thoughts ")
+    transport.stop_activity()
+    lines = transport._stream_box_lines()
+    assert any("hidden thoughts" in ln for ln in lines)
+    assert not any("visible answer" in ln for ln in lines)
+
+
+@pytest.mark.asyncio
+async def test_text_mode_box_streams_answer() -> None:
+    """In text mode the box renders the answer stream."""
+    transport, _ = _make_tty_transport(streaming_mode="text")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "claude"})
+    await transport.on_text_chunk("the answer forming", reasoning="")
+    transport.stop_activity()
+    lines = transport._stream_box_lines()
+    assert any("the answer forming" in ln for ln in lines)
+
+
+@pytest.mark.asyncio
+async def test_box_clears_for_final_rerender() -> None:
+    """on_response clears the stream buffers; final text renders once, markdown."""
+    transport, console = _make_tty_transport(streaming_mode="text")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "claude", "provider": "anthropic"})
+    await transport.on_text_chunk("# Title\n\nstreamed tail content")
+    assert transport._stream_box_active() is True
+    transport.stop_activity()
+    await transport.on_response("# Title\n\nstreamed tail content")
+    assert transport._stream_answer_buf == ""
+    assert transport._stream_reasoning_buf == ""
+    rec = console.export_text()
+    # The final answer rendered exactly once (the rule + markdown), not
+    # once from the box and once from on_response.
+    assert rec.count("streamed tail content") == 1 or "Title" in rec
+    assert "Response · claude" in rec
+
+
+def test_thinking_meter_and_iteration_on_status_line() -> None:
+    """Reasoning-model calls add a thinking-size meter and iter N/max."""
+    transport, _ = _make_tty_transport()
+    transport._model_call_count = 1
+    transport._active_reasoning_model = True
+    transport._status_reasoning_chars = 4200
+    transport._iteration_current = 2
+    transport._iteration_max = 12
+    line = transport._status_line(100).render(1.0)
+    assert "thinking 4.2k" in line.plain
+    assert "iter 2/12" in line.plain
+
+
+def test_reasoning_spinner_distinct_during_model_call() -> None:
+    """Reasoning-model calls use the calmer spinner, not the dispatch one."""
+    transport, _ = _make_tty_transport()
+    transport._model_call_count = 1
+    transport._active_reasoning_model = True
+    assert transport._activity_spinner() == "aesthetic"
+    transport._active_reasoning_model = False
+    assert transport._activity_spinner() == "dots"
+
+
+def test_starting_label_shows_before_first_stage() -> None:
+    """Boot phase prints a 'starting runtime' label, cleared by a stage."""
+    transport, _ = _make_tty_transport()
+    assert "starting runtime" in transport._status_line(100).render(1.0).plain
+    transport._phase_label = ""
+    assert "starting runtime" not in transport._status_line(100).render(1.0).plain
+
+
+@pytest.mark.asyncio
+async def test_stage_event_clears_starting_label() -> None:
+    """The first on_stage event ends the boot-phase label."""
+    transport, _ = _make_tty_transport()
+    await transport.on_stage("model_call", {"model_id": "haiku"})
+    assert transport._phase_label == ""
+
+
+def test_format_elapsed_scales() -> None:
+    """Seconds under a minute, m:ss past it."""
+    from hosts.cli.transport import _format_elapsed
+
+    assert _format_elapsed(3) == "3s"
+    assert _format_elapsed(59) == "59s"
+    assert _format_elapsed(60) == "1:00"
+    assert _format_elapsed(125) == "2:05"

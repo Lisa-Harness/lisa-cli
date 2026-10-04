@@ -37,7 +37,7 @@ import sys
 from time import perf_counter
 from typing import Any, ClassVar
 
-from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -60,6 +60,8 @@ STYLE_ROW_TOOL = "cornflower_blue"
 STYLE_ROW_ERROR = "indian_red"
 STYLE_ROW_SUCCESS = "green3"
 STYLE_STREAM_ANSWER = "bright_white"
+STYLE_STREAM_BOX = "grey50"
+STYLE_STREAM_BOX_BORDER = "grey35"
 STYLE_OUTPUT_REGION = "grey42"
 STYLE_TOOL_NAME = "bold bright_white"
 STYLE_ARG_PREVIEW = "grey58"
@@ -96,6 +98,20 @@ _DETAIL_ARGUMENT_MAX_LINES = 12
 _TOOL_DETAIL_SUMMARY = 1
 _TOOL_DETAIL_FULL = 2
 
+#: Elapsed-time format switch: below this many seconds the activity line
+#: shows plain seconds; at/above it shows minutes:seconds.
+_ELAPSED_MINUTE_SECONDS = 60
+#: Bounded thinking/answer stream window: maximum lines kept visible inside
+#: the transient activity panel (a tail window — older lines age out, so
+#: scrollback never fills with streamed chatter).
+_STREAM_BOX_MAX_LINES = 8
+#: Minimum terminal width for rendering the stream box (narrow consoles
+#: keep the plain one-line indicator).
+_STREAM_BOX_MIN_WIDTH = 60
+#: Characters below which the stream box renders bare (no rounded border)
+#: to keep the activity display light during very short generations.
+_STREAM_BOX_BORDER_CHARS = 240
+
 
 def _truncate(value: str, limit: int = _ARG_PREVIEW_MAX) -> str:
     """Truncate ``value`` to ``limit`` chars with an ellipsis."""
@@ -130,6 +146,19 @@ def _budget_bar(used: int, total: int) -> str:
     pips = max(1, min(_BUDGET_BAR_MAX_PIPS, total))
     filled = pips * used // total
     return _BUDGET_BAR_FILLED * filled + _BUDGET_BAR_EMPTY * (pips - filled)
+
+
+def _format_elapsed(seconds: int) -> str:
+    """Format whole-second elapsed time for the activity line.
+
+    Under a minute it stays a plain second count (``3s``), past a minute
+    it switches to minutes:seconds (``1:23``) so long generations stay
+    legible at a glance.
+    """
+    seconds = max(0, int(seconds))
+    if seconds < _ELAPSED_MINUTE_SECONDS:
+        return f"{seconds}s"
+    return f"{seconds // _ELAPSED_MINUTE_SECONDS}:{seconds % _ELAPSED_MINUTE_SECONDS:02d}"
 
 
 class _TrailingSpinner:
@@ -195,6 +224,7 @@ class PromptTransport:
         quiet: bool = False,
         raw: bool = False,
         tool_detail: int = 0,
+        streaming_mode: str = "none",
     ) -> None:
         self.console: Console = console or Console()
         self.quiet = quiet
@@ -203,6 +233,12 @@ class PromptTransport:
         #: 1 = + result-preview line under each completed row; 2 = + the
         #: full pretty-printed arguments under the row.
         self.tool_detail = max(0, min(2, int(tool_detail)))
+        #: Runtime ``--streaming`` mode (none|stage|text|hybrid). Controls
+        #: the bounded stream box inside the activity display: ``text``
+        #: streams the visible answer, ``hybrid`` streams reasoning (with a
+        #: char-counter fallback when the provider sends none); ``none``
+        #: and ``stage`` keep the plain one-line indicator.
+        self.streaming_mode = (streaming_mode or "none").strip().lower()
         self.approval_unresolved: bool = False
         self.yield_unresolved: bool = False
         self.yield_question: str = ""
@@ -247,14 +283,27 @@ class PromptTransport:
         # footer omits the cost estimate (manifest unreadable/unknown model).
         self.model_prices: dict[str, tuple[float, float]] = {}
         # Whether any on_text_chunk visible-answer delta arrived this turn —
-        # informational only: the answer renders once, fully, from
+        # informational only: the answer renders once, fully (markdown), from
         # on_response regardless.
         self._streamed_during_turn: bool = False
         # The visible-answer deltas stage into this buffer purely so a
         # mid-turn error path can flush partial work; on_response clears it.
         self._answer_staging: Text = Text()
-
-    # ── Lifecycle ───────────────────────────────────────────────────
+        # ── Bounded stream box (tail window) ────────────────────────
+        # Plain-text accumulation of the streamed content shown in the
+        # activity panel: the answer (``text`` mode) or the model's
+        # thinking (``hybrid`` mode). Only a tail window is ever rendered,
+        # so long generations keep a bounded footprint on screen.
+        self._active_reasoning_model: bool = False
+        self._stream_answer_buf: str = ""
+        self._stream_answer_chars: int = 0
+        self._stream_reasoning_buf: str = ""
+        self._iteration_current: int = 0
+        self._iteration_max: int = 0
+        #: Pre-first-event label shown on the activity line while the
+        #: runtime boots (profile/manifest/MCP warmup) — the window that
+        #: otherwise reads as a bare spinner. Cleared on the first stage.
+        self._phase_label: str = "starting runtime"
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: echo the command, arm the activity line.
@@ -279,7 +328,7 @@ class PromptTransport:
         activity = Live(
             self._activity_renderable(),
             console=self.console,
-            refresh_per_second=4,
+            refresh_per_second=8,
             transient=True,
         )
         with contextlib.suppress(Exception):
@@ -318,12 +367,19 @@ class PromptTransport:
         self._status_current_model = ""
         self._status_model_provider = ""
         self._active_label = ""
+        self._phase_label = "starting runtime"
         self._last_tool_data = None
         self._last_tool_streaming = False
         self._last_tool_output_lines = 0
         self._cap_max_iterations = 0
         self._cap_max_tool_calls = 0
         self._cap_max_handoffs = 0
+        self._iteration_current = 0
+        self._iteration_max = 0
+        self._active_reasoning_model = False
+        self._stream_answer_buf = ""
+        self._stream_answer_chars = 0
+        self._stream_reasoning_buf = ""
         self._turn_started_perf = perf_counter()
         is_dispatch = stage == "dispatch"
         self._thinking_spinner = "dots2" if is_dispatch else "dots"
@@ -369,6 +425,8 @@ class PromptTransport:
             cap_raw = data.get(payload_key)
             if isinstance(cap_raw, int) and cap_raw > 0:
                 setattr(self, cap_field, cap_raw)
+        # The first real stage event ends the boot phase.
+        self._phase_label = ""
         if label.startswith("model_call"):
             self._handle_model_stage(label, data)
         elif label.startswith("tool_"):
@@ -389,17 +447,25 @@ class PromptTransport:
     # ── Streaming / response ───────────────────────────────────────
 
     async def on_text_chunk(self, text: str, reasoning: str = "") -> None:
-        """Stage answer deltas / count reasoning without rendering either.
+        """Stage answer deltas / count reasoning; feed the bounded stream box.
 
-        The answer renders once, fully formatted, from ``on_response``;
-        thinking segments were a live-transcript affordance that prompt mode
-        replaces with the compact footer.
+        Deltas accumulate into plain-text tail-window buffers that render
+        inside the transient activity display (``text`` mode shows the
+        answer stream; ``hybrid`` shows the thinking stream). Status lines
+        stay put — only the tail of what the model is producing scrolls
+        inside the box. The answer always re-renders once, fully
+        markdown-formatted, from ``on_response``.
         """
         if reasoning:
             self._status_reasoning_chars += len(reasoning)
+            self._stream_reasoning_buf += reasoning
         if text:
+            self._stream_answer_buf += text
+            self._stream_answer_chars += len(text)
             self._answer_staging.append(text, style=STYLE_STREAM_ANSWER)
             self._streamed_during_turn = True
+        if (reasoning or text) and self._stream_box_active():
+            self._redraw_activity()
 
     async def on_response(self, text: str, data: dict[str, Any] | None = None) -> None:
         """Print the answer, then the compact ⚡ footer (or nothing if quiet).
@@ -424,6 +490,8 @@ class PromptTransport:
         """
         self.stop_activity()
         self._answer_staging = Text()
+        self._stream_answer_buf = ""
+        self._stream_reasoning_buf = ""
         approval = (data or {}).get("approval")
         if isinstance(approval, dict) and approval.get("request_id"):
             self._render_unresolved_approval(approval)
@@ -443,8 +511,6 @@ class PromptTransport:
                 sys.stdout.flush()
             else:
                 self._render_response_text(text)
-        if text and not self.quiet and not self.raw:
-            self.console.print()
         # The footer is activity output: in raw mode it prints on the
         # transport console (stderr) so stdout stays machine-readable.
         if not self.quiet:
@@ -539,6 +605,14 @@ class PromptTransport:
                 self._status_current_model = str(model_id)
                 self._status_model_provider = str(provider) if provider not in (None, "") else ""
             self._model_call_count += 1
+            self._active_reasoning_model = bool(data.get("reasoning_model"))
+            with contextlib.suppress(TypeError, ValueError):
+                iter_raw = data.get("_state.iteration") or data.get("iteration")
+                if iter_raw not in (None, "", 0):
+                    self._iteration_current = int(iter_raw)
+            max_iter_raw = data.get("max_iterations")
+            if isinstance(max_iter_raw, int) and max_iter_raw > 0:
+                self._iteration_max = max_iter_raw
             if data.get("mode_id"):
                 self._current_mode = str(data["mode_id"])
             return
@@ -760,8 +834,97 @@ class PromptTransport:
             with contextlib.suppress(Exception):
                 self._activity.update(self._activity_renderable())
 
+    # ── Bounded stream box (thinking/answer tail window) ────────────
+
+    def _stream_box_active(self) -> bool:
+        """Whether the bounded stream box should render this turn.
+
+        Gated on: tty, not quiet, an enabled streaming mode, a wide-enough
+        console, and at least one model_call in a mode whose box content
+        could still arrive. The box lives inside the transient Live, so it
+        never touches scrollback.
+        """
+        if self.quiet or not self.console.is_terminal:
+            return False
+        if self.streaming_mode not in {"text", "hybrid"}:
+            return False
+        width = self.console.size.width or 0
+        return width >= _STREAM_BOX_MIN_WIDTH and self._model_call_count > 0
+
+    def _stream_box_lines(self) -> list[str]:
+        """Return the tail window of the active stream as wrapped lines.
+
+        Picks the content source from the streaming mode and what has
+        actually arrived: ``text`` mode → the answer stream; ``hybrid`` →
+        the reasoning stream, falling back to nothing (the status-line
+        thinking char counter carries that case). Lines wrap to the box
+        width; the last ``_STREAM_BOX_MAX_LINES`` are returned, oldest
+        first. Long single-line chunks (minified JSON, URLs) hard-wrap on
+        their own — a box line never exceeds the console width.
+        """
+        if self.streaming_mode == "text":
+            buf = self._stream_answer_buf
+        else:
+            buf = self._stream_reasoning_buf
+        if not buf:
+            return []
+        width = max(20, (self.console.size.width or self._ACTIVITY_WIDTH) - 4)
+        # Walk from the tail: keep only as much text as can fill the box.
+        # Rough char budget before wrapping (wraps can only shrink visible
+        # chars per line), with slack for hard-wrapped long words.
+        budget = width * _STREAM_BOX_MAX_LINES
+        tail = buf[-budget:] if len(buf) > budget else buf
+        lines: list[str] = []
+        for para in tail.replace("\r\n", "\n").split("\n"):
+            remaining = para
+            if not remaining:
+                lines.append("")
+                continue
+            while len(remaining) > width:
+                lines.append(remaining[:width])
+                remaining = remaining[width:]
+            lines.append(remaining)
+        return lines[-_STREAM_BOX_MAX_LINES:]
+
+    def _stream_box_renderable(self) -> RenderableType | None:
+        """Render the active stream box as a bordered, dim tail window.
+
+        The content is deliberately rendered as *plain dim text*, not the
+        styled markdown of the final response — visually signalling "this
+        is live preview, not the formatted answer." Under
+        ``_STREAM_BOX_BORDER_CHARS`` of content the box renders bare (no
+        border) to stay light for short generations.
+        """
+        lines = self._stream_box_lines()
+        if not lines:
+            return None
+        body = Text("\n".join(lines), style=STYLE_STREAM_BOX)
+        if self._stream_total_chars() < _STREAM_BOX_BORDER_CHARS:
+            return body
+        title = "streaming" if self.streaming_mode == "text" else "thinking"
+        return Panel(
+            body,
+            title=title,
+            title_align="left",
+            border_style=STYLE_STREAM_BOX_BORDER,
+            padding=(0, 1),
+        )
+
+    def _stream_total_chars(self) -> int:
+        """Total streamed chars this turn (answer or reasoning, by mode)."""
+        if self.streaming_mode == "text":
+            return self._stream_answer_chars
+        return self._status_reasoning_chars
+
     def _activity_renderable(self) -> RenderableType:
-        """The one-line transient activity display.
+        """The transient activity display: status line + bounded stream box.
+
+        The first row is the one-line status (mode · model · in-flight
+        label · thinking-meter · iter counters · budget bars · elapsed)
+        with a trailing spinner. Below it, when a streaming mode streams
+        into the box, the tail window of the model's live output renders
+        inside a bounded panel — so long generations show visible motion
+        without pushing completed event rows (or the footer) too far back.
 
         Wide-tty surfaces additionally show a tool-call budget bar
         (``▰▰▱▱ 4/8``) when the kernel stamped a finite cap on the stage
@@ -769,8 +932,15 @@ class PromptTransport:
         capture per turn. Unlimited caps fall back to the plain counter;
         the bar warns gold past ``_BUDGET_BAR_WARN_RATIO``.
         """
-        elapsed = self._elapsed_seconds()
         width = self.console.size.width or self._ACTIVITY_WIDTH
+        line = self._status_line(width)
+        box = self._stream_box_renderable() if self._stream_box_active() else None
+        if box is not None:
+            return Group(line, box)
+        return line
+
+    def _status_line(self, width: int) -> _TrailingSpinner:
+        """Compose the one-line status row with a trailing spinner."""
         parts: list[Text] = []
         if self._current_mode:
             parts.append(Text(f"[{self._current_mode}]", style=STYLE_ROW_TRANSITION))
@@ -781,7 +951,39 @@ class PromptTransport:
             parts.append(Text(model, style=STYLE_STAGE))
         if self._active_label:
             parts.append(Text(_truncate(self._active_label, 48), style=STYLE_STAGE))
+        if self._active_reasoning_model and self._status_reasoning_chars:
+            parts.append(
+                Text(f"thinking {_format_tokens(self._status_reasoning_chars)}", style=STYLE_STAGE)
+            )
+        if self._phase_label and not parts and not self._active_label:
+            parts.append(Text(self._phase_label, style=STYLE_STAGE))
+        if self._iteration_max:
+            parts.append(
+                Text(f"iter {self._iteration_current}/{self._iteration_max}", style=STYLE_STAGE)
+            )
         parts.append(Text(f"models {self._model_call_count}", style=STYLE_STAGE))
+        parts.append(self._tools_counter_part())
+        parts.append(Text(_format_elapsed(self._elapsed_seconds()), style=STYLE_STAGE))
+        body = Text()
+        for i, part in enumerate(parts):
+            if i:
+                body.append(" · ")
+            body.append(part)
+        body.truncate(max(0, width - 4))
+        return _TrailingSpinner(body, self._activity_spinner(), STYLE_GRAPHIC)
+
+    def _activity_spinner(self) -> str:
+        """Pick the spinner for the current phase.
+
+        Reasoning-model calls get a visually distinct, calmer spinner so a
+        long think doesn't read as a stalled fetch.
+        """
+        if self._active_reasoning_model and self._model_call_count > 0:
+            return "aesthetic"
+        return self._thinking_spinner
+
+    def _tools_counter_part(self) -> Text:
+        """Tools counter with a budget bar when the kernel stamped a cap."""
         if self._cap_max_tool_calls > 0:
             bar = _budget_bar(self._tool_call_count, self._cap_max_tool_calls)
             bar_style = (
@@ -789,22 +991,11 @@ class PromptTransport:
                 if self._tool_call_count >= _BUDGET_BAR_WARN_RATIO * self._cap_max_tool_calls
                 else STYLE_STAGE
             )
-            parts.append(
-                Text(
-                    f"tools {bar} {self._tool_call_count}/{self._cap_max_tool_calls}",
-                    style=bar_style,
-                )
+            return Text(
+                f"tools {bar} {self._tool_call_count}/{self._cap_max_tool_calls}",
+                style=bar_style,
             )
-        else:
-            parts.append(Text(f"tools {self._tool_call_count}", style=STYLE_STAGE))
-        parts.append(Text(f"{elapsed}s", style=STYLE_STAGE))
-        body = Text()
-        for i, part in enumerate(parts):
-            if i:
-                body.append(" · ")
-            body.append(part)
-        body.truncate(max(0, width - 4))
-        return _TrailingSpinner(body, self._thinking_spinner, STYLE_GRAPHIC)
+        return Text(f"tools {self._tool_call_count}", style=STYLE_STAGE)
 
     def _elapsed_seconds(self) -> int:
         """Whole seconds elapsed since ``start_thinking`` for this turn."""
