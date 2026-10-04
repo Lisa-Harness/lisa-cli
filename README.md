@@ -122,7 +122,6 @@ Notes:
 - The bare token `/` by itself is not routed — it's a malformed command and
   surfaces a usage error.
 
-### 
 ### Approvals
 
 By default, commands execute without an approval prompt only when the bash pack
