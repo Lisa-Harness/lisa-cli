@@ -90,7 +90,39 @@ gets nothing, and the process exits with code `4`. The raw-mode contract tells
 the model to make the best-supported inference from the provided material and
 state assumptions in a trailing comment instead of asking; when even that is
 impossible, re-run with the missing information included in the prompt.
+Slash commands (`lisa run` and `lisa /...`)
 
+Many host operations are runtime *slash commands* — `/models`, `/policy`,
+`/approve`, `/settings`, `/tokens`, `/modes`, `/pack`, `/intake`, and any
+defined by installed packs. The CLI has dedicated subcommands for the most
+common ones (`lisa models apply`, `lisa policy rule add ...`, `lisa approve
+<id>`); those shims parse typed flags locally and hand the runtime the
+equivalent slash form.
+
+For everything else, the generic escape hatch runs any slash command
+verbatim — with no separate subcommand and no drift from the host grammar:
+
+```bash
+lisa run '/settings'
+lisa /settings                         # same thing: the `/` prefix routes to run
+lisa run models discover --force       # leading `/` is optional, tokens re-quoted
+lisa /policy mode trust                # multi-word commands work in either form
+```
+
+Notes:
+
+- Exactly one argument? It is passed through unchanged, so quote multi-word
+  commands and embedded options as one string. Multiple arguments are joined
+  with `shlex.quote` so the runtime sees the exact slash command.
+- Runtime option flags (`--data-dir`, `--profile`, `--log-level`, ...) sit
+  between `run` and the command or ahead of `/`.
+- Prompt-only flags (`-r`, `-q`, `-v`, `--stdin`) and unknown pre-positional
+  flags are *not* routed to `run` — they are dropped before the slash command
+  runs. (`lisa -r /settings` is a usage error; the flag has no meaning there.)
+- The bare token `/` by itself is not routed — it's a malformed command and
+  surfaces a usage error.
+
+### 
 ### Approvals
 
 By default, commands execute without an approval prompt only when the bash pack

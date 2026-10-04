@@ -14,6 +14,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -1678,6 +1679,70 @@ def _run_prompt_host_command(command: str, **runtime_kwargs: Any) -> None:
     raise typer.Exit(code=0)
 
 
+@app.command(
+    "run",
+    help=(
+        "Run one slash command (host admin or pack-defined). Takes the same "
+        "shared runtime options as other one-shot commands. The leading '/' "
+        "is optional. Quote multi-word arguments as one string; with multiple "
+        "tokens they are re-quoted verbatim so the runtime sees the exact "
+        "slash-command string."
+    ),
+)
+def _run_command_command(  # noqa: PLR0917  # Match shared runtime options used by one-shot commands.
+    command: Annotated[
+        list[str] | None,
+        typer.Argument(help="Slash command and its arguments."),
+    ] = None,
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "none",
+    host_log: HostLogOption = "",
+) -> None:
+    """Dispatch one slash command to the runtime exactly as a persistent
+    host would, via ``handle_message`` and ``_run_prompt_host_command``. Used for
+    one-shot access to runtime slash commands that do not have a tailored
+    Typer shim. See the routing pre-parse for the ``/cmd`` form."""
+    if not command:
+        console.print("[red]No slash command given. Example: lisa run '/policy mode trust'[/red]")
+        raise typer.Exit(code=2)
+    parts = list(command)
+    if len(parts) == 1:
+        # Quoted-as-one-string form may include embedded whitespace and
+        # shell quotes; keep it verbatim so the runtime parser sees the
+        # exact user intent.
+        command_str = parts[0]
+    else:
+        command_str = " ".join(shlex.quote(part) for part in parts)
+    if not command_str.startswith("/"):
+        command_str = "/" + command_str
+    _run_prompt_host_command(
+        command_str,
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
+
+
 def _compose_prompt_message(instruction: str, payload: str) -> str:
     """Compose the prompt-mode turn message from the CLI instruction and stdin.
 
@@ -1996,10 +2061,23 @@ def _maybe_route_to_prompt(args: list[str]) -> list[str]:
 
     Known subcommands (e.g. `verify`, `pack`) are never rerouted, so the
     env var is safe to leave on.
+
+    A first positional that begins with ``/`` (but is not the bare token
+    ``/``) is a runtime slash command and is routed to the ``run``
+    subcommand instead of ``prompt``. This is unconditional — it applies
+    whether or not prompt-unknown routing is active. Prompt-only flags
+    before the positional have no meaning on ``run`` and are dropped
+    (consistent with how unknown flags are handled today).
+
+        lisa /policy mode trust        -> lisa run /policy mode trust
+        lisa /models show              -> lisa run /models show
     """
+    idx = _first_positional_index(args)
+    if idx >= 0 and args[idx].startswith("/") and args[idx] != "/":
+        head = [a for a in args[:idx] if a not in _PROMPT_ONLY_FLAGS]
+        return [*head, "run", *args[idx:]]
     if not _prompt_unknown_active():
         return args
-    idx = _first_positional_index(args)
     if idx < 0:
         return args
     if args[idx] in _known_command_names():
