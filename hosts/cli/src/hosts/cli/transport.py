@@ -114,6 +114,25 @@ _STREAM_BOX_MIN_WIDTH = 60
 _STREAM_BOX_BORDER_CHARS = 240
 
 
+#: Minimum distinct samples before a velocity estimate is trusted.
+_VELOCITY_MIN_SAMPLES = 2
+#: Stream velocity display window (seconds): the rolling chars/s estimate
+#: is computed from samples inside this window.
+_VELOCITY_WINDOW_S = 4.0
+#: Minimum window span (seconds) before a velocity figure renders — below
+#: this the estimate is noise.
+_VELOCITY_MIN_SPAN_S = 0.75
+#: Minimum sampled delta (chars) for a velocity figure to be worth showing.
+_VELOCITY_MIN_CHARS = 64
+
+
+def _format_velocity(chars_per_s: float) -> str:
+    """Format a stream rate compactly (``812c/s``, ``1.4k/s``)."""
+    if chars_per_s >= _TOKENS_THOUSAND:
+        return f"{chars_per_s / _TOKENS_THOUSAND:.1f}k/s"
+    return f"{chars_per_s:.0f}c/s"
+
+
 def _truncate(value: str, limit: int = _ARG_PREVIEW_MAX) -> str:
     """Truncate ``value`` to ``limit`` chars with an ellipsis."""
     value = value.replace("\n", " ").strip()
@@ -313,6 +332,16 @@ class PromptTransport:
         #: runtime boots (profile/manifest/MCP warmup) — the window that
         #: otherwise reads as a bare spinner. Cleared on the first stage.
         self._phase_label: str = "starting runtime"
+        # ── Stream velocity (observable, not manifest-trusted) ──────
+        # The manifest ``reasoning_model`` flag lies for some providers
+        # (glm-5.3-family bills reasoning without flagging it), so
+        # "reasoning in flight" is derived from what actually arrives:
+        # any non-empty reasoning delta arms the meter for the call.
+        self._reasoning_seen: bool = False
+        # Rolling velocity samples: (perf_counter, total_stream_chars at
+        # that moment). Pruned to the window on each read; chars/s =
+        # (last - first) / span across the window.
+        self._velocity_samples: list[tuple[float, int]] = []
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: echo the command, arm the activity line.
@@ -394,6 +423,8 @@ class PromptTransport:
         self._thinking_spinner = "dots2" if is_dispatch else "dots"
         self._answer_staging = Text()
         self._streamed_during_turn = False
+        self._reasoning_seen = False
+        self._velocity_samples = []
         self.start_activity()
 
     def stop_thinking(
@@ -464,16 +495,26 @@ class PromptTransport:
         stay put — only the tail of what the model is producing scrolls
         inside the box. The answer always re-renders once, fully
         markdown-formatted, from ``on_response``.
+
+        Every non-empty delta records a velocity sample (wall clock vs
+        total stream chars) so the status line can show the generation
+        rate — the manifest ``reasoning_model`` flag is NOT trusted for
+        arming the meter: a non-empty reasoning delta does that, since
+        some providers (glm-5.3 family) bill reasoning without flagging
+        the model.
         """
+        now = perf_counter()
         if reasoning:
             self._status_reasoning_chars += len(reasoning)
             self._stream_reasoning_buf += reasoning
+            self._reasoning_seen = True
         if text:
             self._stream_answer_buf += text
             self._stream_answer_chars += len(text)
             self._answer_staging.append(text, style=STYLE_STREAM_ANSWER)
             self._streamed_during_turn = True
-        if (reasoning or text) and self._stream_box_active():
+        if reasoning or text:
+            self._velocity_samples.append((now, self._stream_total_chars()))
             self._redraw_activity()
 
     async def on_response(self, text: str, data: dict[str, Any] | None = None) -> None:
@@ -911,6 +952,11 @@ class PromptTransport:
         if self._stream_total_chars() < _STREAM_BOX_BORDER_CHARS:
             return body
         title = "streaming" if self.streaming_mode == "text" else "thinking"
+        velocity = self._stream_velocity()
+        if velocity > 0:
+            title = f"{title} · ~{_format_velocity(velocity)}"
+        else:
+            title = f"{title} · {_format_tokens(self._stream_total_chars())}"
         return Panel(
             body,
             title=title,
@@ -924,6 +970,31 @@ class PromptTransport:
         if self.streaming_mode == "text":
             return self._stream_answer_chars
         return self._status_reasoning_chars
+
+    def _stream_velocity(self) -> float:
+        """Rolling stream rate (chars/s) over the recent-sample window.
+
+        Samples older than ``_VELOCITY_WINDOW_S`` fall out of the
+        estimate; below the min-span/min-chars thresholds it returns 0
+        (the caller omits the figure rather than showing noise). A
+        stalled stream naturally decays to 0 as the window slides —
+        which is exactly the signal the operator wants.
+        """
+        now = perf_counter()
+        window_start = now - _VELOCITY_WINDOW_S
+        samples = [s for s in self._velocity_samples if s[0] >= window_start]
+        self._velocity_samples = samples
+        if len(samples) < _VELOCITY_MIN_SAMPLES:
+            return 0.0
+        first_t, first_c = samples[0]
+        last_t, last_c = samples[-1]
+        span = last_t - first_t
+        if span < _VELOCITY_MIN_SPAN_S:
+            return 0.0
+        delta = last_c - first_c
+        if delta < _VELOCITY_MIN_CHARS:
+            return 0.0
+        return delta / span
 
     def _activity_renderable(self) -> RenderableType:
         """The transient activity display: status line + bounded stream box.
@@ -974,21 +1045,9 @@ class PromptTransport:
 
     def _compose_status_body(self, width: int) -> Text:
         """Build the status-line body from current state (one frame)."""
-        parts: list[Text] = []
-        if self._current_mode:
-            parts.append(Text(f"[{self._current_mode}]", style=STYLE_ROW_TRANSITION))
-        if self._status_current_model:
-            model = self._status_current_model
-            if self._status_model_provider:
-                model = f"{self._status_model_provider}:{model}"
-            parts.append(Text(model, style=STYLE_STAGE))
-        if self._active_label:
-            parts.append(Text(_truncate(self._active_label, 48), style=STYLE_STAGE))
-        if self._active_reasoning_model and self._status_reasoning_chars:
-            parts.append(
-                Text(f"thinking {_format_tokens(self._status_reasoning_chars)}", style=STYLE_STAGE)
-            )
-        if self._phase_label and not parts and not self._active_label:
+        parts: list[Text] = self._status_leading_parts()
+        self._append_meter_parts(parts)
+        if self._phase_label and not parts:
             parts.append(Text(self._phase_label, style=STYLE_STAGE))
         if self._iteration_max:
             parts.append(
@@ -1005,13 +1064,47 @@ class PromptTransport:
         body.truncate(max(0, width - 4))
         return body
 
+    def _status_leading_parts(self) -> list[Text]:
+        """Leading status segments: mode, model, in-flight label."""
+        parts: list[Text] = []
+        if self._current_mode:
+            parts.append(Text(f"[{self._current_mode}]", style=STYLE_ROW_TRANSITION))
+        if self._status_current_model:
+            model = self._status_current_model
+            if self._status_model_provider:
+                model = f"{self._status_model_provider}:{model}"
+            parts.append(Text(model, style=STYLE_STAGE))
+        if self._active_label:
+            parts.append(Text(_truncate(self._active_label, 48), style=STYLE_STAGE))
+        return parts
+
+    def _append_meter_parts(self, parts: list[Text]) -> None:
+        """Append the thinking meter + velocity segments when armed.
+
+        The thinking meter arms on observed reasoning deltas — not the
+        manifest flag (glm-5.3-family bills reasoning without flagging
+        the model) — so the figure appears the moment reasoning actually
+        arrives. Velocity rides after the meter; a stalled stream decays
+        it away.
+        """
+        if not (self._active_reasoning_model or self._reasoning_seen):
+            return
+        total = self._status_reasoning_chars or self._stream_total_chars()
+        if not total:
+            return
+        parts.append(Text(f"thinking {_format_tokens(total)}", style=STYLE_STAGE))
+        velocity = self._stream_velocity()
+        if velocity > 0:
+            parts.append(Text(f"~{_format_velocity(velocity)}", style=STYLE_STAGE))
+
     def _activity_spinner(self) -> str:
         """Pick the spinner for the current phase.
 
-        Reasoning-model calls get a visually distinct, calmer spinner so a
-        long think doesn't read as a stalled fetch.
+        Active reasoning (observed deltas or the manifest flag) gets a
+        visually distinct, calmer spinner so a long think doesn't read as
+        a stalled fetch.
         """
-        if self._active_reasoning_model and self._model_call_count > 0:
+        if (self._active_reasoning_model or self._reasoning_seen) and self._model_call_count > 0:
             return "aesthetic"
         return self._thinking_spinner
 

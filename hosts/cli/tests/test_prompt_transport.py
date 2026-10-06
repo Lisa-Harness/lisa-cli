@@ -590,3 +590,105 @@ def test_spinner_name_pulled_per_frame() -> None:
     assert transport._activity_spinner() == "aesthetic"  # pylint: disable=protected-access
     rendered = line.render(1.0)
     assert isinstance(rendered, Text)
+
+
+# ── Observable reasoning arming + stream velocity ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_thinking_meter_arms_on_observed_deltas_not_manifest_flag() -> None:
+    """A model the manifest does NOT flag as reasoning still shows the
+    meter once reasoning deltas actually arrive (glm-5.3-family: the
+    reasoning capability bills without ``reasoning_model=True``)."""
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    # Manifest says non-reasoning; delta says otherwise.
+    await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
+    assert "thinking" not in transport._compose_status_body(100).plain
+    await transport.on_text_chunk("", reasoning="some chain of thought")
+    body = transport._compose_status_body(100).plain
+    assert "thinking" in body
+    assert transport._reasoning_seen is True
+
+
+@pytest.mark.asyncio
+async def test_stream_velocity_shown_and_decays() -> None:
+    """~rate shows while chunks flow inside the window; decays to nothing
+    when the stream stalls (stale samples age out)."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "o3", "reasoning_model": True})
+    # Simulate a healthy 5s-old first sample then steady flow: seed a
+    # sample 5s back so the 4s window prunes it, then add flow samples.
+    # Reasoning chars must be present too — the meter gates on actual
+    # accumulated size, samples alone are timestamps.
+    transport._status_reasoning_chars = 1400  # pylint: disable=protected-access
+    now = time.perf_counter()
+    transport._velocity_samples = [
+        (now - 5.0, 0),
+        (now - 2.0, 20),
+        (now - 1.0, 700),
+        (now - 0.1, 1400),
+    ]  # pylint: disable=protected-access
+    velocity = transport._stream_velocity()
+    assert velocity > 0
+    body = transport._compose_status_body(100).plain
+    assert "~" in body and "/s" in body
+    # Stalled: no new samples for > window → estimate decays to 0.
+    transport._velocity_samples = [
+        (now - 30.0, 0),
+        (now - 29.5, 500),
+    ]  # pylint: disable=protected-access
+    assert transport._stream_velocity() == 0.0
+    stalled = transport._compose_status_body(100).plain
+    assert "/s" not in stalled
+
+
+@pytest.mark.asyncio
+async def test_velocity_too_short_span_is_noise_gated() -> None:
+    """Sub-threshold span or char delta renders no velocity figure."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "o3", "reasoning_model": True})
+    now = time.perf_counter()
+    # Two samples 0.1s apart: span < 0.75s → 0.
+    transport._velocity_samples = [(now - 0.2, 0), (now - 0.1, 500)]  # pylint: disable=protected-access
+    assert transport._stream_velocity() == 0.0
+    # Span ok but delta tiny (< 64 chars) → 0.
+    transport._velocity_samples = [(now - 2.0, 0), (now - 0.5, 30)]  # pylint: disable=protected-access
+    assert transport._stream_velocity() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_box_title_shows_velocity_or_size() -> None:
+    """The thinking panel title carries the live rate, else the size."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "o3", "reasoning_model": True})
+    await transport.on_text_chunk("", reasoning="word " * 100)
+    box = transport._stream_box_renderable()
+    assert box is not None
+    # Fresh single burst: no qualifying velocity yet → size fallback.
+    options = transport.console.options
+    options.width = options.max_width = 90
+    rendered = transport.console.render_lines(box, options, pad=False)
+    plain = "\n".join(
+        "".join(seg.text for seg in line) for line in rendered
+    )
+    assert "thinking ·" in plain
+    # Velocity qualify → rate in the title.
+    now = time.perf_counter()
+    transport._velocity_samples = [(now - 2.0, 0), (now - 1.0, 900)]  # pylint: disable=protected-access
+    rendered = transport.console.render_lines(
+        transport._stream_box_renderable(), options, pad=False
+    )
+    plain = "\n".join(
+        "".join(seg.text for seg in line) for line in rendered
+    )
+    assert "c/s" in plain
