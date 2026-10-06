@@ -204,6 +204,14 @@ _APPROVAL_REQUIRED_EXIT = 3
 # detect "needs input" and re-run with the missing information in the prompt.
 _YIELD_UNRESOLVED_EXIT = 4
 
+# Exit code returned when the operator aborts a prompt turn with Ctrl-C
+# (SIGINT). The conventional 130 = 128 + SIGINT distinguishes an
+# operator-initiated abort from a failed turn so shells and scripts can
+# treat it as "cancelled, not crashed" (the 2026-10-06 marathon-hang: ^C
+# during a long glm-5.3:cloud generation surfaced as a 40-line uncaught
+# CancelledError traceback instead of a one-line abort notice).
+_ABORT_EXIT = 130
+
 # Env var enabling lazy routing: an unrecognized first positional is
 # redirected to `lisa prompt <args...>` so users can run `lisa continue` or
 # `lisa "do something else"` without typing `prompt`. Handled in pre-parse
@@ -1997,16 +2005,28 @@ def _prompt_command(
     )
     if runtime is None:
         return
-    restart_required, transport = asyncio.run(
-        _run_prompt_with_teardown(
-            runtime,
-            full_message,
-            quiet=quiet,
-            raw=raw,
-            tool_detail=tool_detail,
-            streaming_mode=runtime.config.streaming.mode,
+    try:
+        restart_required, transport = asyncio.run(
+            _run_prompt_with_teardown(
+                runtime,
+                full_message,
+                quiet=quiet,
+                raw=raw,
+                tool_detail=tool_detail,
+                streaming_mode=runtime.config.streaming.mode,
+            )
         )
-    )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # A SIGINT mid-turn cancels the asyncio.run loop, surfacing as
+        # CancelledError here (typer does not convert it). Print the
+        # one-line abort notice — not the 40-line traceback the framework
+        # excepthook logs — and exit with the conventional SIGINT code so
+        # shells read "cancelled", not "crashed". Raw mode keeps stdout
+        # clean for pipelines: the notice goes to stderr like all other
+        # activity output.
+        abort_console = Console(stderr=True) if raw else console
+        abort_console.print("[red]⏹ Turn aborted by operator (Ctrl-C).[/red]")
+        raise typer.Exit(code=_ABORT_EXIT) from None
     if transport.approval_unresolved:
         # The approval request id is durable; the operator must decide it in
         # an interactive session. Exit non-zero so pipelines never mistake an

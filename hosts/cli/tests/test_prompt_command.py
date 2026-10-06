@@ -339,3 +339,72 @@ async def test_prompt_transport_raw_writes_verbatim_stdout(
     assert "⚡" in captured.err
     # No markdown re-render artifacts.
     assert "─" not in captured.out
+
+def test_ctrl_c_abort_prints_notice_and_exits_130(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIGINT-style cancellation mid-turn prints one abort line, exit 130.
+
+    asyncio.run surfaces a mid-turn cancel as CancelledError from the
+    coroutine; the command must convert it to a one-line abort notice
+    (never the framework excepthook's 40-line traceback) and exit with
+    the conventional SIGINT code so shells read cancelled-not-crashed.
+    """
+    import asyncio
+
+    runtime = _make_runtime(tmp_path)
+
+    async def _cancel_mid_turn(_runtime, _message, _transport):
+        raise asyncio.CancelledError
+
+    def _fake_init(**_kwargs):
+        return runtime
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _cancel_mid_turn)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    rec = Console(record=True, force_terminal=True, width=100)
+    with patch.object(cli_main, "console", new=rec):
+        result: int | None = cli_main.app(args=["prompt", "long think"], standalone_mode=False)
+    assert result == cli_main._ABORT_EXIT
+    out = rec.export_text()
+    assert "aborted" in out
+    assert "Traceback" not in out
+
+
+def test_ctrl_c_abort_raw_mode_notice_on_stderr(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """In raw mode the abort notice goes to stderr, keeping stdout clean."""
+    import asyncio
+
+    runtime = _make_runtime(tmp_path)
+
+    async def _cancel_mid_turn(_runtime, _message, _transport):
+        raise asyncio.CancelledError
+
+    def _fake_init(**_kwargs):
+        return runtime
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _cancel_mid_turn)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    # The raw-mode abort notice is printed to a fresh stderr console, so
+    # assert on capsys: stdout must stay empty (the raw contract), stderr
+    # carries the abort line.
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        result: int | None = cli_main.app(
+            args=["prompt", "-r", "long think"], standalone_mode=False
+        )
+    assert result == cli_main._ABORT_EXIT
+    captured = capsys.readouterr()
+    assert "aborted" in captured.err
+    assert captured.out == ""

@@ -692,3 +692,107 @@ async def test_box_title_shows_velocity_or_size() -> None:
         "".join(seg.text for seg in line) for line in rendered
     )
     assert "c/s" in plain
+
+
+# ── Stall indicator (no-data age on the status line) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_stall_segment_hidden_while_streaming() -> None:
+    """Fresh deltas keep the no-data segment off the status line."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
+    transport._last_delta_perf = time.perf_counter() - 3.0  # pylint: disable=protected-access
+    transport._status_reasoning_chars = 500  # pylint: disable=protected-access
+    body = transport._compose_status_body(100).plain
+    assert "no data" not in body
+    # Below the first delta of the call the clock is unarmed (-1).
+    transport._last_delta_perf = 0.0  # pylint: disable=protected-access
+    assert transport._no_data_age_s() == -1.0
+
+
+@pytest.mark.asyncio
+async def test_stall_segment_after_threshold() -> None:
+    """A quiet stream past the threshold renders `no data Ns` in gold."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
+    await transport.on_text_chunk("", reasoning="initial burst of thinking")
+    transport._last_delta_perf = time.perf_counter() - 20.0  # pylint: disable=protected-access
+    transport._status_reasoning_chars = 800  # pylint: disable=protected-access
+    body = transport._compose_status_body(100)
+    assert "no data 20s" in body.plain
+    assert body.plain.count("no data 20s") == 1
+    # Below the alert age the segment stays gold, not red.
+    stall_spans = [s for s in body.spans if "no data" in body.plain[s.start : s.end]]
+    assert stall_spans and stall_spans[0].style == "gold3"
+
+
+@pytest.mark.asyncio
+async def test_stall_segment_escalates_to_red_at_alert() -> None:
+    """Past the alert age the stall segment switches to the error style."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
+    await transport.on_text_chunk("", reasoning="initial burst")
+    transport._last_delta_perf = time.perf_counter() - 90.0  # pylint: disable=protected-access
+    transport._status_reasoning_chars = 800  # pylint: disable=protected-access
+    body = transport._compose_status_body(100)
+    assert "no data 90s" in body.plain
+    # The escalated segment carries the error style (gold below the alert age).
+    stall_spans = [s for s in body.spans if "no data" in body.plain[s.start : s.end]]
+    assert stall_spans and stall_spans[0].style == "indian_red"
+
+
+@pytest.mark.asyncio
+async def test_new_model_call_resets_stall_clock() -> None:
+    """model_call re-arms the stall clock: pre-call silence is warmup."""
+    import time
+
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
+    await transport.on_text_chunk("", reasoning="thinking once")
+    transport._last_delta_perf = time.perf_counter() - 200.0  # pylint: disable=protected-access
+    assert transport._no_data_age_s() >= 200.0
+    await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
+    assert transport._last_delta_perf == 0.0
+    assert transport._no_data_age_s() == -1.0
+    body = transport._compose_status_body(100).plain
+    assert "no data" not in body
+
+
+def test_stalled_stream_switches_spinner_to_clock() -> None:
+    """A stalled stream uses the slow clock spinner, not the work spinners."""
+    import time
+
+    transport, _ = _make_tty_transport()
+    transport._model_call_count = 1
+    transport._active_reasoning_model = True
+    transport._reasoning_seen = True
+    transport._last_delta_perf = time.perf_counter() - 30.0  # pylint: disable=protected-access
+    assert transport._activity_spinner() == "clock"
+    # Fresh data → back to the calm reasoning spinner.
+    transport._last_delta_perf = time.perf_counter()  # pylint: disable=protected-access
+    assert transport._activity_spinner() == "aesthetic"
+
+
+@pytest.mark.asyncio
+async def test_on_text_chunk_stamps_stall_clock() -> None:
+    """Each delta (answer or reasoning) refreshes the stall timestamp."""
+    transport, _ = _make_tty_transport(streaming_mode="hybrid")
+    transport.start_turn("hi")
+    await transport.on_stage("model_call", {"model_id": "claude"})
+    assert transport._last_delta_perf == 0.0
+    await transport.on_text_chunk("answer text", reasoning="")
+    first = transport._last_delta_perf
+    assert first > 0.0
+    await transport.on_text_chunk("", reasoning="and reasoning")
+    assert transport._last_delta_perf >= first

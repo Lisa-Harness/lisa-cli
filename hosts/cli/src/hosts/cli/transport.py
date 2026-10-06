@@ -125,6 +125,16 @@ _VELOCITY_MIN_SPAN_S = 0.75
 #: Minimum sampled delta (chars) for a velocity figure to be worth showing.
 _VELOCITY_MIN_CHARS = 64
 
+#: Seconds without a delta before the generation reads as stalled. Below
+#: this the stream is assumed to be pausing between chunks (reasoning
+#: models regularly go quiet for several seconds while composing); at/above
+#: it the status line shows a no-data age and switches the spinner, so a
+#: stalled upstream reads as a stall, not a hung frame.
+_STALL_AFTER_S = 15.0
+#: No-data age (seconds) at which the stall segment escalates from gold
+#: to red — roughly the point where an operator starts reaching for ^C.
+_STALL_ALERT_S = 60.0
+
 
 def _format_velocity(chars_per_s: float) -> str:
     """Format a stream rate compactly (``812c/s``, ``1.4k/s``)."""
@@ -342,6 +352,10 @@ class PromptTransport:
         # that moment). Pruned to the window on each read; chars/s =
         # (last - first) / span across the window.
         self._velocity_samples: list[tuple[float, int]] = []
+        # Wall clock of the most recent delta (answer or reasoning) of the
+        # in-flight model call; 0 before the first delta of a call. Ages
+        # into the stall segment below when a generation goes quiet.
+        self._last_delta_perf: float = 0.0
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: echo the command, arm the activity line.
@@ -425,6 +439,7 @@ class PromptTransport:
         self._streamed_during_turn = False
         self._reasoning_seen = False
         self._velocity_samples = []
+        self._last_delta_perf = 0.0
         self.start_activity()
 
     def stop_thinking(
@@ -514,6 +529,7 @@ class PromptTransport:
             self._answer_staging.append(text, style=STYLE_STREAM_ANSWER)
             self._streamed_during_turn = True
         if reasoning or text:
+            self._last_delta_perf = now
             self._velocity_samples.append((now, self._stream_total_chars()))
             self._redraw_activity()
 
@@ -656,6 +672,9 @@ class PromptTransport:
                 self._status_model_provider = str(provider) if provider not in (None, "") else ""
             self._model_call_count += 1
             self._active_reasoning_model = bool(data.get("reasoning_model"))
+            # A new model call resets the stall clock: pre-call silence is
+            # transport warmup, not a stalled stream.
+            self._last_delta_perf = 0.0
             with contextlib.suppress(TypeError, ValueError):
                 iter_raw = data.get("_state.iteration") or data.get("iteration")
                 if iter_raw not in (None, "", 0):
@@ -1047,6 +1066,7 @@ class PromptTransport:
         """Build the status-line body from current state (one frame)."""
         parts: list[Text] = self._status_leading_parts()
         self._append_meter_parts(parts)
+        self._append_stall_part(parts)
         if self._phase_label and not parts:
             parts.append(Text(self._phase_label, style=STYLE_STAGE))
         if self._iteration_max:
@@ -1097,13 +1117,42 @@ class PromptTransport:
         if velocity > 0:
             parts.append(Text(f"~{_format_velocity(velocity)}", style=STYLE_STAGE))
 
+    def _no_data_age_s(self) -> float:
+        """Seconds since the last delta of the in-flight generation, or -1.
+
+        Returns -1 while no generation is in flight or before the first
+        delta has arrived — the caller only reads a stall once streaming
+        has *started then stopped*.
+        """
+        if self._last_delta_perf <= 0.0:
+            return -1.0
+        return max(0.0, perf_counter() - self._last_delta_perf)
+
+    def _append_stall_part(self, parts: list[Text]) -> None:
+        """Append the no-data age once a generation goes quiet.
+
+        Streams regularly pause between chunks; only a pause that has
+        crossed ``_STALL_AFTER_S`` reads as a stall. The segment escalates
+        gold → red at ``_STALL_ALERT_S`` so a multi-minute upstream hang
+        (the 2026-10-06 glm-5.3:cloud mid-stream freeze) is legible as
+        *stalled*, not as a frozen frame.
+        """
+        age = self._no_data_age_s()
+        if age < _STALL_AFTER_S:
+            return
+        style = STYLE_ROW_ERROR if age >= _STALL_ALERT_S else STYLE_ROW_TRANSITION
+        parts.append(Text(f"no data {age:.0f}s", style=style))
+
     def _activity_spinner(self) -> str:
         """Pick the spinner for the current phase.
 
         Active reasoning (observed deltas or the manifest flag) gets a
         visually distinct, calmer spinner so a long think doesn't read as
-        a stalled fetch.
+        a stalled fetch. A stalled stream switches to a slow clock —
+        visibly "waiting", not "working".
         """
+        if self._no_data_age_s() >= _STALL_AFTER_S:
+            return "clock"
         if (self._active_reasoning_model or self._reasoning_seen) and self._model_call_count > 0:
             return "aesthetic"
         return self._thinking_spinner
