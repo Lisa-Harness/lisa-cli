@@ -384,8 +384,8 @@ def test_activity_bar_renders_tool_budget() -> None:
     transport = PromptTransport(console=console)
     transport._cap_max_tool_calls = 8  # pylint: disable=protected-access
     transport._tool_call_count = 2  # pylint: disable=protected-access
-    body = transport._activity_renderable()  # pylint: disable=protected-access
-    rendered = body.render(1.0)
+    line = transport._status_line(120)  # pylint: disable=protected-access
+    rendered = line.render(1.0)
     assert isinstance(rendered, Text)
     assert "▰▰▱▱▱▱▱▱ 2/8" in rendered.plain
 
@@ -396,8 +396,8 @@ def test_activity_bar_skipped_when_unlimited() -> None:
     console = Console(file=buffer, force_terminal=False, width=120)
     transport = PromptTransport(console=console)
     transport._tool_call_count = 3  # pylint: disable=protected-access
-    body = transport._activity_renderable()  # pylint: disable=protected-access
-    rendered = body.render(1.0)
+    line = transport._status_line(120)  # pylint: disable=protected-access
+    rendered = line.render(1.0)
     assert isinstance(rendered, Text)
     assert "tools 3" in rendered.plain
     assert "▰" not in rendered.plain
@@ -552,3 +552,41 @@ def test_format_elapsed_scales() -> None:
     assert _format_elapsed(59) == "59s"
     assert _format_elapsed(60) == "1:00"
     assert _format_elapsed(125) == "2:05"
+
+
+def test_status_line_pulls_state_per_frame() -> None:
+    """Elapsed and thinking size are read fresh on every render() call.
+
+    The Live holds the renderable for the whole turn; a snapshot-at-start
+    design froze the counters during quiet generations (the spinner
+    animated but the numbers never moved).
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, width=120)
+    transport = PromptTransport(console=console)
+    transport._model_call_count = 1  # pylint: disable=protected-access
+    transport._active_reasoning_model = True  # pylint: disable=protected-access
+    transport._status_reasoning_chars = 10  # pylint: disable=protected-access
+    line = transport._status_line(120)  # pylint: disable=protected-access
+    first = line.render(1.0)
+    assert "thinking 10" in first.plain
+    # State mutates outside any render call; the next frame must reflect it.
+    transport._status_reasoning_chars = 90_000  # pylint: disable=protected-access
+    second = line.render(1.0)
+    assert "thinking 90k" in second.plain
+    assert "10" not in second.plain
+
+
+def test_spinner_name_pulled_per_frame() -> None:
+    """The spinner kind re-resolves each frame (reasoning vs dispatch)."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, width=120)
+    transport = PromptTransport(console=console)
+    transport._model_call_count = 1  # pylint: disable=protected-access
+    transport._active_reasoning_model = True  # pylint: disable=protected-access
+    line = transport._status_line(120)  # pylint: disable=protected-access
+    # aesthetic's first frame char differs from dots';
+    # assert via the resolved name instead of glyph shapes.
+    assert transport._activity_spinner() == "aesthetic"  # pylint: disable=protected-access
+    rendered = line.render(1.0)
+    assert isinstance(rendered, Text)

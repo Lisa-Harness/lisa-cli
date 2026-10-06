@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
+from collections.abc import Callable
 from time import perf_counter
 from typing import Any, ClassVar
 
@@ -164,25 +165,33 @@ def _format_elapsed(seconds: int) -> str:
 class _TrailingSpinner:
     """A Live-compatible renderable that puts the spinner *after* the line.
 
-    The fixed line content renders first and a single spinner frame glyph is
-    appended after a one-space gap as a trailing activity indicator.
+    The line content is pulled fresh on every frame via ``_line_fn`` so
+    live counters (elapsed, thinking size) tick between stage events
+    instead of freezing at the value built when the Live started.
     """
 
-    __slots__ = ("_line", "_spinner", "_style")
+    __slots__ = ("_line_fn", "_spinner_fn", "_style")
 
-    def __init__(self, line: Text, spinner_name: str, style: str) -> None:
-        self._line = line
-        self._spinner = Spinner(spinner_name, style=style)
+    def __init__(
+        self,
+        line_fn: Callable[[], Text],
+        spinner_fn: Callable[[], str],
+        style: str,
+    ) -> None:
+        self._line_fn = line_fn
+        self._spinner_fn = spinner_fn
         self._style = style
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         yield self.render(console.get_time())
 
     def render(self, time: float) -> RenderableType:
-        frame = self._spinner.render(time)
+        name = self._spinner_fn() or "dots"
+        spinner = Spinner(name, style=self._style)
+        frame = spinner.render(time)
         glyph = frame.plain if isinstance(frame, Text) else ""
         out = Text()
-        out.append(self._line)
+        out.append(self._line_fn())
         if glyph:
             out.append(" ")
             out.append(glyph, style=self._style)
@@ -926,21 +935,45 @@ class PromptTransport:
         inside a bounded panel — so long generations show visible motion
         without pushing completed event rows (or the footer) too far back.
 
+        Everything is PULLED per frame: the Live holds this proxy
+        renderable, and each refresh re-reads transport state (elapsed,
+        thinking size, box tail), so counters tick during quiet model
+        generations instead of freezing at construction values.
+
         Wide-tty surfaces additionally show a tool-call budget bar
         (``▰▰▱▱ 4/8``) when the kernel stamped a finite cap on the stage
         payloads — the denominator rides every event, so this costs one
         capture per turn. Unlimited caps fall back to the plain counter;
         the bar warns gold past ``_BUDGET_BAR_WARN_RATIO``.
         """
-        width = self.console.size.width or self._ACTIVITY_WIDTH
-        line = self._status_line(width)
-        box = self._stream_box_renderable() if self._stream_box_active() else None
+        return self
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        yield self._activity_frame()
+
+    def _activity_frame(self) -> RenderableType:
+        """Build one frame of the activity display from current state."""
+        transport = self
+        width = transport.console.size.width or transport._ACTIVITY_WIDTH
+        line = transport._status_line(width)
+        box = transport._stream_box_renderable() if transport._stream_box_active() else None
         if box is not None:
             return Group(line, box)
         return line
 
     def _status_line(self, width: int) -> _TrailingSpinner:
-        """Compose the one-line status row with a trailing spinner."""
+        """Compose the one-line status row with a trailing spinner.
+
+        Returns a dynamic spinner renderable: its ``line_fn``/``spinner_fn``
+        pull from live transport state each frame, so elapsed and the
+        thinking meter tick during quiet generations.
+        """
+        return _TrailingSpinner(
+            lambda: self._compose_status_body(width), self._activity_spinner, STYLE_GRAPHIC
+        )
+
+    def _compose_status_body(self, width: int) -> Text:
+        """Build the status-line body from current state (one frame)."""
         parts: list[Text] = []
         if self._current_mode:
             parts.append(Text(f"[{self._current_mode}]", style=STYLE_ROW_TRANSITION))
@@ -970,7 +1003,7 @@ class PromptTransport:
                 body.append(" · ")
             body.append(part)
         body.truncate(max(0, width - 4))
-        return _TrailingSpinner(body, self._activity_spinner(), STYLE_GRAPHIC)
+        return body
 
     def _activity_spinner(self) -> str:
         """Pick the spinner for the current phase.

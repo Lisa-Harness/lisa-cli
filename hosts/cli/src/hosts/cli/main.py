@@ -816,7 +816,7 @@ def _verify_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     """Run verification checks of the Lisa environment."""
@@ -892,7 +892,7 @@ def _modes_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -951,7 +951,7 @@ def _models_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -1045,7 +1045,7 @@ def _operations_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -1090,7 +1090,7 @@ def _tools_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -1140,7 +1140,7 @@ def _last_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -1376,7 +1376,7 @@ def _mcp_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -1443,7 +1443,7 @@ def _pack_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     runtime = _initialize_runtime_or_exit(
@@ -1687,7 +1687,7 @@ def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as C
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     """Set up shared host options for policy commands; bare `policy` shows status."""
@@ -1777,7 +1777,7 @@ def _approve_command(  # noqa: PLR0917  # Match shared runtime options used by o
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     target = "" if request_id.lower() == _PENDING_APPROVAL_TARGET else request_id
@@ -1819,7 +1819,7 @@ def _deny_command(  # noqa: PLR0917  # Match shared runtime options used by one-
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     target = "" if request_id.lower() == _PENDING_APPROVAL_TARGET else request_id
@@ -1868,7 +1868,7 @@ def _run_command_command(  # noqa: PLR0917  # Match shared runtime options used 
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
 ) -> None:
     """Dispatch one slash command to the runtime exactly as a persistent
@@ -1945,7 +1945,7 @@ def _prompt_command(
     session_context: SessionContextOption = "",
     timezone: TimezoneOption = "",
     state_snapshot: StateSnapshotOption = "",
-    streaming: StreamingOption = "none",
+    streaming: StreamingOption = "",
     host_log: HostLogOption = "",
     quiet: QuietOption = False,
     tool_detail: ToolDetailOption = 0,
