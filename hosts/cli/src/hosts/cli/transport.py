@@ -307,6 +307,7 @@ class PromptTransport:
         self._status_turn_tokens: int = 0
         self._status_prompt_tokens: int = 0
         self._status_completion_tokens: int = 0
+        self._status_cached_tokens: int = 0
         self._status_reasoning_chars: int = 0
         self._iteration_durations: list[float] = []
         self._model_call_count: int = 0
@@ -320,6 +321,10 @@ class PromptTransport:
         # ``{model_id: (prompt_price, completion_price)}``. Empty = the
         # footer omits the cost estimate (manifest unreadable/unknown model).
         self.model_prices: dict[str, tuple[float, float]] = {}
+        # Per-model prompt-cache prices (USD/token) keyed the same way; the
+        # footer's estimate blends the read rate for cache-hit prompts.
+        # Empty/missing keys = the estimate treats every prompt as uncached.
+        self.model_cache_prices: dict[str, tuple[float, float]] = {}
         # Whether any on_text_chunk visible-answer delta arrived this turn —
         # informational only: the answer renders once, fully (markdown), from
         # on_response regardless.
@@ -412,6 +417,7 @@ class PromptTransport:
         self._status_turn_tokens = 0
         self._status_prompt_tokens = 0
         self._status_completion_tokens = 0
+        self._status_cached_tokens = 0
         self._status_reasoning_chars = 0
         self._fork_children = {}
         self._fork_total = 0
@@ -694,11 +700,14 @@ class PromptTransport:
             if total_raw not in (None, "", 0):
                 self._status_turn_tokens += int(total_raw)
             # Split counts feed the footer's cost estimate (manifest prices
-            # are per prompt/completion token).
+            # are per prompt/completion token). Cache-hit counts let the
+            # estimate price cached prompts at the manifest's cache-read rate.
             with contextlib.suppress(TypeError, ValueError):
                 self._status_prompt_tokens += int(data.get("prompt_tokens") or 0)
             with contextlib.suppress(TypeError, ValueError):
                 self._status_completion_tokens += int(data.get("completion_tokens") or 0)
+            with contextlib.suppress(TypeError, ValueError):
+                self._status_cached_tokens += int(data.get("cached_tokens") or 0)
             return
         if label == "model_call_failed":
             self._print_event_line(
@@ -1229,15 +1238,21 @@ class PromptTransport:
         ``model_call_complete`` events against the per-model prices injected
         by the command path (``model_prices``). Returns 0 when either side
         is missing — a missing manifest must never block the footer.
+
+        When the manifest publishes cache prices (``model_cache_prices``),
+        cache-hit prompt tokens are priced at the cache-read rate instead
+        of the uncached prompt rate.
         """
         prices = self.model_prices.get(self._status_current_model)
         if not prices:
             return 0.0
         prompt_price, completion_price = prices
-        cost = (
-            self._status_prompt_tokens * prompt_price
-            + self._status_completion_tokens * completion_price
-        )
+        cache_prices = self.model_cache_prices.get(self._status_current_model) or (0.0, 0.0)
+        cache_read_price, _cache_write_price = cache_prices
+        cached = min(self._status_cached_tokens, self._status_prompt_tokens)
+        uncached_prompt = self._status_prompt_tokens - cached
+        prompt_read = uncached_prompt * prompt_price + cached * (cache_read_price or prompt_price)
+        cost = prompt_read + self._status_completion_tokens * completion_price
         # Sub-cent figures round to zero display; keep one significant digit.
         return round(cost, 4)
 

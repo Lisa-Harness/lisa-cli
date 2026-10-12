@@ -2083,6 +2083,7 @@ async def _run_prompt_with_teardown(
         streaming_mode=streaming_mode,
     )
     transport.model_prices = _collect_model_prices(runtime)
+    transport.model_cache_prices = _collect_model_cache_prices(runtime)
     transport.start_turn(message)
     try:
         await runtime.start()
@@ -2113,6 +2114,28 @@ def _collect_model_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]
         completion_price = float(getattr(model, "completion_price", 0.0) or 0.0)
         if prompt_price > 0.0 or completion_price > 0.0:
             prices[str(model.model_id)] = (prompt_price, completion_price)
+    return prices
+
+
+def _collect_model_cache_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]]:
+    """Read per-model per-token USD prompt-cache prices from the manifest.
+
+    Returns ``{model_id: (cache_read_price, cache_write_price)}``. Only
+    models with a nonzero read and/or write price appear; missing keys make
+    the footer's estimate treat every prompt as uncached (legacy behavior).
+    """
+    try:
+        from runtime.model_manifest import load_model_manifest  # noqa: PLC0415
+
+        manifest = load_model_manifest(runtime.paths.models_path)
+    except Exception:  # pylint: disable=broad-except
+        return {}
+    prices: dict[str, tuple[float, float]] = {}
+    for model in manifest.models:
+        read_price = float(getattr(model, "cache_read_price", 0.0) or 0.0)
+        write_price = float(getattr(model, "cache_write_price", 0.0) or 0.0)
+        if read_price > 0.0 or write_price > 0.0:
+            prices[str(model.model_id)] = (read_price, write_price)
     return prices
 
 

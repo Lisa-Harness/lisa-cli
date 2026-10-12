@@ -796,3 +796,52 @@ async def test_on_text_chunk_stamps_stall_clock() -> None:
     assert first > 0.0
     await transport.on_text_chunk("", reasoning="and reasoning")
     assert transport._last_delta_perf >= first
+
+
+# ── Footer cost: cache-aware estimate ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_footer_estimate_blends_cache_read_rate() -> None:
+    """Without quoted cost, cache-hit prompts price at the read rate:
+    (1000-600)*2 + 600*0.2 + 100*12 µD = $0.002 vs $0.0044 uncached."""
+    transport, buffer = _make_transport()
+    transport.model_prices = {"m": (0.000002, 0.000012)}
+    transport.model_cache_prices = {"m": (0.0000002, 0.0)}
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cached_tokens": 600,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(
+        ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡")
+    )
+    assert "$0.002" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_estimate_falls_back_to_uncached_rate() -> None:
+    """No cache prices in the manifest → every prompt at the uncached rate."""
+    transport, buffer = _make_transport()
+    transport.model_prices = {"m": (0.000002, 0.000012)}
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cached_tokens": 600,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(
+        ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡")
+    )
+    assert "$0.0032" in footer
