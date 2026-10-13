@@ -308,6 +308,7 @@ class PromptTransport:
         self._status_prompt_tokens: int = 0
         self._status_completion_tokens: int = 0
         self._status_cached_tokens: int = 0
+        self._status_billed_tokens: int = 0
         self._status_reasoning_chars: int = 0
         self._iteration_durations: list[float] = []
         self._model_call_count: int = 0
@@ -418,6 +419,7 @@ class PromptTransport:
         self._status_prompt_tokens = 0
         self._status_completion_tokens = 0
         self._status_cached_tokens = 0
+        self._status_billed_tokens = 0
         self._status_reasoning_chars = 0
         self._fork_children = {}
         self._fork_total = 0
@@ -592,9 +594,7 @@ class PromptTransport:
         """Stash + render a model yield (stdout gets nothing)."""
         self.yield_unresolved = True
         self.yield_question = yield_question
-        self.console.print(
-            Text(f"⏸ Model asked: {yield_question}", style=STYLE_ROW_TRANSITION)
-        )
+        self.console.print(Text(f"⏸ Model asked: {yield_question}", style=STYLE_ROW_TRANSITION))
         if not self.console.is_terminal:
             Console(stderr=True).print(
                 "[red]The model asked a question instead of producing a "
@@ -706,8 +706,18 @@ class PromptTransport:
                 self._status_prompt_tokens += int(data.get("prompt_tokens") or 0)
             with contextlib.suppress(TypeError, ValueError):
                 self._status_completion_tokens += int(data.get("completion_tokens") or 0)
+            cached_now = 0
             with contextlib.suppress(TypeError, ValueError):
-                self._status_cached_tokens += int(data.get("cached_tokens") or 0)
+                cached_now = int(data.get("cached_tokens") or 0)
+            self._status_cached_tokens += cached_now
+            with contextlib.suppress(TypeError, ValueError):
+                prompt_now = int(data.get("prompt_tokens") or 0)
+            # Billed basis (2026-10-12 perf review): the walk figure counts
+            # every cache hit at full size; the operator-facing "what did
+            # this turn actually cost" is uncached prompt + completion.
+            self._status_billed_tokens += max(0, prompt_now - cached_now) + int(
+                data.get("completion_tokens") or 0
+            )
             return
         if label == "model_call_failed":
             self._print_event_line(
@@ -820,9 +830,7 @@ class PromptTransport:
                 self._fork_children = {}
             self._fork_total = 0
 
-    def _result_shape_summary(
-        self, row_data: dict[str, Any], complete: dict[str, Any]
-    ) -> str:
+    def _result_shape_summary(self, row_data: dict[str, Any], complete: dict[str, Any]) -> str:
         """One-line shape of what the tool returned (``⎿ 14 lines``).
 
         Prefers the streamed-line count observed this dispatch (tools that
@@ -857,9 +865,7 @@ class PromptTransport:
         for line in rendered.splitlines()[:_DETAIL_ARGUMENT_MAX_LINES]:
             self.console.print(Text(f"    {line}", style=STYLE_ARG_PREVIEW))
 
-    def _print_detail_lines(
-        self, row_data: dict[str, Any], complete: dict[str, Any]
-    ) -> None:
+    def _print_detail_lines(self, row_data: dict[str, Any], complete: dict[str, Any]) -> None:
         """Detail level >= 1: print the result preview under the row.
 
         The kernel sends ``result_preview`` on every completion: a compact
@@ -871,13 +877,9 @@ class PromptTransport:
         preview = str(complete.get("result_preview") or "").strip()
         if preview and preview != "Done":
             lines = preview.splitlines() or [preview]
-            shown = (
-                lines if self.tool_detail >= _TOOL_DETAIL_FULL else lines[:_TOOL_DETAIL_SUMMARY]
-            )
+            shown = lines if self.tool_detail >= _TOOL_DETAIL_FULL else lines[:_TOOL_DETAIL_SUMMARY]
             for line in shown:
-                self.console.print(
-                    Text(f"    ⎿ {line}", style=STYLE_OUTPUT_REGION)
-                )
+                self.console.print(Text(f"    ⎿ {line}", style=STYLE_OUTPUT_REGION))
 
     def _print_event_line(self, text: Text | str, *, style: str | None = None) -> None:
         """Print one completed scrollback line, replacing the activity line.
@@ -1215,9 +1217,7 @@ class PromptTransport:
         footer.append(model_part, style=STYLE_ROW_MODEL)
         if self._handoff_count:
             footer.append(" · ", style=STYLE_TEXT_MUTED)
-            handoff_part = (
-                f"{self._handoff_count} handoff{'s' if self._handoff_count != 1 else ''}"
-            )
+            handoff_part = f"{self._handoff_count} handoff{'s' if self._handoff_count != 1 else ''}"
             route = self._current_mode
             if route:
                 handoff_part += f" → {route}"
@@ -1225,6 +1225,14 @@ class PromptTransport:
         if self._status_turn_tokens:
             footer.append(" · ", style=STYLE_TEXT_MUTED)
             footer.append(f"{_format_tokens(self._status_turn_tokens)} tok", style="green3")
+            # Cache-split figure: when the turn walked context with cache
+            # hits, the walk is not the billed basis. Show what the turn
+            # actually consumed next to the walk (2026-10-12 perf review).
+            if self._status_cached_tokens > 0 and self._status_billed_tokens:
+                footer.append(
+                    f" · billed {_format_tokens(self._status_billed_tokens)}",
+                    style="cyan",
+                )
         cost = self._estimate_turn_cost()
         if cost:
             footer.append(" · ", style=STYLE_TEXT_MUTED)
@@ -1337,9 +1345,7 @@ class PromptTransport:
                 out.append(f" {arg}", style=STYLE_ARG_PREVIEW)
 
         if status_glyph:
-            status_style = (
-                STYLE_ROW_ERROR if status_glyph == "✗" else STYLE_ROW_SUCCESS
-            )
+            status_style = STYLE_ROW_ERROR if status_glyph == "✗" else STYLE_ROW_SUCCESS
             duration = (complete or data).get("duration_ms")
             tail = status_glyph
             if duration not in (None, "", 0):
@@ -1350,9 +1356,7 @@ class PromptTransport:
                 out.append(summary, style=STYLE_TEXT_MUTED)
         return out
 
-    def _append_aligned_status(
-        self, row: Text, tail: str, style: str, *, suffix: str = ""
-    ) -> None:
+    def _append_aligned_status(self, row: Text, tail: str, style: str, *, suffix: str = "") -> None:
         """Append ``tail`` right-aligned in a fixed status column (tty only).
 
         Interactive terminals (>= ``_STATUS_ALIGN_MIN_WIDTH``) pad the row so

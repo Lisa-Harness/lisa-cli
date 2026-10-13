@@ -98,6 +98,53 @@ async def test_model_call_complete_accumulates_tokens_and_duration() -> None:
     assert "4.1k tok" in buffer.getvalue()
 
 
+@pytest.mark.asyncio
+async def test_footer_billed_tokens_surfaces_cached_turns() -> None:
+    """Cache-heavy turns surface the billed (uncached+completion) basis.
+
+    Regression for the 2026-10-12 performance review: the walk figure
+    (prompt+completion, cache hits at full) read 7.6M on a turn whose
+    billed basis was 216k — alarming and useless. With cached tokens
+    reported, the footer adds the billed figure next to the walk.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "model_call", {"model_id": "glm-5.3-flash:cloud", "provider": "ollama", "mode_id": "ops"}
+    )
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "duration_ms": 340,
+            "prompt_tokens": 100000,
+            "cached_tokens": 99750,
+            "completion_tokens": 3000,
+            "total_tokens": 103000,
+            "iteration": 1,
+        },
+    )
+    await transport.on_response("done")
+    out = buffer.getvalue()
+    footer_lines = [ln for ln in out.splitlines() if ln.strip().startswith("⚡")]
+    assert footer_lines, "footer must print"
+    footer = footer_lines[-1]
+    assert "103k tok" in footer
+    assert "billed 3.25k" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_billed_segment_absent_without_cache_hits() -> None:
+    """No cached tokens = no billed segment (the walk IS the billed basis)."""
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "model_call", {"model_id": "llama3.2", "provider": "ollama", "mode_id": "ops"}
+    )
+    await transport.on_stage(
+        "model_call_complete", {"duration_ms": 340, "total_tokens": 4100, "iteration": 1}
+    )
+    await transport.on_response("done")
+    assert "billed" not in buffer.getvalue()
+
+
 # ── Mode tracking + handoff ────────────────────────────────────────────
 
 
