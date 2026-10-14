@@ -603,10 +603,11 @@ class PromptTransport:
             return
         # A model yield (ask-the-operator question) is an unresolved turn, not
         # an answer. The host surfaces it structurally on
-        # ``data["yielded"]`` (and ``HostCommandResult.yielded_question``).
+        # ``data["yielded"]`` (and ``HostCommandResult.yielded_question``),
+        # with the yield context, resume mode, and remediation lines beside it.
         yield_question = str((data or {}).get("yielded") or "")
         if yield_question:
-            self._render_yield_question(yield_question)
+            self._render_yield_question(yield_question, dict(data or {}))
             return
         if text:
             if self.raw:
@@ -621,11 +622,44 @@ class PromptTransport:
         if not self.quiet:
             self._print_footer()
 
-    def _render_yield_question(self, yield_question: str) -> None:
-        """Stash + render a model yield (stdout gets nothing)."""
+    def _render_yield_question(self, yield_question: str, data: dict[str, Any]) -> None:
+        """Stash + render a model yield (stdout gets nothing).
+
+        The yield is a question the operator must answer, not a completed
+        turn — so it gets a dedicated panel: the question first (that is
+        what the operator reads), then why the turn stopped
+        (``data["yield_context"]``) and where a reply resumes
+        (``data["yield_mode_id"]``), with the rendered remediation command
+        lines (``data["remediation"]``) last so the operator can act on
+        stalled work without re-deriving the command. Fields the runtime did
+        not supply (an in-place model ask carries no context or target)
+        render nothing rather than an empty label.
+        """
         self.yield_unresolved = True
         self.yield_question = yield_question
-        self.console.print(Text(f"⏸ Model asked: {yield_question}", style=STYLE_ROW_TRANSITION))
+        body: list[RenderableType] = [Markdown(yield_question)]
+        context = str(data.get("yield_context") or "").strip()
+        target_mode = str(data.get("yield_mode_id") or "").strip()
+        remediation = [str(x).strip() for x in data.get("remediation") or () if str(x).strip()]
+        meta: list[str] = []
+        if context:
+            meta.append(f"Why: {context}")
+        if target_mode:
+            meta.append(f"Reply resumes in mode: {target_mode}")
+        if remediation:
+            meta.append("Remediation: " + ", ".join(f"`{x}`" for x in remediation))
+        if meta:
+            body.append(Text())
+            body.append(Text("\n".join(meta), style=STYLE_TEXT_MUTED))
+        self.console.print(
+            Panel(
+                Group(*body),
+                title="Asked you a question (turn not finished)",
+                title_align="left",
+                border_style=STYLE_ROW_TRANSITION,
+                padding=(0, 1),
+            )
+        )
         if not self.console.is_terminal:
             Console(stderr=True).print(
                 "[red]The model asked a question instead of producing a "

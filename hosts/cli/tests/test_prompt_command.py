@@ -108,27 +108,21 @@ def test_piped_stdin_wrapped_as_piped_input_block(
     assert msg.endswith("recommend improvements")
 
 
-def test_stdin_only_message_is_payload(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stdin_only_message_is_payload(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """With no instruction, the stdin payload is the whole message."""
     captured: dict[str, Any] = {}
     _invoke_prompt(monkeypatch, tmp_path, [], stdin_text="just data\n", captured=captured)
     assert captured["message"] == "just data"
 
 
-def test_no_stdin_tty_uses_message_only(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_no_stdin_tty_uses_message_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """A tty stdin is not read; the message passes through unchanged."""
     captured: dict[str, Any] = {}
     _invoke_prompt(monkeypatch, tmp_path, ["plain message"], captured=captured)
     assert captured["message"] == "plain message"
 
 
-def test_no_message_and_no_stdin_exits_2(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_no_message_and_no_stdin_exits_2(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Neither message nor piped input is a usage error (exit 2)."""
     result = _invoke_prompt(monkeypatch, tmp_path, [])
     assert result == 2
@@ -150,9 +144,7 @@ def test_no_stdin_flag_skips_pipe(tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 # ── Raw mode ──────────────────────────────────────────────────────────
 
 
-def test_raw_prepends_output_contract(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_raw_prepends_output_contract(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """-r prepends the raw-mode output contract to the turn message."""
     captured: dict[str, Any] = {}
     _invoke_prompt(monkeypatch, tmp_path, ["-r", "fix it"], captured=captured)
@@ -160,9 +152,7 @@ def test_raw_prepends_output_contract(
     assert "fix it" in captured["message"]
 
 
-def test_raw_wraps_stdin_payload_too(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_raw_wraps_stdin_payload_too(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """-r + piped stdin: contract first, then payload block, then instruction."""
     captured: dict[str, Any] = {}
     _invoke_prompt(
@@ -178,9 +168,7 @@ def test_raw_wraps_stdin_payload_too(
     assert msg.rstrip().endswith("fix it")
 
 
-def test_raw_transport_gets_stderr_console(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_raw_transport_gets_stderr_console(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """In raw mode the transport console is NOT the shared console; else it is."""
     from hosts.cli.transport import PromptTransport as _OT
 
@@ -229,23 +217,66 @@ async def test_prompt_transport_yield_tty_shows_question_inline() -> None:
     """A tty transport shows the question inline (no stderr fail-fast text)."""
     record = Console(record=True, force_terminal=True, width=100)
     transport = PromptTransport(console=record)
-    await transport.on_response(
-        "I need more detail.", {"yielded": "What detail do you need?"}
-    )
+    await transport.on_response("I need more detail.", {"yielded": "What detail do you need?"})
     assert transport.yield_unresolved is True
     assert "What detail do you need?" in record.export_text()
 
 
-def test_yielded_prompt_exits_4(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.asyncio
+async def test_prompt_transport_yield_panel_formats_context_mode_remediation() -> None:
+    """The yield panel shows the question, why, the resume mode, and commands."""
+    record = Console(record=True, force_terminal=True, width=90)
+    transport = PromptTransport(console=record)
+    await transport.on_response(
+        "Preparation now fails at the pack's import-origin verification.",
+        {
+            "yielded": (
+                "Preparation now fails at the pack's import-origin verification. "
+                "Can you fix the pack source so the verification accepts namespace packages?"
+            ),
+            "yield_context": (
+                "pydantic validation error is gone; preparation fails at a new stage "
+                "(RuntimeError: module has no import origin: sdk)"
+            ),
+            "yield_mode_id": "coding_execute",
+            "remediation": ["/stall item-1", "/skip item-1"],
+        },
+    )
+    rendered = record.export_text()
+    assert transport.yield_unresolved is True
+    assert transport.yield_question.startswith("Preparation now fails")
+    # The question reads first, in a dedicated panel.
+    assert "Asked you a question" in rendered
+    assert "import-origin verification" in rendered
+    # Kernel-supplied why / where-to-reply / remediation lines are present.
+    assert "Why:" in rendered and "import origin: sdk" in rendered
+    assert "Reply resumes in mode: coding_execute" in rendered
+    assert "/stall item-1" in rendered and "/skip item-1" in rendered
+    # The plain answer path is NOT taken: no Response rule title.
+    assert "Response" not in rendered.split("Asked you a question")[0]
+
+
+@pytest.mark.asyncio
+async def test_prompt_transport_yield_bare_question_has_no_empty_labels() -> None:
+    """A plain model ask (no context/mode/remediation) renders only the question."""
+    record = Console(record=True, force_terminal=True, width=90)
+    transport = PromptTransport(console=record)
+    await transport.on_response("answer text", {"yielded": "Which networks?"})
+    rendered = record.export_text()
+    assert "Which networks?" in rendered
+    assert "Asked you a question" in rendered
+    # No fabricated labels for fields the runtime did not supply.
+    assert "Why:" not in rendered
+    assert "Reply resumes in mode" not in rendered
+    assert "Remediation:" not in rendered
+
+
+def test_yielded_prompt_exits_4(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """A turn that ends in a yield exits _YIELD_UNRESOLVED_EXIT (4)."""
     runtime = _make_runtime(tmp_path)
 
     async def _fake_handle_message(_runtime, _message, transport):
-        await transport.on_response(
-            "I need the current networks.", {"yielded": "Which networks?"}
-        )
+        await transport.on_response("I need the current networks.", {"yielded": "Which networks?"})
         return "ok"
 
     def _fake_init(**_kwargs):
@@ -283,9 +314,7 @@ async def test_prompt_transport_flags_unresolved_approval() -> None:
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, width=120)
     transport = PromptTransport(console=console)
-    await transport.on_response(
-        "Approval required.", {"approval": _approval_payload()}
-    )
+    await transport.on_response("Approval required.", {"approval": _approval_payload()})
     assert transport.approval_unresolved is True
     assert transport.pending_approval is not None
     # Nothing interactive leaked into the captured (stdout) console.
@@ -302,9 +331,7 @@ async def test_prompt_transport_approval_stderr_notice(
     loop needed) rather than the bare /approve slash form.
     """
     transport = PromptTransport(console=Console(force_terminal=False, width=120))
-    await transport.on_response(
-        "Approval required.", {"approval": _approval_payload()}
-    )
+    await transport.on_response("Approval required.", {"approval": _approval_payload()})
     captured = capsys.readouterr()
     assert "lisa approve abc123def456" in captured.err
     assert "Approval required" in captured.err
@@ -316,9 +343,7 @@ async def test_prompt_transport_approval_panel_on_tty() -> None:
     """A tty transport console still renders the interactive panel."""
     record = Console(record=True, force_terminal=True, width=100)
     transport = PromptTransport(console=record)
-    await transport.on_response(
-        "Approval required.", {"approval": _approval_payload()}
-    )
+    await transport.on_response("Approval required.", {"approval": _approval_payload()})
     assert "CONTAINED" in record.export_text()
     assert transport.approval_unresolved is True
 
@@ -339,6 +364,7 @@ async def test_prompt_transport_raw_writes_verbatim_stdout(
     assert "⚡" in captured.err
     # No markdown re-render artifacts.
     assert "─" not in captured.out
+
 
 def test_ctrl_c_abort_prints_notice_and_exits_130(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
