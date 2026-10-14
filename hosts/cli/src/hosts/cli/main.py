@@ -15,8 +15,9 @@ import os
 import platform
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 
 import typer
 from kernel.models import McpServerHealth
@@ -167,7 +168,205 @@ install(show_locals=True)
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Group command resolution — unknown routing + dynamic pack subcommands
+# ---------------------------------------------------------------------------
+# Click owns the argv grammar: no pre-Typer argv rewrites. A custom group
+# class resolves unknowns (see ``_LisaGroup`` below) and dynamically
+# generates commands for pack-registered host commands, so `lisa stalls`
+# or `lisa retry <id>` work as real subcommands with --help and completion.
+
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+# Group-level hoist flags (``-r``/``-q``/``--no-stdin`` parsed at group level
+# by ``_cli_callback``) recorded here for the prompt command to OR in when
+# lazy routing lands there (``lisa -r "fix it"``). One CLI process runs the
+# group callback at most once, before any command body.
+_GROUP_HOIST: dict[str, bool] = {}
+
+# Env var enabling lazy routing: an unrecognized first positional is
+# resolved by the custom group (``_LisaGroup.resolve_command``) to the
+# `prompt` subcommand so users can run `lisa continue` or
+# `lisa "do something else"` without typing `prompt`. Click owns the argv
+# grammar; no pre-Typer rewrites exist.
+_PROMPT_UNKNOWN_ENV = "LISA_PROMPT_UNKNOWN"
+
+
+def _prompt_unknown_active() -> bool:
+    """True if prompt-unknown routing is on (LISA_PROMPT_UNKNOWN)."""
+    return os.getenv(_PROMPT_UNKNOWN_ENV, "").strip().lower() in _TRUTHY
+
+
+_pack_command_specs: dict[str, Any] | None = None
+"""Cache of pack-registered host-command specs, keyed by bare name.
+
+Lazily discovered on first resolution: ``{name: PackCommandEntry}`` where
+``name`` is the first token of the spec prefix (``/stalls`` -> ``stalls``).
+``None`` means discovery has not run yet.
+"""
+
+
+def _pack_commands() -> dict[str, Any]:
+    """Return pack-registered host commands by bare name (discovered once).
+
+    One pack may register several specs sharing a leading verb (``/retry``,
+    ``/retry-safe``, ...); the bare-name entry keeps the pack's spec list so
+    the generated command can dispatch to the longest matching prefix —
+    the same matching order the runtime's own dispatcher uses.
+    """
+    global _pack_command_specs  # noqa: PLW0603  # module-level cache seam
+    if _pack_command_specs is None:
+        specs: dict[str, Any] = {}
+        try:
+            from kernel.host_command_discovery import (  # noqa: PLC0415  # lazy: avoids eager pack scan
+                discover_pack_host_commands,
+            )
+
+            for entry in discover_pack_host_commands():
+                for spec in entry.specs:
+                    name = spec.prefix.strip().lstrip("/").split(None, 1)[0]
+                    if name:
+                        specs.setdefault(name, entry)
+        except Exception:  # pylint: disable=broad-except  # packs venv may be absent
+            logger.debug("pack host-command discovery failed", exc_info=True)
+        _pack_command_specs = specs
+    return _pack_command_specs
+
+
+def _make_pack_command(name: str) -> Any:
+    """Build a click command dispatching one pack-registered host command.
+
+    The generated command takes the same shared runtime options as the
+    curated one-shot commands plus a catch-all ``ARGS`` argument list; the
+    tokens are joined into the pack's slash-command string so the runtime
+    dispatches to the pack's own handler exactly as a persistent host
+    would (the pack handler owns the sub-grammar, e.g. ``/retry <id>``).
+    """
+    import click  # noqa: PLC0415  # lazy: click is a Typer dependency
+
+    entry = _pack_commands()[name]
+    help_text = ""
+    for spec in entry.specs:
+        if spec.help_text:
+            help_text = spec.help_text
+            break
+
+    @click.command(
+        name=name,
+        help=help_text or f"Run the {name} pack host command.",
+    )
+    @click.option("--log-level", default="", help="Log threshold: debug, info, warning, error.")
+    @click.option("--log", default="", help="Append JSONL turn logs to this file.")
+    @click.option("--no-log", is_flag=True, default=False, help="Disable turn logging.")
+    @click.option("--data-dir", default="", help="Data root (overrides LISA_DATA_DIR).")
+    @click.option("--profile", default="", help="Named data-dir profile.")
+    @click.option("--overlays-dir", default="", help="User-authored overlays directory.")
+    @click.option("--thread-dir", default="", help="Thread log directory.")
+    @click.option("--no-thread", is_flag=True, default=False, help="Disable thread logging.")
+    @click.option("--session-context", default="", help="Markdown session plan file path.")
+    @click.option("--timezone", default="", help="IANA timezone.")
+    @click.option("--state-snapshot", default="", help="Local JSON snapshot to inject.")
+    @click.option("--streaming", default="", help="Streaming mode: none, stage, text, hybrid.")
+    @click.option("--host-log", default="", help="Stdlib host log file.")
+    @click.argument("args", nargs=-1, type=click.UNPROCESSED)
+    def _pack_cmd(  # noqa: PLR0917  # Click options mirror the shared runtime options.
+        args: tuple[str, ...],
+        log_level: str,
+        log: str,
+        no_log: bool,
+        data_dir: str,
+        profile: str,
+        overlays_dir: str,
+        thread_dir: str,
+        no_thread: bool,
+        session_context: str,
+        timezone: str,
+        state_snapshot: str,
+        streaming: str,
+        host_log: str,
+    ) -> None:
+        tokens = [name, *args]
+        # Longest-prefix match mirrors runtime dispatch order (a bare
+        # ``/retry`` must not shadow ``/retry-safe``). Prefixes arrive with
+        # their leading slash (``/stalls``); the dispatched command is
+        # rebuilt from the bare form.
+        best = ""
+        for spec in entry.specs:
+            prefix = spec.prefix.strip().rstrip("/")
+            bare_prefix = prefix.lstrip("/")
+            if bare_prefix and tokens[0].startswith(bare_prefix) and len(bare_prefix) > len(best):
+                best = bare_prefix
+        command = "/" + (best if best else name)
+        for token in args:
+            command += " " + token
+        _run_host_command(
+            command,
+            log_level=log_level,
+            log_path=log,
+            no_log=no_log,
+            data_dir=data_dir,
+            profile=profile,
+            overlays_dir=overlays_dir,
+            thread_dir=thread_dir,
+            no_thread=no_thread,
+            session_context=session_context,
+            timezone=timezone,
+            state_snapshot_path=state_snapshot,
+            streaming=streaming,
+            host_log_path=host_log,
+        )
+
+    return _pack_cmd
+
+
+class _LisaGroup(typer.core.TyperGroup):
+    """Typer group with unknown-command routing and dynamic pack commands.
+
+    Click itself owns the argv grammar here (no pre-Typer rewrites):
+
+    - Unknown first positional + ``LISA_PROMPT_UNKNOWN`` on → ``prompt``
+      (the remaining tokens become the one-shot message; the group-level
+      ``-r/-q`` hoist options carry the prompt-only flags).
+    - A first positional matching a pack-registered host command name
+      (``stalls``, ``retry``, ...) → a dynamically generated command that
+      dispatches to the pack's handler (one process, no model turn).
+    - A first positional starting with ``/`` → a usage error pointing at
+      the named command (``lisa /settings`` → ``try 'lisa settings'``).
+    """
+
+    def get_command(self, ctx: Any, cmd_name: str) -> Any:
+        if cmd_name.startswith("/"):
+            bare = cmd_name.lstrip("/") or None
+            if bare and (super().get_command(ctx, bare) is not None or bare in _pack_commands()):
+                raise typer.BadParameter(
+                    f"Slash commands are not subcommands. Try 'lisa {bare}'."
+                )
+            raise typer.BadParameter(
+                f"Slash commands are not subcommands. Try 'lisa {cmd_name}' "
+                "without the leading '/'."
+            )
+        cmd = super().get_command(ctx, cmd_name)
+        if cmd is not None:
+            return cmd
+        if cmd_name in _pack_commands():
+            return _make_pack_command(cmd_name)
+        return None
+
+    def resolve_command(self, ctx: Any, args: list[str]) -> tuple[str | None, Any, list[str]]:
+        cmd_name = args[0]
+        cmd = self.get_command(ctx, cmd_name)
+        if cmd is None and _prompt_unknown_active():
+            prompt_cmd = super().get_command(ctx, "prompt")
+            if prompt_cmd is not None:
+                return "prompt", prompt_cmd, list(args)
+        return super().resolve_command(ctx, args)
+
+
 app = typer.Typer(
+    cls=_LisaGroup,
     no_args_is_help=True,
     help="Run the Lisa framework terminal host.",
 )
@@ -211,12 +410,6 @@ _YIELD_UNRESOLVED_EXIT = 4
 # during a long glm-5.3:cloud generation surfaced as a 40-line uncaught
 # CancelledError traceback instead of a one-line abort notice).
 _ABORT_EXIT = 130
-
-# Env var enabling lazy routing: an unrecognized first positional is
-# redirected to `lisa prompt <args...>` so users can run `lisa continue` or
-# `lisa "do something else"` without typing `prompt`. Handled in pre-parse
-# before Typer sees argv.
-_PROMPT_UNKNOWN_ENV = "LISA_PROMPT_UNKNOWN"
 
 # Sentinel for --approve/--deny meaning "the (single) pending approval":
 # resolved to the concrete request id before dispatch via the approval
@@ -608,7 +801,36 @@ def _exit_restart_required() -> None:
 def _cli_callback(
     ctx: typer.Context,
     version: bool = _VERSION_OPTION,
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        "-r",
+        hidden=True,
+        help="With lazy prompt routing: hoist -r/--raw onto the injected prompt turn.",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        hidden=True,
+        help="With lazy prompt routing: hoist -q/--quiet onto the injected prompt turn.",
+    ),
+    no_stdin: bool = typer.Option(
+        False,
+        "--no-stdin",
+        hidden=True,
+        help="With lazy prompt routing: hoist --no-stdin onto the injected prompt turn.",
+    ),
 ) -> None:
+    # The group-level copies of the prompt-only flags exist so Click parses
+    # `lisa -r "fix it"` as [group flags, prompt] instead of dying on an
+    # unknown option; the values ride on this module-level slot for the
+    # prompt command to OR in (Typer commands cannot read click's
+    # thread-local context — see the hoist comment in ``_prompt_command``).
+    # They are hidden (not documented) — the documented home for these flags
+    # is `lisa prompt`.
+    _GROUP_HOIST.update(raw=raw, quiet=quiet, no_stdin=no_stdin)
+    ctx.obj = {"raw": raw, "quiet": quiet, "no_stdin": no_stdin}
     if version:
         console.print(f"lisa v{_get_version()}")
         raise typer.Exit()
@@ -1187,6 +1409,159 @@ def _last_command(
     console.print(Markdown(response_text))
 
 
+# ---------------------------------------------------------------------------
+# settings / tokens / debug — constant host-command verbs
+# ---------------------------------------------------------------------------
+
+
+def _render_markdown_response(response_text: str, *, title: str) -> None:
+    """Print a transport-neutral host-command reply as a Rich panel.
+
+    Non-tty output (pipes, redirects, CI) prints the raw text verbatim —
+    no Markdown re-render — so piped output stays machine-readable (the
+    same contract as PromptTransport raw mode).
+    """
+    if not console.is_terminal:
+        console.print(response_text, highlight=False, markup=False, soft_wrap=False)
+        return
+    from rich.markdown import Markdown  # noqa: PLC0415  # lazy: defers startup cost
+
+    console.print(Panel(Markdown(response_text), title=title, border_style="cyan"))
+
+
+@app.command("settings", help="Show the effective runtime settings (one-shot /settings).")
+def _settings_command(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "",
+    host_log: HostLogOption = "",
+) -> None:
+    """Render the effective runtime settings without a model turn."""
+    _dispatch_constant_command(
+        "/settings",
+        title="Settings",
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
+
+
+@app.command("tokens", help="Show session token usage and budget (one-shot /tokens).")
+def _tokens_command(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "",
+    host_log: HostLogOption = "",
+) -> None:
+    """Render token accounting without a model turn."""
+    _dispatch_constant_command(
+        "/tokens",
+        title="Tokens",
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
+
+
+@app.command(
+    "debug",
+    help=(
+        "Show the complete, unedited model input for a previous turn "
+        "(default: the last turn): `lisa debug [N]`."
+    ),
+)
+def _debug_command(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+    turn: str = typer.Argument(
+        "",
+        help="Optional turn number whose model input to render.",
+    ),
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "",
+    host_log: HostLogOption = "",
+) -> None:
+    """Render one turn's complete model input without a model turn."""
+    _dispatch_constant_command(
+        f"/debug {turn.strip()}".strip(),
+        title="Debug",
+        log_level=log_level,
+        log_path=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot_path=state_snapshot,
+        streaming=streaming,
+        host_log_path=host_log,
+    )
+
+
+def _dispatch_constant_command(command: str, *, title: str, **runtime_kwargs: Any) -> None:
+    """Run one constant host command through a fresh runtime and render it.
+
+    The command is one of the host's fixed admin commands (``/settings``,
+    ``/tokens``, ``/debug N``) — no user-controlled grammar, so dispatching
+    via ``handle_message`` costs nothing in parsing fidelity while keeping
+    the runtime's own bookkeeping (thread entry, turn log) intact.
+    """
+    runtime = _initialize_runtime_or_exit(**runtime_kwargs)
+    if runtime is None:
+        return
+    _restart, text = asyncio.run(_run_host_command_turn(runtime, command))
+    _render_markdown_response(text, title=title)
+
+
 McpIntrospection = tuple[dict[str, Any], dict[str, list[MCPToolSpec]]]
 """One MCP introspection result: ``(health, tools_by_server)``.
 
@@ -1563,13 +1938,22 @@ _RAW_CONTRACT = (
 )
 
 
-def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> str | None:
-    """Build the pre-armed decision command for a prompt turn, or None.
+class _PrearmedDecision(NamedTuple):
+    """One pre-armed approval decision parsed from prompt CLI flags."""
+
+    request_id: str
+    approve: bool
+    remember: str
+
+
+def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> _PrearmedDecision | None:
+    """Parse the pre-armed decision flags for a prompt turn, or None.
 
     ``--approve``/``--deny`` accept either a request id or, bare, the
-    sentinel "pending" (resolving to the single pending approval via the
-    host's recorded-owner identity). ``--remember <prefix>`` only applies
-    to approve; deny + remember is a usage error.
+    sentinel "pending" (an empty ``request_id`` here, resolved to the
+    single pending approval via the host's recorded-owner identity).
+    ``--remember <prefix>`` only applies to approve; deny + remember is a
+    usage error.
     """
     approve = approve.strip()
     deny = deny.strip()
@@ -1583,13 +1967,10 @@ def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> str | N
     if not approve and not deny:
         return None
     if approve:
-        target = approve if approve.lower() != _PENDING_APPROVAL_TARGET else ""
-        cmd = "/approve" + (f" {target}" if target else "")
-        if remember:
-            cmd += f" --remember {remember}"
-        return cmd
+        target = "" if approve.lower() == _PENDING_APPROVAL_TARGET else approve
+        return _PrearmedDecision(request_id=target, approve=True, remember=remember)
     target = deny if deny.lower() != _PENDING_APPROVAL_TARGET else ""
-    return "/deny" + (f" {target}" if target else "")
+    return _PrearmedDecision(request_id=target, approve=False, remember="")
 
 
 async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
@@ -1598,14 +1979,11 @@ async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bo
     Mirrors ``_run_prompt_with_teardown`` without transport rendering: the
     command path returns text (or a structured result) that this helper
     prints through the shared console. The MCP pool starts in this event
-    loop and closes in the same one (anyio same-loop contract). A bare
-    ``/approve`` / ``/deny`` (no id) resolves to the single pending
-    approval first — the "decide the thing that just stopped me" case.
+    loop and closes in the same one (anyio same-loop contract).
     """
     from runtime import NullTransport
     from runtime.handle_message import handle_message
 
-    command = await _resolve_pending_approval_target(runtime, command)
     try:
         await runtime.start()
         result = await handle_message(runtime, command, NullTransport())
@@ -1615,33 +1993,96 @@ async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bo
     return runtime.session.restart_required, text
 
 
-async def _resolve_pending_approval_target(runtime: HostRuntime, command: str) -> str:
-    """Resolve a bare ``/approve`` / ``/deny`` to the single pending id.
+async def _resolve_pending_request_id(runtime: HostRuntime) -> str:
+    """Return the single pending approval's id, or '' when ambiguous/none.
 
     The approval store is process-durable and identity-scoped, so a fresh
     prompt process sees the request a prior prompt run left pending. With
-    exactly one pending record the bare verb targets it; zero or multiple
-    pendings leave the command untouched so the host replies with its own
+    exactly one pending record the bare decision targets it; zero or
+    multiple pendings return '' so the typed core replies with its own
     diagnostic (usage/expired/ambiguous).
     """
-    verb, _, rest = command.partition(" ")
-    if verb not in {"/approve", "/deny"} or rest.strip():
-        return command
     service = getattr(runtime.services, "approval_service", None)
     if service is None or not hasattr(service, "list_pending"):
-        return command
+        return ""
     from runtime.approval import approval_identity
 
     try:
         pending = await service.list_pending(approval_identity(runtime))
     except Exception as exc:  # pylint: disable=broad-except
         logger.debug("prompt: pending-approval resolution failed: %s", exc)
-        return command
+        return ""
     if len(pending) == 1:
         request_id = pending[0].invocation.request_id
-        logger.info("prompt: resolved bare %s to pending %s", verb, request_id[:8])
-        return f"{verb} {request_id}"
-    return command
+        logger.info("prompt: resolved bare decision to pending %s", request_id[:8])
+        return request_id
+    return ""
+
+
+async def _decide_approval_turn(
+    runtime: HostRuntime,
+    *,
+    request_id: str,
+    approve: bool,
+    remember: str,
+) -> tuple[bool, str]:
+    """Decide one approval through the typed core, then close the pool.
+
+    Mirrors ``_run_host_command_turn``: no transport rendering — the
+    decision path returns text (or a structured continuation result) that
+    this helper prints through the shared console. A bare decision (empty
+    ``request_id``) resolves to the single pending approval first — the
+    "decide the thing that just stopped me" case.
+    """
+    if not request_id:
+        request_id = await _resolve_pending_request_id(runtime)
+    from runtime import NullTransport
+    from runtime.handle_message import decide_pending_approval
+
+    try:
+        await runtime.start()
+        result = await decide_pending_approval(
+            runtime,
+            request_id,
+            approve=approve,
+            # The CLI's --remember is a value flag (explicit prefix or
+            # absent): the default-prefix behavior belongs to the slash
+            # grammar, not here. No --remember means no rule write.
+            remember=remember or None,
+            remember_default=False,
+            transport=NullTransport(),
+        )
+    finally:
+        await runtime.aclose()
+    text = getattr(result, "text", "") or str(result)
+    return runtime.session.restart_required, text
+
+
+def _run_decision(
+    request_id: str,
+    *,
+    approve: bool,
+    remember: str,
+    **runtime_kwargs: Any,
+) -> None:
+    """Decide one pending approval through the typed core in a fresh runtime.
+
+    The CLI's runtime options are forwarded verbatim; the decision is a
+    value (id + direction + optional remember prefix), never a command
+    string, so no quoting round trip exists between the CLI and the host.
+    Prints the reply and applies the restart-required exit contract.
+    """
+    runtime = _initialize_runtime_or_exit(**runtime_kwargs)
+    if runtime is None:
+        return
+    restart_required, text = asyncio.run(
+        _decide_approval_turn(runtime, request_id=request_id, approve=approve, remember=remember)
+    )
+    if text:
+        console.print(text)
+    if restart_required:
+        _exit_restart_required()
+    raise typer.Exit(code=0)
 
 
 def _run_host_command(command: str, **runtime_kwargs: Any) -> None:
@@ -1649,13 +2090,13 @@ def _run_host_command(command: str, **runtime_kwargs: Any) -> None:
 
     The CLI's runtime options are forwarded verbatim; the command string is
     normalized to its slash form and dispatched via ``handle_message``
-    exactly as a persistent host would send it. This keeps policy writes and
-    approval decisions host-owned while bypassing the model-turn path. Prints
-    the reply and applies the restart-required exit contract when required.
+    exactly as a persistent host would send it. This keeps pack commands and
+    other host-admin replies host-owned while bypassing the model-turn path.
+    Prints the reply and applies the restart-required exit contract when
+    required.
     """
-    verb = command.partition(" ")[0]
-    if verb in {"approve", "deny"}:
-        command = f"/{command}"
+    if not command.startswith("/"):
+        command = "/" + command
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
@@ -1667,17 +2108,19 @@ def _run_host_command(command: str, **runtime_kwargs: Any) -> None:
     raise typer.Exit(code=0)
 
 
-def _run_policy_command(command: str, **runtime_kwargs: Any) -> None:
-    """Call the host policy API directly without starting MCP or a model turn."""
+def _run_policy_action(action: Callable[[HostRuntime], str], **runtime_kwargs: Any) -> None:
+    """Run one typed policy action against a fresh runtime.
+
+    ``action`` receives the runtime and returns the reply text — the typed
+    cores (:func:`set_policy_mode`, :func:`add_policy_rule`, ...) take
+    values, never command strings, so no quoting round trip exists between
+    the CLI flags and the policy write. The host owns the write.
+    """
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    from runtime.commands import (  # noqa: PLC0415  # lazy: avoids eager host import
-        handle_policy_command,
-    )
 
-    response = handle_policy_command(runtime, command, command)
-    console.print(response)
+    console.print(action(runtime))
     raise typer.Exit(code=0)
 
 
@@ -1715,27 +2158,52 @@ def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as C
         "host_log_path": host_log,
     }
     if ctx.invoked_subcommand is None:
-        _run_policy_command("/policy", **ctx.obj)
 
+        def _show_document(runtime: HostRuntime) -> str:
+            from runtime.commands import render_policy_document  # noqa: PLC0415
 
+            return render_policy_document(runtime)
+
+        _run_policy_action(_show_document, **ctx.obj)
 @policy_app.command("mode", help="Set the fallback approval mode: ask, trust, or plan.")
 def _policy_mode(ctx: typer.Context, mode: Literal["ask", "trust", "plan"]) -> None:
-    _run_policy_command(f"/policy mode {mode}", **ctx.obj)
+    def _set_mode(runtime: HostRuntime) -> str:
+        from runtime.commands import set_policy_mode  # noqa: PLC0415
+        from runtime.policy import PolicyMode  # noqa: PLC0415
+
+        return set_policy_mode(runtime, PolicyMode(mode))
+
+    _run_policy_action(_set_mode, **ctx.obj)
 
 
 @policy_app.command("bare", help="Toggle approval for unsandboxed execute actions.")
 def _policy_bare(ctx: typer.Context, setting: Literal["on", "off"]) -> None:
-    _run_policy_command(f"/policy bare {setting}", **ctx.obj)
+    def _set_bare(runtime: HostRuntime) -> str:
+        from runtime.commands import set_policy_bare  # noqa: PLC0415
+
+        return set_policy_bare(runtime, setting == "on")
+
+    _run_policy_action(_set_bare, **ctx.obj)
 
 
 @policy_rule_app.command("list", help="List allow, ask, and deny rules with remove addresses.")
 def _policy_rule_list(ctx: typer.Context) -> None:
-    _run_policy_command("/policy rule list", **ctx.obj)
+    def _list_rules(runtime: HostRuntime) -> str:
+        from runtime.commands import render_policy_rules  # noqa: PLC0415
+
+        return render_policy_rules(runtime)
+
+    _run_policy_action(_list_rules, **ctx.obj)
 
 
 @policy_rule_app.command("remove", help="Remove a rule by its list address, e.g. allow:1.")
 def _policy_rule_remove(ctx: typer.Context, address: str) -> None:
-    _run_policy_command(f"/policy rule remove {address}", **ctx.obj)
+    def _remove_rule(runtime: HostRuntime) -> str:
+        from runtime.commands import remove_policy_rule  # noqa: PLC0415
+
+        return remove_policy_rule(runtime, address)
+
+    _run_policy_action(_remove_rule, **ctx.obj)
 
 
 @policy_rule_app.command("add", help="Add an allow, ask, or deny rule.")
@@ -1749,18 +2217,21 @@ def _policy_rule_add(  # noqa: PLR0917  # Typer requires each rule matcher as a 
     when: str = typer.Option("", "--when", help="CEL expression; quote the whole expression."),
 ) -> None:
     """Parse policy matchers with Typer and pass their values to the host policy writer."""
-    parts = ["/policy", "rule", "add", rule_list]
-    for flag, value in (
-        ("--tool", tool),
-        ("--effect", effect),
-        ("--pack", pack),
-        ("--prefix", prefix),
-    ):
-        if value:
-            parts.extend((flag, shlex.quote(value)))
-    if when:
-        parts.extend(("--when", shlex.quote(when)))
-    _run_policy_command(" ".join(parts), **ctx.obj)
+
+    def _add_rule(runtime: HostRuntime) -> str:
+        from runtime.commands import add_policy_rule  # noqa: PLC0415
+
+        return add_policy_rule(
+            runtime,
+            rule_list,
+            tool=tool,
+            effect=effect,
+            pack=pack,
+            command_prefix=prefix,
+            when=when,
+        )
+
+    _run_policy_action(_add_rule, **ctx.obj)
 
 
 @app.command("approve", help="Approve one pending action without starting a model turn.")
@@ -1789,11 +2260,10 @@ def _approve_command(  # noqa: PLR0917  # Match shared runtime options used by o
     host_log: HostLogOption = "",
 ) -> None:
     target = "" if request_id.lower() == _PENDING_APPROVAL_TARGET else request_id
-    command = "/approve" + (f" {target}" if target else "")
-    if remember:
-        command += f" --remember {remember}"
-    _run_host_command(
-        command,
+    _run_decision(
+        target,
+        approve=True,
+        remember=remember,
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1831,9 +2301,10 @@ def _deny_command(  # noqa: PLR0917  # Match shared runtime options used by one-
     host_log: HostLogOption = "",
 ) -> None:
     target = "" if request_id.lower() == _PENDING_APPROVAL_TARGET else request_id
-    command = "/deny" + (f" {target}" if target else "")
-    _run_host_command(
-        command,
+    _run_decision(
+        target,
+        approve=False,
+        remember="",
         log_level=log_level,
         log_path=log,
         no_log=no_log,
@@ -1852,9 +2323,12 @@ def _deny_command(  # noqa: PLR0917  # Match shared runtime options used by one-
 
 @app.command(
     "run",
+    hidden=True,
     help=(
-        "Run one slash command (host admin or pack-defined). Takes the same "
-        "shared runtime options as other one-shot commands. The leading '/' "
+        "[DEPRECATED] Run one slash command (host admin or pack-defined). "
+        "Every host command now has a real subcommand (pack-registered ones "
+        "like `stalls`/`retry` are generated from the pack registry); this "
+        "escape hatch remains one release for compatibility. The leading '/' "
         "is optional. Quote multi-word arguments as one string; with multiple "
         "tokens they are re-quoted verbatim so the runtime sees the exact "
         "slash-command string."
@@ -1880,9 +2354,18 @@ def _run_command_command(  # noqa: PLR0917  # Match shared runtime options used 
     host_log: HostLogOption = "",
 ) -> None:
     """Dispatch one slash command to the runtime exactly as a persistent
-    host would, via ``handle_message`` and ``_run_prompt_host_command``. Used for
-    one-shot access to runtime slash commands that do not have a tailored
-    Typer shim. See the routing pre-parse for the ``/cmd`` form."""
+    host would, via ``handle_message`` and ``_run_host_command_turn``.
+
+    DEPRECATED: kept one release for compatibility. Every host admin verb
+    now has a tailored Typer command; pack-registered commands (``stalls``,
+    ``retry``, ...) resolve as dynamically generated subcommands. This
+    generic string escape hatch hides from help and will be removed once
+    scripts have migrated.
+    """
+    console.print(
+        "[yellow]`lisa run` is deprecated: host commands are real subcommands "
+        "now (`lisa settings`, `lisa stalls`, ...).[/yellow]"
+    )
     if not command:
         console.print("[red]No slash command given. Example: lisa run '/policy mode trust'[/red]")
         raise typer.Exit(code=2)
@@ -1961,6 +2444,19 @@ def _prompt_command(
     deny: PromptDenyOption = "",
     remember: PromptRememberOption = "",
 ) -> None:
+    # Group-level hoist: `lisa -r "fix it"` parses -r at group level (see
+    # _cli_callback) and lazy-routing lands here; OR the hoisted values in.
+    # Typer commands cannot reliably read click's thread-local context
+    # (get_current_context returns None inside a Typer command body), so
+    # the group callback records the hoisted flags on this module-level
+    # slot — one CLI process dispatches exactly one group callback before
+    # the command body runs.
+    group_obj = _GROUP_HOIST
+    raw = raw or bool(group_obj.get("raw"))
+    quiet = quiet or bool(group_obj.get("quiet"))
+    stdin = stdin and not bool(group_obj.get("no_stdin"))
+    quiet = quiet or bool(group_obj.get("quiet"))
+    stdin = stdin and not bool(group_obj.get("no_stdin"))
     # Pre-armed decisions are handled below; standalone approve/deny
     # commands are registered with Typer and never enter this function.
     payload = ""
@@ -1972,19 +2468,13 @@ def _prompt_command(
             raise typer.Exit(code=2) from exc
     # A pre-armed decision (--approve/--deny) carries no message and no
     # piped payload; it is consumed at the end of the turn.
-    decision_cmd = _prompt_prearmed_decision(approve, deny, remember)
-    if not message.strip() and not payload.strip() and decision_cmd is None:
+    decision = _prompt_prearmed_decision(approve, deny, remember)
+    if not message.strip() and not payload.strip() and decision is None:
         console.print(
             "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
         )
         raise typer.Exit(code=2)
     full_message = _compose_prompt_message(message, payload)
-    if decision_cmd is not None:
-        # Pre-arm: the decision rides ahead of the turn message so the host
-        # dispatches /approve|/deny FIRST (host-command dispatch runs before
-        # the model turn), then executes the turn with the approval now
-        # settled. --remember persists an allow rule for the decided prefix.
-        full_message = f"{decision_cmd}\n\n{full_message}" if full_message else decision_cmd
     if raw:
         full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
     runtime = _initialize_runtime_or_exit(
@@ -2014,6 +2504,7 @@ def _prompt_command(
                 raw=raw,
                 tool_detail=tool_detail,
                 streaming_mode=runtime.config.streaming.mode,
+                decision=decision,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -2049,8 +2540,15 @@ async def _run_prompt_with_teardown(
     raw: bool = False,
     tool_detail: int = 0,
     streaming_mode: str = "none",
+    decision: _PrearmedDecision | None = None,
 ) -> tuple[bool, PromptTransport]:
-    """Run one turn, then close the MCP pool.
+    """Run one turn (and any pre-armed decision), then close the MCP pool.
+
+    A pre-armed decision (``--approve``/``--deny``) is dispatched FIRST,
+    through the typed approval core — one dispatch, one value, no command
+    string — so the pending approval the prior run left behind is settled
+    before the turn runs with it. ``--remember`` persists an allow rule for
+    the decided prefix (default prefix when no explicit value is given).
 
     Returns ``(restart_required, transport)`` — the transport is returned so
     the caller can inspect post-turn state (``approval_unresolved``).
@@ -2058,22 +2556,14 @@ async def _run_prompt_with_teardown(
     In raw mode the transport console moves to stderr so activity output
     (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
     the response itself is written verbatim to stdout by the transport.
-
-    A message whose FIRST line is exactly ``/approve`` or ``/deny`` (the
-    ``--approve``/``--deny`` pre-arm prefix) is resolved against the
-    pending-approval store before the turn runs, so a bare
-    ``lisa prompt --approve pending 'continue'`` targets the one stopped
-    action without retyping its 32-hex id.
     """
-    from runtime.handle_message import handle_message
+    from runtime.handle_message import (  # noqa: PLC0415  # lazy: defers turn import cost
+        decide_pending_approval,
+        handle_message,
+    )
 
-    from hosts.cli.transport import PromptTransport
+    from hosts.cli.transport import PromptTransport  # noqa: PLC0415  # lazy: defers transport import
 
-    first_line, _, _rest = message.partition("\n")
-    if first_line.strip() in {"/approve", "/deny"}:
-        message = await _resolve_pending_approval_target(runtime, first_line.strip()) + (
-            "\n\n" + _rest if _rest.strip() else ""
-        )
     transport_console: Console = Console(stderr=True) if raw else console
     transport = PromptTransport(
         console=transport_console,
@@ -2087,7 +2577,29 @@ async def _run_prompt_with_teardown(
     transport.start_turn(message)
     try:
         await runtime.start()
-        await handle_message(runtime, message, transport)
+        if decision is not None:
+            request_id = decision.request_id
+            if not request_id:
+                request_id = await _resolve_pending_request_id(runtime)
+            result = await decide_pending_approval(
+                runtime,
+                request_id,
+                approve=decision.approve,
+                # --remember is a value flag here: explicit prefix or none.
+                remember=decision.remember or None,
+                remember_default=False,
+                transport=transport,
+            )
+            if not message:
+                # Decision-only run: surface the decision's reply text and
+                # stop — there is no turn to run.
+                decision_text = getattr(result, "text", "") or str(result)
+                transport.stop_activity()
+                await runtime.aclose()
+                await transport.on_response(decision_text)
+                return runtime.session.restart_required, transport
+        if message:
+            await handle_message(runtime, message, transport)
     finally:
         transport.stop_activity()
         await runtime.aclose()
@@ -2176,112 +2688,9 @@ def _intake_command(
     )
 
 
-# ---------------------------------------------------------------------------
-# main entry point
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# prompt-unknown pre-parse routing
-# ---------------------------------------------------------------------------
-
-_TRUTHY = {"1", "true", "yes", "on"}
-
-# Prompt-only flags: valid on the `prompt` subcommand but not at group
-# level. When prompt-unknown routing injects `prompt`, these are hoisted
-# after it so Typer parses them as prompt options
-# (`lisa -r "fix it"` -> `lisa prompt -r "fix it"`).
-_PROMPT_ONLY_FLAGS = frozenset(
-    {"-r", "--raw", "-q", "--quiet", "--stdin", "--no-stdin", "-v", "--tool-detail"}
-)
-
-
-def _prompt_unknown_active() -> bool:
-    """True if prompt-unknown routing is on (LISA_PROMPT_UNKNOWN)."""
-    return os.getenv(_PROMPT_UNKNOWN_ENV, "").strip().lower() in _TRUTHY
-
-
-def _known_command_names() -> set[str]:
-    """Names of registered Typer commands/groups plus the auto `help`."""
-    names = {cmd.name for cmd in app.registered_commands if cmd.name}
-    names.update(group.name for group in app.registered_groups if group.name)
-    names.add("help")
-    return names
-
-
-def _first_positional_index(args: list[str]) -> int:
-    """Index of the first positional (non-option) token.
-
-    The group callback takes no value-consuming options (only ``--version``),
-    so every ``--flag`` token is standalone; a ``--flag=value`` form carries
-    its value inline. Returns -1 when there is no positional token
-    (e.g. bare `lisa` or only options).
-    """
-    i = 0
-    n = len(args)
-    while i < n:
-        tok = args[i]
-        if tok == "--":
-            return i + 1 if i + 1 < n else -1
-        if tok.startswith("-") and tok != "-":
-            i += 1  # bool flag, inline-value flag, or unknown flag
-            continue
-        return i
-    return -1
-
-
-def _maybe_route_to_prompt(args: list[str]) -> list[str]:
-    """Redirect an unrecognized first positional to the `prompt` subcommand.
-
-    When prompt-unknown routing is active (``LISA_PROMPT_UNKNOWN=1``) and
-    the first positional token is not a known subcommand, inject ``prompt``
-    before it so the trailing tokens become the one-shot message::
-
-        lisa continue                       -> lisa prompt continue
-        lisa "do something else"             -> lisa prompt "do something else"
-        lisa -r "fix it"                     -> lisa prompt -r "fix it"
-
-    Prompt-only flags (``-r/--raw``, ``-q/--quiet``, ``--stdin/--no-stdin``)
-    appearing before the positional are hoisted to just after the injected
-    ``prompt`` token — Typer rejects them as unknown group options otherwise.
-    Tokens after a bare ``--`` are positional content and are never hoisted.
-
-    Known subcommands (e.g. `verify`, `pack`) are never rerouted, so the
-    env var is safe to leave on.
-
-    A first positional that begins with ``/`` (but is not the bare token
-    ``/``) is a runtime slash command and is routed to the ``run``
-    subcommand instead of ``prompt``. This is unconditional — it applies
-    whether or not prompt-unknown routing is active. Prompt-only flags
-    before the positional have no meaning on ``run`` and are dropped
-    (consistent with how unknown flags are handled today).
-
-        lisa /policy mode trust        -> lisa run /policy mode trust
-        lisa /models show              -> lisa run /models show
-    """
-    idx = _first_positional_index(args)
-    if idx >= 0 and args[idx].startswith("/") and args[idx] != "/":
-        head = [a for a in args[:idx] if a not in _PROMPT_ONLY_FLAGS]
-        return [*head, "run", *args[idx:]]
-    if not _prompt_unknown_active():
-        return args
-    if idx < 0:
-        return args
-    if args[idx] in _known_command_names():
-        return args
-    head = args[:idx]
-    # A bare `--` terminates option parsing: tokens after it are positional
-    # content, never flags, so only hoist prompt-only flags before it.
-    sep = head.index("--") if "--" in head else len(head)
-    hoisted = [a for a in head[:sep] if a in _PROMPT_ONLY_FLAGS]
-    if hoisted:
-        kept = [a for a in head[:sep] if a not in _PROMPT_ONLY_FLAGS]
-        return [*kept, *head[sep:], "prompt", *hoisted, *args[idx:]]
-    return [*args[:idx], "prompt", *args[idx:]]
-
-
 def main() -> None:
     """CLI entry point for the Lisa terminal host."""
-    app(args=_maybe_route_to_prompt(list(sys.argv[1:])))
+    app(args=list(sys.argv[1:]))
 
 
 if __name__ == "__main__":

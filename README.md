@@ -81,8 +81,11 @@ lisa deny <request-id>
 
 (A bare `lisa approve` with no id resolves to the single pending request.
 A pre-armed decision also works in one shot:
-`lisa prompt --approve <request-id> "continue the task"` dispatches the approval
-first, then runs the turn.)
+`lisa prompt --approve <request-id> "continue the task"` dispatches the
+approval first — its own typed dispatch to the approval core — then runs the
+turn message as a second dispatch on the same runtime. `--deny <id>` works
+the same way; both accept bare `pending` to target the single pending
+request.)
 
 A model yield — the turn ends with the model asking you a question instead of
 producing a result — is the same contract: the question prints to stderr, stdout
@@ -112,37 +115,38 @@ models · tokens · cost).
 Non-tty output (pipes, redirects, CI) never renders any of it — just the
 completed event lines and the final answer.
 
-### Slash commands (`lisa run` and `lisa /...`)
+### Host commands (real subcommands — no slash grammar at the CLI)
 
-Many host operations are runtime *slash commands* — `/models`, `/policy`,
-`/approve`, `/settings`, `/tokens`, `/modes`, `/pack`, `/intake`, and any
-defined by installed packs. The CLI has dedicated subcommands for the most
-common ones (`lisa models apply`, `lisa policy rule add ...`, `lisa approve
-<id>`); those shims parse typed flags locally and hand the runtime the
-equivalent slash form.
-
-For everything else, the generic escape hatch runs any slash command
-verbatim — with no separate subcommand and no drift from the host grammar:
+Host operations are typed Typer commands, full stop. The CLI parses each
+flag once and passes values across the host seam — no slash-command string
+is ever synthesized or re-parsed, and a CEL `--when` expression arrives
+verbatim (no quoting contract):
 
 ```bash
-lisa run '/settings'
-lisa /settings                         # same thing: the `/` prefix routes to run
-lisa run models discover --force       # leading `/` is optional, tokens re-quoted
-lisa /policy mode trust                # multi-word commands work in either form
+lisa settings | tokens | modes | operations | tools    # one-shot admin views
+lisa debug [N] | last [N]                              # turn inspection
+lisa models show | discover --force | apply
+lisa pack list | install <spec> | uninstall <pkg> | update [--all]
+lisa policy | policy mode trust | policy bare off
+lisa policy rule list | add allow --when '<CEL>' | remove allow:1
+lisa approve <id> [--remember <prefix>] | deny <id>
+lisa mcp [<server>] | verify | intake
 ```
 
-Notes:
+Pack-registered host commands resolve as **dynamically generated
+subcommands** (real `--help`, real shell completion, same runtime options)
+— the recovery pack's `/stalls`, `/retry`, `/resume` are simply:
 
-- Exactly one argument? It is passed through unchanged, so quote multi-word
-  commands and embedded options as one string. Multiple arguments are joined
-  with `shlex.quote` so the runtime sees the exact slash command.
-- Runtime option flags (`--data-dir`, `--profile`, `--log-level`, ...) sit
-  between `run` and the command or ahead of `/`.
-- Prompt-only flags (`-r`, `-q`, `-v`, `--stdin`) and unknown pre-positional
-  flags are *not* routed to `run` — they are dropped before the slash command
-  runs. (`lisa -r /settings` is a usage error; the flag has no meaning there.)
-- The bare token `/` by itself is not routed — it's a malformed command and
-  surfaces a usage error.
+```bash
+lisa stalls
+lisa retry <id>
+lisa resume
+```
+
+A leading `/` (a runtime slash command) is a friendly usage error pointing
+at the named subcommand — `lisa /settings` suggests `lisa settings`.
+The `lisa run '<slash>'` escape hatch is **deprecated** (hidden) and will
+be removed after one release.
 
 ### Approvals
 
@@ -253,12 +257,14 @@ the `prompt` message, so you can skip typing `prompt` for ad-hoc one-shots:
 LISA_PROMPT_UNKNOWN=1 lisa "do something"
 ```
 
-Registered subcommands (`verify`, `pack`, `models`, …) are never rerouted,
-so the env var is safe to leave on. Runtime options belong to each
-subcommand (`lisa prompt --log-level debug …`). Prompt-only flags
-(`-r/--raw`, `-q/--quiet`, `--stdin/--no-stdin`) appearing before the
-positional are hoisted after the injected `prompt` token, so
-`lisa -r "fix it"` parses as `lisa prompt -r "fix it"`.
+Routing is Click's own command resolution (a custom Typer group resolves
+unknowns) — no argv rewriting happens before the parser. Registered
+subcommands (`verify`, `pack`, `models`, …) and generated pack commands
+(`stalls`, `retry`, …) are never rerouted, so the env var is safe to leave
+on. Runtime options belong to each subcommand (`lisa prompt --log-level
+debug …`). Prompt-only flags (`-r/--raw`, `-q/--quiet`, `--no-stdin`)
+appearing before the positional parse at group level and ride onto the
+injected turn, so `lisa -r "fix it"` behaves as `lisa prompt -r "fix it"`.
 
 ### Profiles (`--profile`, `LISA_PROFILE`)
 
