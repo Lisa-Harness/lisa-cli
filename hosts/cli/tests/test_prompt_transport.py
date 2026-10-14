@@ -19,7 +19,7 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 
-from hosts.cli.transport import PromptTransport
+from hosts.cli.transport import _TOOL_BOX_MAX_LINES, PromptTransport
 
 
 def _make_transport() -> tuple[PromptTransport, io.StringIO]:
@@ -503,6 +503,150 @@ async def test_box_clears_for_final_rerender() -> None:
     # once from the box and once from on_response.
     assert rec.count("streamed tail content") == 1 or "Title" in rec
     assert "Response · claude" in rec
+
+
+# ── Bounded in-flight tool-output box (tty) ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_tool_output_stages_into_box_on_tty() -> None:
+    """On a tty streamed lines stage into the bounded box, not scrollback."""
+    transport, console = _make_tty_transport()
+    transport.start_turn("hi")
+    await transport.on_stage(
+        "tool_dispatch",
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "stream_output": True,
+            "arguments": {"command": "seq 3"},
+        },
+    )
+    await transport.on_stage("tool_output", {"text": "one\ntwo\nthree", "stream": "stdout"})
+    assert transport._tool_output_lines == ["one", "two", "three"]
+    box = transport._tool_box_renderable()
+    assert box is not None
+    options = transport.console.options
+    options.width = options.max_width = 90
+    rendered = transport.console.render_lines(box, options, pad=False)
+    plain = "\n".join("".join(seg.text for seg in line) for line in rendered)
+    assert "one" in plain and "three" in plain
+    # The completion row closes the box; the ⎿ summary carries the shape.
+    await transport.on_stage(
+        "tool_dispatch_complete", {"tool": "bash_run", "ok": True, "duration_ms": 9}
+    )
+    assert transport._tool_output_lines == []
+    out = console.export_text()
+    assert "⎿ 3 lines" in out
+    # Succeeded tool: staged lines never landed in scrollback.
+    assert "│ one" not in out
+
+
+@pytest.mark.asyncio
+async def test_tool_output_box_tail_window_bounded() -> None:
+    """The box keeps only the tail; the title reports the elided head."""
+    transport, _ = _make_tty_transport()
+    transport.start_turn("hi")
+    await transport.on_stage(
+        "tool_dispatch",
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "stream_output": True,
+            "arguments": {"command": "yes"},
+        },
+    )
+    for i in range(40):
+        await transport.on_stage("tool_output", {"text": f"line {i}", "stream": "stdout"})
+    assert len(transport._tool_output_lines) == _TOOL_BOX_MAX_LINES
+    assert transport._tool_output_lines[-1] == "line 39"
+    assert "line 0" not in transport._tool_output_lines
+    box = transport._tool_box_renderable()
+    assert box is not None
+    options = transport.console.options
+    options.width = options.max_width = 90
+    rendered = transport.console.render_lines(box, options, pad=False)
+    plain = "\n".join("".join(seg.text for seg in line) for line in rendered)
+    assert "+28 lines" in plain  # 40 - 12 staged
+
+
+@pytest.mark.asyncio
+async def test_tool_output_failure_flushes_tail_to_scrollback() -> None:
+    """A ✗ completion flushes the staged tail so error context survives."""
+    transport, console = _make_tty_transport()
+    transport.start_turn("hi")
+    await transport.on_stage(
+        "tool_dispatch",
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "stream_output": True,
+            "arguments": {"command": "failing"},
+        },
+    )
+    await transport.on_stage("tool_output", {"text": "boom", "stream": "stdout"})
+    await transport.on_stage(
+        "tool_dispatch_complete", {"tool": "bash_run", "ok": False, "duration_ms": 12}
+    )
+    out = console.export_text()
+    assert "│ boom" in out
+    assert transport._tool_output_lines == []
+
+
+@pytest.mark.asyncio
+async def test_tool_output_prints_to_scrollback_on_non_tty() -> None:
+    """Non-tty consoles keep the legacy transcript: every line prints."""
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "tool_dispatch",
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "stream_output": True,
+            "arguments": {"command": "seq 3"},
+        },
+    )
+    await transport.on_stage("tool_output", {"text": "hello\nworld", "stream": "stdout"})
+    out = buffer.getvalue()
+    assert "│ hello" in out
+    assert "│ world" in out
+    assert transport._tool_output_lines == []
+
+
+@pytest.mark.asyncio
+async def test_tool_output_box_stderr_lines_prefixed() -> None:
+    """Staged stderr lines keep the [stderr] marker inside the box."""
+    transport, _ = _make_tty_transport()
+    transport.start_turn("hi")
+    await transport.on_stage(
+        "tool_dispatch",
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "stream_output": True,
+            "arguments": {"command": "sh -c 'echo err >&2'"},
+        },
+    )
+    await transport.on_stage("tool_output", {"text": "err", "stream": "stderr"})
+    assert transport._tool_output_lines == ["[stderr] err"]
+
+
+@pytest.mark.asyncio
+async def test_tool_output_box_suppressed_when_quiet() -> None:
+    """Quiet mode drops streamed lines entirely — box and scrollback."""
+    transport, console = _make_tty_transport(quiet=True)
+    await transport.on_stage(
+        "tool_dispatch",
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "stream_output": True,
+            "arguments": {"command": "seq 3"},
+        },
+    )
+    await transport.on_stage("tool_output", {"text": "noisy", "stream": "stdout"})
+    assert transport._tool_output_lines == []
+    assert "noisy" not in console.export_text()
 
 
 def test_thinking_meter_and_iteration_on_status_line() -> None:

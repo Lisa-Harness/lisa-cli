@@ -17,6 +17,14 @@ so the footer reports a single total (the turn/session split collapses).
 Non-tty consoles (``console.is_terminal`` False) skip the spinner entirely
 and emit only the completed-event lines — safe under ``| grep``.
 
+Streamed tool output (``stream_output`` tools, e.g. bash_run) follows the
+same tty split: non-tty consoles print every streamed line to scrollback as
+it arrives (the legacy transcript, safe under tee); on a tty the in-flight
+lines stage into a bounded tail box inside the activity display (older
+lines age out, the title flags how much was elided) so a churning command
+never floods the screen — the completion row's ``⎿ N lines`` summary
+carries the shape, and a failed tool flushes the tail for error context.
+
 Raw mode (``raw=True``) writes the response verbatim to raw stdout — no
 Rule header, no Markdown re-render — so redirected/piped output stays
 machine-readable; all activity output lives on the transport console
@@ -112,6 +120,16 @@ _STREAM_BOX_MIN_WIDTH = 60
 #: Characters below which the stream box renders bare (no rounded border)
 #: to keep the activity display light during very short generations.
 _STREAM_BOX_BORDER_CHARS = 240
+
+#: Bounded in-flight tool-output window (tty): streamed command lines held
+#: inside the activity display while the tool runs, same tail-window shape
+#: as the model stream box. Only the tail is kept; on completion the row's
+#: ``⎿ N lines`` summary reports the shape (a ✗ flushes the tail to
+#: scrollback for error context).
+_TOOL_BOX_MAX_LINES = 12
+#: Minimum terminal width for the tool-output box (below it, lines print
+#: to scrollback as before — narrow consoles keep the plain transcript).
+_TOOL_BOX_MIN_WIDTH = 60
 
 
 #: Minimum distinct samples before a velocity estimate is trusted.
@@ -344,24 +362,36 @@ class PromptTransport:
         self._stream_reasoning_buf: str = ""
         self._iteration_current: int = 0
         self._iteration_max: int = 0
+        # ── Bounded in-flight tool-output window (tty) ────────────
+        # Tail of the in-flight tool's streamed lines. On a tty the lines
+        # render inside the activity display (bounded, so a churning
+        # command never floods scrollback); non-tty consoles print each
+        # line to scrollback as it arrives — the legacy transcript.
+        self._tool_output_lines: list[str] = []
         #: Pre-first-event label shown on the activity line while the
         #: runtime boots (profile/manifest/MCP warmup) — the window that
         #: otherwise reads as a bare spinner. Cleared on the first stage.
         self._phase_label: str = "starting runtime"
         # ── Stream velocity (observable, not manifest-trusted) ──────
-        # The manifest ``reasoning_model`` flag lies for some providers
-        # (glm-5.3-family bills reasoning without flagging it), so
-        # "reasoning in flight" is derived from what actually arrives:
-        # any non-empty reasoning delta arms the meter for the call.
-        self._reasoning_seen: bool = False
-        # Rolling velocity samples: (perf_counter, total_stream_chars at
-        # that moment). Pruned to the window on each read; chars/s =
-        # (last - first) / span across the window.
-        self._velocity_samples: list[tuple[float, int]] = []
+        self._init_velocity_state()
         # Wall clock of the most recent delta (answer or reasoning) of the
         # in-flight model call; 0 before the first delta of a call. Ages
         # into the stall segment below when a generation goes quiet.
         self._last_delta_perf: float = 0.0
+
+    def _init_velocity_state(self) -> None:
+        """Initialize the velocity-sampling state (one statement block).
+
+        The manifest ``reasoning_model`` flag lies for some providers
+        (glm-5.3-family bills reasoning without flagging it), so
+        "reasoning in flight" is derived from what actually arrives:
+        any non-empty reasoning delta arms the meter for the call
+        (``_reasoning_seen``). Rolling velocity samples are
+        ``(perf_counter, total_stream_chars)`` pairs; chars/s =
+        (last - first) / span across the window, pruned per read.
+        """
+        self._reasoning_seen: bool = False
+        self._velocity_samples: list[tuple[float, int]] = []
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: echo the command, arm the activity line.
@@ -440,6 +470,7 @@ class PromptTransport:
         self._stream_answer_buf = ""
         self._stream_answer_chars = 0
         self._stream_reasoning_buf = ""
+        self._tool_output_lines = []
         self._turn_started_perf = perf_counter()
         is_dispatch = stage == "dispatch"
         self._thinking_spinner = "dots2" if is_dispatch else "dots"
@@ -739,13 +770,17 @@ class PromptTransport:
             self._last_tool_data = data
             self._last_tool_streaming = bool(data.get("stream_output"))
             self._last_tool_output_lines = 0
+            self._tool_output_lines = []
             if self.tool_detail >= _TOOL_DETAIL_FULL:
                 self._print_detail_arguments(data)
             return
         if label == "tool_output":
-            # Prompt mode has no Live transcript region — streamed lines print
-            # to real scrollback as they arrive (piped runs keep them under
-            # tee/grep; quiet mode drops them).
+            # Prompt mode has no Live transcript region — streamed lines
+            # either print to real scrollback as they arrive (piped runs
+            # keep them under tee/grep) or, on a tty, stage into the
+            # bounded in-flight box inside the activity display so a
+            # churning command never floods scrollback. Quiet mode drops
+            # them either way.
             text = str(data.get("text") or "")
             stream_label = str(data.get("stream") or "stdout")
             if text and not self.quiet:
@@ -753,7 +788,10 @@ class PromptTransport:
                     line = raw_line.rstrip()
                     if line:
                         self._last_tool_output_lines += 1
-                        self._print_stream_line(line, stream=stream_label)
+                        if self._tool_box_active():
+                            self._stage_tool_box_line(line, stream=stream_label)
+                        else:
+                            self._print_stream_line(line, stream=stream_label)
             return
         if label == "tool_dispatch_complete":
             self._print_completion_row(data)
@@ -767,6 +805,15 @@ class PromptTransport:
             self._tool_ok_count += 1
         elif status == "error":
             self._tool_error_count += 1
+        # The in-flight tool-output box closes with the row: a succeeded tool
+        # discards its window (the ``⎿ N lines`` summary reports the shape),
+        # a failed one flushes the tail to scrollback so the operator still
+        # sees what the command printed around the failure.
+        staged = self._tool_output_lines
+        self._tool_output_lines = []
+        if staged and status == "error":
+            for line in staged[-_TOOL_BOX_MAX_LINES:]:
+                self._print_stream_line(line)
         glyph = _TOOL_STATUS_GLYPH.get(status, _TOOL_STATUS_GLYPH[""])
         row_data = self._last_tool_data or data
         summary = self._result_shape_summary(row_data, data)
@@ -914,6 +961,55 @@ class PromptTransport:
             with contextlib.suppress(Exception):
                 self._activity.update(self._activity_renderable())
 
+    # ── Bounded in-flight tool-output box (tty) ─────────────────────
+
+    def _tool_box_active(self) -> bool:
+        """Whether streamed tool output stages into the bounded box.
+
+        Gated on: tty, not quiet, no Live-less degenerate console, and a
+        wide-enough width. Non-tty consoles (piped runs, tests) print each
+        line to scrollback as it arrives — the legacy transcript contract.
+        """
+        return (
+            not self.quiet
+            and self.console.is_terminal
+            and (self.console.size.width or 0) >= _TOOL_BOX_MIN_WIDTH
+        )
+
+    def _stage_tool_box_line(self, line: str, *, stream: str = "stdout") -> None:
+        """Stage one streamed tool-output line into the bounded window.
+
+        The list holds only the tail window (older lines age out); the
+        ``_last_tool_output_lines`` counter keeps the true line count so
+        the box title can report how much was elided.
+        """
+        if stream == "stderr" and not line.startswith("[stderr]"):
+            line = f"[stderr] {line}"
+        self._tool_output_lines.append(line)
+        if len(self._tool_output_lines) > _TOOL_BOX_MAX_LINES:
+            del self._tool_output_lines[:-_TOOL_BOX_MAX_LINES]
+
+    def _tool_box_renderable(self) -> RenderableType | None:
+        """Render the staged in-flight tool output as a bordered tail window.
+
+        The title flags elided head lines so the operator knows the window
+        is a tail, not the whole output.
+        """
+        lines = self._tool_output_lines
+        if not lines:
+            return None
+        title = "output"
+        elided = self._last_tool_output_lines - len(lines)
+        if elided > 0:
+            title = f"output · +{elided} lines"
+        return Panel(
+            Text("\n".join(lines), style=STYLE_STREAM_BOX),
+            title=title,
+            title_align="left",
+            border_style=STYLE_STREAM_BOX_BORDER,
+            padding=(0, 1),
+        )
+
     # ── Bounded stream box (thinking/answer tail window) ────────────
 
     def _stream_box_active(self) -> bool:
@@ -1057,9 +1153,17 @@ class PromptTransport:
         transport = self
         width = transport.console.size.width or transport._ACTIVITY_WIDTH
         line = transport._status_line(width)
+        boxes: list[RenderableType] = []
+        tool_box = transport._tool_box_renderable()
+        if tool_box is not None:
+            boxes.append(tool_box)
         box = transport._stream_box_renderable() if transport._stream_box_active() else None
         if box is not None:
-            return Group(line, box)
+            boxes.append(box)
+        if len(boxes) == 1:
+            return Group(line, boxes[0])
+        if boxes:
+            return Group(line, *boxes)
         return line
 
     def _status_line(self, width: int) -> _TrailingSpinner:
