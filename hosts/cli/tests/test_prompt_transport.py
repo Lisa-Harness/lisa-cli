@@ -144,9 +144,62 @@ async def test_footer_is_single_compact_line() -> None:
     assert "1 model" in footer
     assert "1 tool" in footer
     assert "4.1k tok" in footer
-    # A prompt run collapses the REPL-era turn/session split: exactly one token figure.
+    # A prompt run collapses the REPL-era turn/token split: exactly one token
+    # figure. The host never stamps a turn index on tool-only payloads, so a
+    # run with no model_call stage renders no turn segment.
     assert "session" not in footer
     assert "turn" not in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_and_response_rule_carry_turn_number() -> None:
+    """The host-stamped turn index renders on the ⚡ footer and Response rule.
+
+    The number is the global thread turn index (``turn_index`` on the
+    ``model_call`` stage payload) — the same number stamped on the thread
+    entry, addressable with ``lisa last N`` / ``lisa debug N``.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {"model_id": "llama3.2", "provider": "ollama", "mode_id": "ops", "turn_index": 41},
+    )
+    await transport.on_stage("model_call_complete", {"duration_ms": 340, "total_tokens": 4100})
+    await transport.on_response("the answer")
+    out = buffer.getvalue()
+    footer = next(ln for ln in out.splitlines() if ln.strip().startswith("⚡"))
+    assert "turn 41" in footer
+    assert "Response · llama3.2 · turn 41" in out
+
+
+@pytest.mark.asyncio
+async def test_turn_zero_renders_on_footer_and_rule() -> None:
+    """A genuine ``turn 0`` (first turn on a fresh thread) renders."""
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {"model_id": "m", "provider": "ollama", "mode_id": "default", "turn_index": 0},
+    )
+    await transport.on_stage("model_call_complete", {"duration_ms": 10, "total_tokens": 100})
+    await transport.on_response("answer")
+    out = buffer.getvalue()
+    footer = next(ln for ln in out.splitlines() if ln.strip().startswith("⚡"))
+    assert "turn 0" in footer
+    assert "Response · m · turn 0" in out
+
+
+@pytest.mark.asyncio
+async def test_turn_number_absent_yields_no_turn_segments() -> None:
+    """No ``turn_index`` in stage payloads = no turn output (legacy shape)."""
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "model_call", {"model_id": "llama3.2", "provider": "ollama", "mode_id": "ops"}
+    )
+    await transport.on_stage("model_call_complete", {"duration_ms": 340, "total_tokens": 4100})
+    await transport.on_response("answer")
+    out = buffer.getvalue()
+    assert "turn" not in out
+    assert "Response · llama3.2" in out
 
 
 @pytest.mark.asyncio
@@ -660,6 +713,23 @@ def test_thinking_meter_and_iteration_on_status_line() -> None:
     line = transport._status_line(100).render(1.0)
     assert "thinking 4.2k" in line.plain
     assert "iter 2/12" in line.plain
+
+
+def test_turn_number_leads_status_line() -> None:
+    """The captured turn index leads the in-flight status line."""
+    transport, _ = _make_tty_transport()
+    transport._turn_number = 41
+    transport._model_call_count = 1
+    line = transport._status_line(100).render(1.0).plain
+    assert line.startswith("turn 41 · ")
+    assert "turn 41" in line
+
+
+def test_turn_number_absent_leaves_status_line_unchanged() -> None:
+    """Unknown turn (-1) renders no turn segment on the status line."""
+    transport, _ = _make_tty_transport()
+    transport._model_call_count = 1
+    assert "turn" not in transport._status_line(100).render(1.0).plain
 
 
 def test_reasoning_spinner_distinct_during_model_call() -> None:

@@ -97,18 +97,21 @@ impossible, re-run with the missing information included in the prompt.
 ### Live activity display
 
 On a tty, `prompt` keeps the turn visible while the model works: a one-line
-status (mode · model · in-flight tool · thinking size · iteration · tool
-budget · elapsed) with a trailing spinner, plus a bounded stream box that
-scrolls only the tail of the model's live output — so long generations show
-motion without pushing prior detail up the scrollback. Reasoning-model calls
-get a calmer spinner and a live `thinking Nk` meter. Streamed tool output
-(e.g. a bash command's stdout) renders in its own bounded box — the tail of
-the in-flight output, with elided-line counts in the title — instead of
-printing every line to scrollback; a failed tool flushes the tail so error
-context survives, and piped/non-tty runs keep the full per-line transcript.
-The final answer always re-renders once with full Markdown formatting under
-a `Response · model` rule, followed by the `⚡` footer (time · tools ·
-models · tokens · cost).
+status (turn · mode · model · in-flight tool · thinking size · iteration ·
+tool budget · elapsed) with a trailing spinner, plus a bounded stream box
+that scrolls only the tail of the model's live output — so long generations
+show motion without pushing prior detail up the scrollback. Reasoning-model
+calls get a calmer spinner and a live `thinking Nk` meter. Streamed tool
+output (e.g. a bash command's stdout) renders in its own bounded box — the
+tail of the in-flight output, with elided-line counts in the title — instead
+of printing every line to scrollback; a failed tool flushes the tail so
+error context survives, and piped/non-tty runs keep the full per-line
+transcript. The final answer always re-renders once with full Markdown
+formatting under a `Response · model · turn N` rule, followed by the `⚡`
+footer (time · turn · tools · models · tokens · cost). The `turn N` figure
+is the thread's global turn index — the same number stamped on the thread
+entry — so a result can be replayed with `lisa last N` or inspected with
+`lisa debug N` without counting from the top.
 
 `--streaming` controls what the box shows: `none` (spinner only), `stage`,
 `text` (the forming answer), or `hybrid` (the model's thinking, default).

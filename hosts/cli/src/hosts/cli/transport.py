@@ -322,6 +322,13 @@ class PromptTransport:
         self._current_mode: str = ""
         self._status_current_model: str = ""
         self._status_model_provider: str = ""
+        # Global thread turn number of the turn being rendered, stamped by
+        # the host on the ``model_call`` stage payload (``turn_index``).
+        # Rendered on the Response rule and the ⚡ footer; -1 = unknown. A
+        # genuine ``turn 0`` (fresh thread) is valid and renders. Not reset
+        # in ``start_thinking``: a pre-armed-decision run dispatches a second
+        # message on the same transport and each capture replaces it.
+        self._turn_number: int = -1
         self._status_turn_tokens: int = 0
         self._status_prompt_tokens: int = 0
         self._status_completion_tokens: int = 0
@@ -374,10 +381,6 @@ class PromptTransport:
         self._phase_label: str = "starting runtime"
         # ── Stream velocity (observable, not manifest-trusted) ──────
         self._init_velocity_state()
-        # Wall clock of the most recent delta (answer or reasoning) of the
-        # in-flight model call; 0 before the first delta of a call. Ages
-        # into the stall segment below when a generation goes quiet.
-        self._last_delta_perf: float = 0.0
 
     def _init_velocity_state(self) -> None:
         """Initialize the velocity-sampling state (one statement block).
@@ -392,6 +395,11 @@ class PromptTransport:
         """
         self._reasoning_seen: bool = False
         self._velocity_samples: list[tuple[float, int]] = []
+        # Wall clock of the most recent delta (answer or reasoning) of the
+        # in-flight model call; 0 before the first delta of a call. Ages
+        # into the stall segment when a generation goes quiet (the
+        # ``_STALL_AFTER_S`` / ``_STALL_ALERT_S`` thresholds).
+        self._last_delta_perf: float = 0.0
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: echo the command, arm the activity line.
@@ -668,10 +676,18 @@ class PromptTransport:
             )
 
     def _render_response_text(self, text: str) -> None:
-        """Render the final answer: themed Markdown under a model-titled rule."""
+        """Render the final answer: themed Markdown under a turn/model rule.
+
+        The rule title carries the global thread turn index when known —
+        the same number stamped on the thread entry, so it can be replayed
+        with ``lisa last N`` or inspected with ``lisa debug N`` without
+        counting from the top.
+        """
         rule_title = "Response"
         if self._status_current_model:
             rule_title = f"Response · {self._status_current_model}"
+        if self._turn_number >= 0:
+            rule_title += f" · turn {self._turn_number}"
         self.console.print(Rule(title=rule_title, style=STYLE_BORDER_RESPONSE))
         self.console.print(Markdown(text, code_theme="github-dark", hyperlinks=True))
 
@@ -728,14 +744,27 @@ class PromptTransport:
 
     # ── Internals ───────────────────────────────────────────────────
 
+    def _capture_turn_number(self, data: dict[str, Any]) -> None:
+        """Capture the host's global thread turn index from a stage payload.
+
+        Rendered on the Response rule, the ⚡ footer, and the in-flight
+        status line. Only a non-negative int replaces the sentinel; a
+        genuine ``turn 0`` (fresh thread) is valid and renders.
+        """
+        turn_raw = data.get("turn_index")
+        if isinstance(turn_raw, int) and turn_raw >= 0:
+            self._turn_number = turn_raw
+
     def _handle_model_stage(self, label: str, data: dict[str, Any]) -> None:
         """Route model_call* stage events.
 
-        ``model_call`` tracks the active model/mode and counts the call;
+        ``model_call`` captures the host's global thread turn index, tracks
+        the active model/mode and counts the call;
         ``model_call_complete`` accumulates duration + tokens for the
         footer; ``model_call_failed`` prints the ✗ row immediately.
         """
         if label == "model_call":
+            self._capture_turn_number(data)
             model_id = data.get("model_id")
             if model_id not in (None, "", 0):
                 provider = data.get("provider")
@@ -1234,8 +1263,10 @@ class PromptTransport:
         return body
 
     def _status_leading_parts(self) -> list[Text]:
-        """Leading status segments: mode, model, in-flight label."""
+        """Leading status segments: turn, mode, model, in-flight label."""
         parts: list[Text] = []
+        if self._turn_number >= 0:
+            parts.append(Text(f"turn {self._turn_number}", style=STYLE_ROW_MODEL))
         if self._current_mode:
             parts.append(Text(f"[{self._current_mode}]", style=STYLE_ROW_TRANSITION))
         if self._status_current_model:
@@ -1330,18 +1361,24 @@ class PromptTransport:
     def _print_footer(self) -> None:
         """Render the single-line prompt-mode footer.
 
-        ``⚡ 22s · 5 tools · 2 models · 1 handoff · 8.4k tok · $0.02`` — one
+        ``⚡ 22s · turn 41 · 5 tools · 2 models · 8.4k tok · $0.02`` — one
         line, per-turn only; a ``prompt`` invocation is one process and one
         turn, so the turn/session token split collapses to a single total.
-        Each segment carries its own color: elapsed gold, tools blue (red
-        annotation on failures), models green, tokens green, cost cyan.
-        Plain text is identical to the legacy flat line.
+        The ``turn N`` segment is the global thread turn index (the number
+        stamped on the thread entry, and the number ``lisa last N`` /
+        ``lisa debug N`` address). Each segment carries its own color:
+        elapsed gold, turn green, tools blue (red annotation on failures),
+        models green, tokens green, cost cyan. Plain text is identical to
+        the legacy flat line.
         """
         model_time_ms = round(sum(self._iteration_durations))
         tools_total = self._tool_call_count
         tool_failures = self._tool_error_count
         footer = Text()
         footer.append(f"⚡ {self._elapsed_seconds()}s", style=STYLE_ROW_TRANSITION)
+        if self._turn_number >= 0:
+            footer.append(" · ", style=STYLE_TEXT_MUTED)
+            footer.append(f"turn {self._turn_number}", style=STYLE_ROW_MODEL)
         footer.append(" · ", style=STYLE_TEXT_MUTED)
         footer.append(f"{tools_total} tool{'s' if tools_total != 1 else ''}", style=STYLE_ROW_TOOL)
         if tool_failures:
