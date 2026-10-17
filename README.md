@@ -1,12 +1,12 @@
 # lisa-cli
 
-[Lisa Harness](https://github.com/Lisa-Harness/lisa) CLI interface.
+[Lisa Harness](https://github.com/Lisa-Harness/lisa) CLI host.
 
 ## Install
 
 ### Give Lisa model access
 
-The Lisa Harness supports several providers out-of-the-box.
+The Lisa Harness CLI host supports several providers out-of-the-box.
 To use one (or more), set the requisite environment variables:
 
 | Provider       | Environment variables                                                                          |
@@ -24,8 +24,16 @@ Create the `~/.lisa` directory and copy/edit the [.env.example](.env.example) in
 
 ### Run the installer
 
+Linux or Mac:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash
+```
+
+Windows:
+
+```pwsh
+irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
 ```
 
 The installer accepts the same options as a direct `uv tool install`
@@ -39,6 +47,10 @@ pip install lisa-cli
 # or
 uv tool install lisa-cli
 ```
+
+However,
+you will then also need to run `lisa models discover && lisa models apply`
+after configuring your environment for model access per above.
 
 ## Usage
 
@@ -128,14 +140,12 @@ is ever synthesized or re-parsed, and a CEL `--when` expression arrives
 verbatim (no quoting contract):
 
 ```bash
-lisa settings | tokens | modes | operations | tools    # one-shot admin views
 lisa debug [N] | last [N]                              # turn inspection
 lisa models show | discover --force | apply
 lisa pack list | install <spec> | uninstall <pkg> | update [--all]
 lisa policy | policy mode trust | policy bare off
 lisa policy rule list | add allow --when '<CEL>' | remove allow:1
 lisa approve <id> [--remember <prefix>] | deny <id>
-lisa mcp [<server>] | verify | intake
 ```
 
 Pack-registered host commands resolve as **dynamically generated
@@ -350,19 +360,17 @@ This repo is a uv workspace whose only member is `hosts/cli/` (src layout:
 ```text
 Code/
 ├── lisa/              # framework (kernel, sdk, mcp_server, host)
-└── lisa-hosts/
-    └── cli/           # this repo
+└── lisa-cli/          # this repo
 ```
 
 Until the framework packages are published to PyPI, a clone needs the
 sibling framework checkout:
 
 ```bash
-git clone https://github.com/Lisa-Harness/lisa-hosts-cli.git lisa-hosts
-# (cli is the lisa-hosts repo; lisa is the framework repo)
+git clone https://github.com/Lisa-Harness/lisa-cli.git
 git clone https://github.com/Lisa-Harness/lisa.git
 
-cd lisa-hosts/cli
+cd lisa-cli
 # edit pyproject.toml: uncomment the lisa-* path sources (sibling ../lisa)
 uv sync --extra dev
 uv run pytest -m "not live"
