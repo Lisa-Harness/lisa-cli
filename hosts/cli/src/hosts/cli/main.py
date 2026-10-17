@@ -1392,20 +1392,28 @@ def _last_command(
     from rich.markdown import Markdown  # noqa: PLC0415  # lazy: defers startup cost
     from rich.rule import Rule  # noqa: PLC0415  # lazy: defers startup cost
     from runtime.commands import (  # noqa: PLC0415  # lazy: defers runtime.commands startup cost
-        render_last_turn,
+        resolve_last_turn,
     )
 
-    response_text = render_last_turn(runtime, turn.strip())
+    turn_index, response_text = resolve_last_turn(runtime, turn.strip())
+    if turn_index is not None and not console.is_terminal:
+        # Piped/redirected: a one-line header so the replayed turn is
+        # addressable in captured output, then the response verbatim —
+        # no Markdown re-render (the raw contract; highlight/markup off
+        # so Rich never interprets the body). Diagnostics (usage,
+        # not-found, friendly messages) print bare as before.
+        console.print(f"[ turn {turn_index} ]", style=_STYLE_RESPONSE, markup=False)
+        console.print(response_text, highlight=False, markup=False, soft_wrap=False)
+        return
     if not console.is_terminal:
-        # Piped/redirected: verbatim, no Markdown re-render — piped output
-        # stays machine-readable (the same contract as PromptTransport raw
-        # mode). highlight/markup off so Rich never interprets the body.
         console.print(response_text, highlight=False, markup=False, soft_wrap=False)
         return
     # Interactive: the same treatment the original answer gets — a
-    # "Response" rule separator plus Rich Markdown rendering (colors,
-    # headings, code fences), mirroring PromptTransport.on_response.
-    console.print(Rule(title="Response", style=_STYLE_RESPONSE))
+    # ``Response · turn N`` rule separator plus Rich Markdown rendering
+    # (colors, headings, code fences). The number is the global thread
+    # turn index the prompt output already renders, so operators address
+    # a replayed turn the same way wherever it surfaces.
+    console.print(Rule(title=f"Response · turn {turn_index}", style=_STYLE_RESPONSE))
     console.print(Markdown(response_text))
 
 

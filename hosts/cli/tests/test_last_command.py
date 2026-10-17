@@ -15,6 +15,8 @@ CLI and REPL share one code path.
 
 from __future__ import annotations
 
+import re
+
 # pylint: disable=protected-access
 from typing import Any
 from unittest.mock import patch
@@ -124,6 +126,99 @@ def test_last_empty_thread_friendly_message(tmp_path: Any, monkeypatch: pytest.M
 
     assert code == 0
     assert "No completed turns yet." in output
+
+
+# ── Turn-number surfacing ─────────────────────────────────────────────
+
+
+def test_last_piped_output_carries_turn_header(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Piped replay prepends ``[ turn N ]`` so captured output is addressable."""
+    from runtime.thread import append_thread_entry
+
+    runtime = _make_runtime(tmp_path)
+    for i, (question, answer) in enumerate(
+        [("first question", "first answer"), ("second question", "second answer")]
+    ):
+        append_thread_entry(
+            thread_path=runtime.paths.thread_path,
+            user_slug=runtime.config.user_slug,
+            mode_id="default",
+            query=question,
+            response_text=answer,
+            turn=i,
+        )
+    code, output = _invoke_last(monkeypatch, tmp_path, [])
+
+    assert code == 0
+    assert "[ turn 1 ]" in output
+    assert "second answer" in output
+    assert "turn 0" not in output
+
+
+def test_last_explicit_piped_output_carries_that_turn_header(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lisa last 0`` piped labels the replay with turn 0, not the newest."""
+    from runtime.thread import append_thread_entry
+
+    runtime = _make_runtime(tmp_path)
+    for i, (question, answer) in enumerate(
+        [("first question", "first answer"), ("second question", "second answer")]
+    ):
+        append_thread_entry(
+            thread_path=runtime.paths.thread_path,
+            user_slug=runtime.config.user_slug,
+            mode_id="default",
+            query=question,
+            response_text=answer,
+            turn=i,
+        )
+    code, output = _invoke_last(monkeypatch, tmp_path, ["0"])
+
+    assert code == 0
+    assert "[ turn 0 ]" in output
+    assert "first answer" in output
+
+
+def test_last_diagnostics_bare_without_turn_header(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Diagnostics (usage / not-found / empty) print bare, no header line."""
+    code, output = _invoke_last(monkeypatch, tmp_path, [])
+
+    assert code == 0
+    assert "No completed turns yet." in output
+    assert "[ turn " not in output
+    code, output = _invoke_last(monkeypatch, tmp_path, ["42"])
+    assert "Turn 42 not found in the thread log." in output
+    assert "[ turn " not in output
+
+
+def test_last_tty_rule_carries_turn_number(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interactive replay renders ``Response · turn N`` like the prompt output."""
+    from runtime.thread import append_thread_entry
+
+    runtime = _make_runtime(tmp_path)
+    append_thread_entry(
+        thread_path=runtime.paths.thread_path,
+        user_slug=runtime.config.user_slug,
+        mode_id="default",
+        query="hello",
+        response_text="tty answer",
+        turn=7,
+    )
+    code, output = _invoke_last(monkeypatch, tmp_path, [], force_terminal=True)
+
+    assert code == 0
+    # Rich highlights the digits inside the rule title, so assert on the
+    # ANSI-stripped text.
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    assert "Response · turn 7" in clean
+    assert "tty answer" in output
 
 
 # ── Diagnostics ───────────────────────────────────────────────────────

@@ -111,7 +111,9 @@ formatting under a `Response · model · turn N` rule, followed by the `⚡`
 footer (time · turn · tools · models · tokens · cost). The `turn N` figure
 is the thread's global turn index — the same number stamped on the thread
 entry — so a result can be replayed with `lisa last N` or inspected with
-`lisa debug N` without counting from the top.
+`lisa debug N` without counting from the top. `lisa last` labels its replay
+with that number too: a `Response · turn N` rule on a tty, a `[ turn N ]`
+header before piped/replayed output.
 
 `--streaming` controls what the box shows: `none` (spinner only), `stage`,
 `text` (the forming answer), or `hybrid` (the model's thinking, default).
