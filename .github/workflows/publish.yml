@@ -14,7 +14,7 @@ jobs:
 
   build:
     needs: ci
-    uses: Lisa-Harness/lisa/.github/workflows/build-package.yml@6c3e7d924075eda57ed7cb6f170c81a673792da2
+    uses: Lisa-Harness/lisa/.github/workflows/build-package.yml@59202a05fc5eedfbf8c0281d9bddcf712b753eaa
     with:
       package-name: lisa-cli
       project-directory: hosts/cli
