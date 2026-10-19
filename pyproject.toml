@@ -48,6 +48,9 @@ ignore = ["PLR0913"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["PLC0415", "PLR2004"]
+# Startup ordering and lazy imports keep CLI help fast; Typer owns command signatures.
+"**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
+"**/hosts/cli/render.py" = ["PLC0415"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

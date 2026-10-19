@@ -2,7 +2,7 @@
 
 The ``lisa verify`` command runs a series of diagnostic checks (Python
 version, .env, model manifest, pack catalog, provider keys, Ollama,
-paths, disk space, imports) and renders a Rich table or JSON. These
+paths) and renders a Rich table. These
 tests cover the individual ``_verify_check_*`` functions in isolation
 and the summary/counting logic in ``_verify_command``.
 """
@@ -11,10 +11,9 @@ from __future__ import annotations
 
 # pylint: disable=protected-access
 import io
-import json
 import os
-from contextlib import redirect_stdout, suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -64,6 +63,12 @@ class _StubRuntime:
         self.thread_dir = thread_dir or (data_dir / "threads")
         self.thread_path = thread_path
         self.models_path = models_path or (data_dir / "models.yaml")
+        self.paths = SimpleNamespace(
+            data_dir=self.data_dir,
+            thread_dir=self.thread_dir,
+            thread_path=self.thread_path,
+            models_path=self.models_path,
+        )
         self.config = _StubConfig(user_slug=user_slug, session_context=session_context)
         self.mcp_warm_configs = mcp_warm_configs or []
         self.mcp_cold_configs = mcp_cold_configs or []
@@ -228,9 +233,7 @@ def test_check_manifest_fails_with_zero_models(tmp_path: Path) -> None:
 
     models_yaml = tmp_path / "models.yaml"
     models_yaml.write_text(
-        "version: 1\n"
-        "mode_models: {default: none}\n"
-        "models: []\n",
+        "version: 1\nmode_models: {default: none}\nmodels: []\n",
         encoding="utf-8",
     )
     runtime = _StubRuntime(data_dir=tmp_path, models_path=models_yaml)
@@ -475,86 +478,12 @@ def test_check_paths_without_thread_path(tmp_path: Path) -> None:
     assert "Thread path" not in detail
 
 
-# ── _verify_check_disk_space ──────────────────────────────────────────
-
-
-def test_check_disk_space_passes(tmp_path: Path) -> None:
-    from hosts.cli import main as cli_main
-
-    runtime = _StubRuntime(data_dir=tmp_path)
-    status, detail = cli_main._verify_check_disk_space(runtime)
-    assert "PASS" in status
-    assert "GB free" in detail
-
-
-def test_check_disk_space_warns_on_low_space(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Simulate low disk space by mocking shutil.disk_usage."""
-    import shutil
-
-    from hosts.cli import main as cli_main
-
-    def _fake_disk_usage(_path: str) -> shutil._ntuple_diskusage:
-        # total, used, free — only 500 MB free
-        return shutil._ntuple_diskusage(10 * 1024**3, int(9.5 * 1024**3), 500 * 1024**2)
-
-    monkeypatch.setattr(shutil, "disk_usage", _fake_disk_usage)
-    runtime = _StubRuntime(data_dir=tmp_path)
-    status, detail = cli_main._verify_check_disk_space(runtime)
-    assert "WARN" in status
-    assert "0.5 GB" in detail
-
-
-# ── _verify_check_imports ─────────────────────────────────────────────
-
-
-def test_check_imports_passes() -> None:
-    """openai, mcp, httpx are dev dependencies in the workspace."""
-    from hosts.cli import main as cli_main
-
-    status, detail = cli_main._verify_check_imports()
-    assert "PASS" in status
-    assert "openai" in detail
-
-
-def test_check_imports_warns_on_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    import importlib
-
-    from hosts.cli import main as cli_main
-
-    real_import = importlib.import_module
-
-    def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "mcp":
-            raise ImportError("simulated missing mcp")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(importlib, "import_module", _fake_import)
-    status, detail = cli_main._verify_check_imports()
-    assert "WARN" in status
-    assert "mcp" in detail
-
-
-# ── _strip_rich_markup ────────────────────────────────────────────────
-
-
-def test_strip_rich_markup_removes_tags() -> None:
-    from hosts.cli import main as cli_main
-
-    assert cli_main._strip_rich_markup("[green]PASS[/green]") == "PASS"
-    assert cli_main._strip_rich_markup("[red]FAIL[/red]") == "FAIL"
-    assert cli_main._strip_rich_markup("[yellow]WARN[/yellow]") == "WARN"
-
-
-# ── _verify_command summary + JSON output ─────────────────────────────
+# ── _verify_command summary ──────────────────────────────────────────
 
 
 def _invoke_verify(
     tmp_path: Path,
     *,
-    full: bool = False,
-    json_output: bool = False,
     runtime: Any | None = None,
 ) -> tuple[int, str]:
     """Invoke _verify_command with a stubbed runtime and captured output.
@@ -586,23 +515,11 @@ def _invoke_verify(
             "_verify_check_ollama",
             return_value=("[yellow]WARN[/yellow]", "Ollama not reachable (test)"),
         ),
-        suppress(typer.Exit, SystemExit),
     ):
-        cli_main._verify_command(
-            full=full,
-            json_output=json_output,
-            log_level="",
-            log="",
-            no_log=False,
-            data_dir=str(tmp_path),
-            thread_dir="",
-            no_thread=False,
-            session_context="",
-            timezone="",
-            state_snapshot="",
-            streaming="none",
-            host_log="",
-        )
+        try:
+            cli_main._verify_command(data_dir=str(tmp_path), streaming="none")
+        except typer.Exit as exc:
+            return exc.exit_code, quiet_console.export_text()
     return 0, quiet_console.export_text()
 
 
@@ -618,171 +535,64 @@ def test_verify_summary_all_passed(tmp_path: Path) -> None:
     assert "FAIL" not in output
 
 
-def test_verify_summary_reports_warnings(tmp_path: Path) -> None:
+def test_verify_summary_reports_warnings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Warnings produce 'All mandatory checks passed (N warnings)' with exit 0."""
     # Clear all provider env vars so provider keys check warns.
     for var in list(os.environ):
-        if var.startswith((
-            "LISA_",
-            "OPENAI_",
-            "AZURE_",
-            "ANTHROPIC_",
-            "GOOGLE_",
-            "OLLAMA_",
-            "OPENROUTER_",
-            "AWS_",
-        )):
-            os.environ.pop(var, None)
+        if var.startswith(
+            (
+                "LISA_",
+                "OPENAI_",
+                "AZURE_",
+                "ANTHROPIC_",
+                "GOOGLE_",
+                "OLLAMA_",
+                "OPENROUTER_",
+                "AWS_",
+            )
+        ):
+            monkeypatch.delenv(var)
     code, output = _invoke_verify(tmp_path)
     assert code == 0
     assert "warning" in output.lower()
 
 
-def test_verify_json_output_is_valid(tmp_path: Path) -> None:
-    """--json produces valid JSON array with check/status/detail keys."""
+def test_verify_summary_reports_failure_and_nonzero_exit(tmp_path: Path) -> None:
     from hosts.cli import main as cli_main
 
-    runtime = _make_runtime(tmp_path)
-    captured_stdout = io.StringIO()
-
-    with (
-        patch.object(
-            cli_main,
-            "_initialize_runtime_or_exit",
-            return_value=runtime,
-        ),
-        patch.object(cli_main, "console", new=Console(quiet=True)),
-        patch.object(
-            cli_main,
-            "_verify_check_pack_catalog",
-            return_value=("[green]PASS[/green]", "1 mode(s): default"),
-        ),
-        patch.object(
-            cli_main,
-            "_verify_check_ollama",
-            return_value=("[yellow]WARN[/yellow]", "Ollama not reachable (test)"),
-        ),
-        redirect_stdout(captured_stdout),
-        suppress(typer.Exit, SystemExit),
+    with patch.object(
+        cli_main, "_verify_check_manifest", return_value=("[red]FAIL[/red]", "invalid manifest")
     ):
-        cli_main._verify_command(
-            full=False,
-            json_output=True,
-            log_level="",
-            log="",
-            no_log=False,
-            data_dir=str(tmp_path),
-            thread_dir="",
-            no_thread=False,
-            session_context="",
-            timezone="",
-            state_snapshot="",
-            streaming="none",
-            host_log="",
-        )
-
-    raw = captured_stdout.getvalue()
-    assert raw.strip(), "Expected JSON output on stdout"
-    payload = json.loads(raw)
-    assert isinstance(payload, list)
-    assert len(payload) >= 10  # at least the base checks
-    for entry in payload:
-        assert "check" in entry
-        assert "status" in entry
-        assert "detail" in entry
-    # Status values should be plain (no Rich markup) in JSON
-    statuses = {entry["status"] for entry in payload}
-    assert all("[" not in s for s in statuses), f"Rich markup in JSON status: {statuses}"
+        code, output = _invoke_verify(tmp_path)
+    assert code == 1
+    assert "invalid manifest" in output
+    assert "1 check(s) failed" in output
 
 
-def test_verify_json_includes_full_checks(tmp_path: Path) -> None:
-    """--json --full includes MCP servers and Provider network rows."""
-    from hosts.cli import main as cli_main
-
-    runtime = _make_runtime(tmp_path)
-    captured_stdout = io.StringIO()
-
-    with (
-        patch.object(
-            cli_main,
-            "_initialize_runtime_or_exit",
-            return_value=runtime,
-        ),
-        patch.object(cli_main, "console", new=Console(quiet=True)),
-        patch.object(
-            cli_main,
-            "_verify_check_pack_catalog",
-            return_value=("[green]PASS[/green]", "1 mode(s): default"),
-        ),
-        patch.object(
-            cli_main,
-            "_verify_check_ollama",
-            return_value=("[yellow]WARN[/yellow]", "Ollama not reachable (test)"),
-        ),
-        patch.object(
-            cli_main,
-            "_verify_check_mcp",
-            return_value=("[green]PASS[/green]", "server1: warm (2 tools)"),
-        ),
-        patch.object(
-            cli_main,
-            "_verify_check_provider_network",
-            return_value=("[green]PASS[/green]", "OpenAI: reachable"),
-        ),
-        redirect_stdout(captured_stdout),
-        suppress(typer.Exit, SystemExit),
+def test_verify_reports_all_current_checks(tmp_path: Path) -> None:
+    code, output = _invoke_verify(tmp_path)
+    assert code == 0
+    for check in (
+        "Python",
+        ".env",
+        "Session context",
+        "Model manifest",
+        "Pack catalog",
+        "Provider keys",
+        "Ollama",
+        "Paths",
     ):
-        cli_main._verify_command(
-            full=True,
-            json_output=True,
-            log_level="",
-            log="",
-            no_log=False,
-            data_dir=str(tmp_path),
-            thread_dir="",
-            no_thread=False,
-            session_context="",
-            timezone="",
-            state_snapshot="",
-            streaming="none",
-            host_log="",
-        )
-
-    payload = json.loads(captured_stdout.getvalue())
-    check_names = {entry["check"] for entry in payload}
-    assert "MCP servers" in check_names
-    assert "Provider network" in check_names
-
-
-def test_verify_full_includes_mcp_check(tmp_path: Path) -> None:
-    """--full adds MCP servers and Provider network rows to the table."""
-    from hosts.cli import main as cli_main
-
-    with (
-        patch.object(cli_main, "_verify_check_mcp", return_value=("[green]PASS[/green]", "ok")),
-        patch.object(
-            cli_main, "_verify_check_provider_network", return_value=("[green]PASS[/green]", "ok")
-        ),
-    ):
-        _code, output = _invoke_verify(tmp_path, full=True)
-    assert "MCP servers" in output
-    assert "Provider network" in output
-
-
-def test_verify_without_full_excludes_mcp_check(tmp_path: Path) -> None:
-    """Default (no --full) does not include MCP servers or Provider network."""
-    _code, output = _invoke_verify(tmp_path, full=False)
+        assert check in output
     assert "MCP servers" not in output
     assert "Provider network" not in output
 
 
-# ── _verify_check_mcp ─────────────────────────────────────────────────
+@pytest.mark.parametrize("option", ["--full", "--json"])
+def test_verify_rejects_removed_options(option: str) -> None:
+    from typer.testing import CliRunner
 
+    from hosts.cli.main import app
 
-def test_check_mcp_none_when_no_servers(tmp_path: Path) -> None:
-    from hosts.cli import main as cli_main
-
-    runtime = _StubRuntime(data_dir=tmp_path, mcp_warm_configs=[], mcp_cold_configs=[])
-    status, detail = cli_main._verify_check_mcp(runtime)
-    assert "NONE" in status
-    assert "No MCP servers" in detail
+    result = CliRunner().invoke(app, ["verify", option])
+    assert result.exit_code == 2
+    assert "No such option" in result.output

@@ -28,7 +28,10 @@ if TYPE_CHECKING:
     # passed in at call time. Deferring this import keeps ``render`` from
     # dragging in ``runtime.runtime`` -> ``kernel.ipsar_fsm`` -> ``openai``
     # (~2s) at module load.
-    from runtime.runtime import HostRuntime as HostRuntime
+    from runtime.runtime import HostRuntime
+
+_TOKENS_PER_MILLION = 1_000_000
+_TOKENS_PER_THOUSAND = 1_000
 
 
 def _format_tokens(tokens: int) -> str:
@@ -37,9 +40,9 @@ def _format_tokens(tokens: int) -> str:
     tokens = int(tokens or 0)
     if tokens <= 0:
         return "—"
-    if tokens >= 1_000_000:
+    if tokens >= _TOKENS_PER_MILLION:
         return f"{tokens / 1_000_000:g}M"
-    if tokens >= 1_000:
+    if tokens >= _TOKENS_PER_THOUSAND:
         return f"{tokens / 1_000:g}k"
     return str(tokens)
 
@@ -104,8 +107,8 @@ def render_modes(runtime: HostRuntime, *, console: Console | None = None) -> Tab
     ``runtime.mcp_pool.setup_framework``) and ``mode_support_gap`` to
     separate supported from unsupported modes.
     """
-    from runtime.commands import mode_support_gap
     from kernel.ipsar_fsm import get_workflow_catalog
+    from runtime.commands import mode_support_gap
 
     _ = runtime  # catalog is global; runtime kept for future per-host scoping
     catalog = get_workflow_catalog()
@@ -168,8 +171,8 @@ def render_pack_list_panel(runtime: HostRuntime, *, console: Console | None = No
     The core returns a Markdown string; we wrap it in a Rich Panel for the
     terminal host.
     """
-    from runtime.commands import render_pack_list
     from rich.markdown import Markdown
+    from runtime.commands import render_pack_list
 
     markdown_text = render_pack_list(runtime)
     panel = Panel(

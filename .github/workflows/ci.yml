@@ -36,13 +36,13 @@ jobs:
         run: uv sync --no-sources --extra dev
 
       - name: Format check (ruff)
-        run: uv run ruff format --check hosts/cli/src
+        run: uv run --no-sync ruff format --check hosts/cli/src
 
       - name: Lint (ruff)
-        run: uv run ruff check hosts/cli/src
+        run: uv run --no-sync ruff check hosts/cli/src
 
       - name: Unit tests (no live)
-        run: uv run pytest -m "not live" --tb=short -v
+        run: uv run --no-sync pytest -m "not live" --tb=short -v
 
   diagnose-smoke:
     name: Diagnose smoke (${{ matrix.os }})
@@ -69,4 +69,4 @@ jobs:
         run: uv sync --no-sources --extra dev
 
       - name: Run verify
-        run: uv run lisa verify
+        run: uv run --no-sync lisa verify

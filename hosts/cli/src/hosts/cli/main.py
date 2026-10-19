@@ -151,9 +151,9 @@ from hosts.cli.render import (
 # body runs) does not pay the ~2s ``runtime.runtime`` ->
 # ``kernel.ipsar_fsm`` -> ``openai`` import chain.
 if TYPE_CHECKING:
-    from runtime.runtime import HostRuntime as HostRuntime
+    from runtime.runtime import HostRuntime
 
-    from hosts.cli.transport import PromptTransport as PromptTransport
+    from hosts.cli.transport import PromptTransport
 
 # ``handle_message`` is deferred to the turn-execution call sites
 # (``_run_prompt_with_teardown``) so ``--version`` / ``modes`` / ``models`` /
@@ -221,7 +221,7 @@ def _pack_commands() -> dict[str, Any]:
     if _pack_command_specs is None:
         specs: dict[str, Any] = {}
         try:
-            from kernel.host_command_discovery import (  # noqa: PLC0415  # lazy: avoids eager pack scan
+            from kernel.host_command_discovery import (  # lazy: avoids eager pack scan
                 discover_pack_host_commands,
             )
 
@@ -245,7 +245,7 @@ def _make_pack_command(name: str) -> Any:
     dispatches to the pack's own handler exactly as a persistent host
     would (the pack handler owns the sub-grammar, e.g. ``/retry <id>``).
     """
-    import click  # noqa: PLC0415  # lazy: click is a Typer dependency
+    import click  # lazy: click is a Typer dependency
 
     entry = _pack_commands()[name]
     help_text = ""
@@ -272,7 +272,7 @@ def _make_pack_command(name: str) -> Any:
     @click.option("--streaming", default="", help="Streaming mode: none, stage, text, hybrid.")
     @click.option("--host-log", default="", help="Stdlib host log file.")
     @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-    def _pack_cmd(  # noqa: PLR0917  # Click options mirror the shared runtime options.
+    def _pack_cmd(  # Click options mirror the shared runtime options.
         args: tuple[str, ...],
         log_level: str,
         log: str,
@@ -957,24 +957,14 @@ def _verify_check_provider_keys() -> tuple[str, str]:
     elif azure_key or azure_endpoint:
         parts.append("Azure OpenAI: partially configured")
 
-    openai_key = (
-        os.getenv("LISA_OPENAI_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
-    )
-    if openai_key:
-        parts.append(f"OpenAI: {_redact_key(openai_key)}")
-
-    anthropic_key = (
-        os.getenv("LISA_ANTHROPIC_API_KEY", "").strip()
-        or os.getenv("ANTHROPIC_API_KEY", "").strip()
-    )
-    if anthropic_key:
-        parts.append(f"Anthropic: {_redact_key(anthropic_key)}")
-
-    google_key = (
-        os.getenv("LISA_GOOGLE_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
-    )
-    if google_key:
-        parts.append(f"Google Gemini: {_redact_key(google_key)}")
+    for provider, variable in (
+        ("OpenAI", "OPENAI_API_KEY"),
+        ("Anthropic", "ANTHROPIC_API_KEY"),
+        ("Google Gemini", "GOOGLE_API_KEY"),
+    ):
+        key = os.getenv(f"LISA_{variable}", "").strip() or os.getenv(variable, "").strip()
+        if key:
+            parts.append(f"{provider}: {_redact_key(key)}")
 
     ollama_host = os.getenv("LISA_OLLAMA_HOST", "").strip() or os.getenv("OLLAMA_HOST", "").strip()
     if ollama_host:
@@ -1073,7 +1063,7 @@ def _verify_command(
         ("Paths", *_verify_check_paths(runtime)),
     ]
 
-    from rich.box import SIMPLE_HEAD  # noqa: PLC0415
+    from rich.box import SIMPLE_HEAD
 
     # No zebra row_styles here either: terminal backgrounds are unknown and
     # dark-grey rows vanish on black consoles (same rationale as
@@ -1088,17 +1078,23 @@ def _verify_command(
     table.add_column("Detail", overflow="fold", no_wrap=False)
 
     failures = 0
+    warnings = 0
     for name, status, detail in checks:
         table.add_row(name, status, detail)
         if "FAIL" in status:
             failures += 1
+        elif "WARN" in status:
+            warnings += 1
 
     console.print(table)
 
     if failures:
         console.print(f"\n[red]{failures} check(s) failed.[/red]")
         raise typer.Exit(code=1)
-    console.print("\n[green]All checks passed.[/green]")
+    if warnings:
+        console.print(f"\n[yellow]All mandatory checks passed ({warnings} warnings).[/yellow]")
+    else:
+        console.print("\n[green]All checks passed.[/green]")
 
 
 # ---------------------------------------------------------------------------
@@ -1385,9 +1381,9 @@ def _last_command(
     )
     if runtime is None:
         return
-    from rich.markdown import Markdown  # noqa: PLC0415  # lazy: defers startup cost
-    from rich.rule import Rule  # noqa: PLC0415  # lazy: defers startup cost
-    from runtime.commands import (  # noqa: PLC0415  # lazy: defers runtime.commands startup cost
+    from rich.markdown import Markdown  # lazy: defers startup cost
+    from rich.rule import Rule  # lazy: defers startup cost
+    from runtime.commands import (  # lazy: defers runtime.commands startup cost
         resolve_last_turn,
     )
 
@@ -1428,13 +1424,13 @@ def _render_markdown_response(response_text: str, *, title: str) -> None:
     if not console.is_terminal:
         console.print(response_text, highlight=False, markup=False, soft_wrap=False)
         return
-    from rich.markdown import Markdown  # noqa: PLC0415  # lazy: defers startup cost
+    from rich.markdown import Markdown  # lazy: defers startup cost
 
     console.print(Panel(Markdown(response_text), title=title, border_style="cyan"))
 
 
 @app.command("settings", help="Show the effective runtime settings (one-shot /settings).")
-def _settings_command(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+def _settings_command(  # Typer exposes shared runtime options as CLI flags.
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1470,7 +1466,7 @@ def _settings_command(  # noqa: PLR0917  # Typer exposes shared runtime options 
 
 
 @app.command("tokens", help="Show session token usage and budget (one-shot /tokens).")
-def _tokens_command(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+def _tokens_command(  # Typer exposes shared runtime options as CLI flags.
     log_level: LogLevelOption = "",
     log: LogOption = "",
     no_log: NoLogOption = False,
@@ -1512,7 +1508,7 @@ def _tokens_command(  # noqa: PLR0917  # Typer exposes shared runtime options as
         "(default: the last turn): `lisa debug [N]`."
     ),
 )
-def _debug_command(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+def _debug_command(  # Typer exposes shared runtime options as CLI flags.
     turn: str = typer.Argument(
         "",
         help="Optional turn number whose model input to render.",
@@ -1661,19 +1657,23 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
     if tool_pool is not None:
         pools.append(tool_pool)
     for pool in pools:
-        for process in list(getattr(pool, "_processes", {}).values()):
-            try:
-                if process.returncode is None:
-                    process.kill()
-            except ProcessLookupError:
-                pass
-            except Exception:  # pylint: disable=broad-except
-                logger.debug("Process kill failed during forced teardown", exc_info=True)
-        for stack in list(getattr(tool_pool, "_child_stacks", {}).values()) if tool_pool else []:
-            try:
-                await stack.aclose()
-            except Exception:  # pylint: disable=broad-except
-                logger.debug("Child stack close failed during forced teardown", exc_info=True)
+        await _force_close_pool(pool)
+
+
+async def _force_close_pool(pool: Any) -> None:
+    for process in list(getattr(pool, "_processes", {}).values()):
+        try:
+            if process.returncode is None:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:  # pylint: disable=broad-except
+            logger.debug("Process kill failed during forced teardown", exc_info=True)
+    for stack in list(getattr(pool, "_child_stacks", {}).values()):
+        try:
+            await stack.aclose()
+        except Exception:  # pylint: disable=broad-except
+            logger.debug("Child stack close failed during forced teardown", exc_info=True)
 
 
 async def _collect_mcp_tools(
@@ -2124,7 +2124,7 @@ def _run_policy_action(action: Callable[[HostRuntime], str], **runtime_kwargs: A
 
 
 @policy_app.callback()
-def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as CLI flags.
+def _policy_group(  # Typer exposes shared runtime options as CLI flags.
     ctx: typer.Context,
     log_level: LogLevelOption = "",
     log: LogOption = "",
@@ -2159,7 +2159,7 @@ def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as C
     if ctx.invoked_subcommand is None:
 
         def _show_document(runtime: HostRuntime) -> str:
-            from runtime.commands import render_policy_document  # noqa: PLC0415
+            from runtime.commands import render_policy_document
 
             return render_policy_document(runtime)
 
@@ -2169,8 +2169,8 @@ def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as C
 @policy_app.command("mode", help="Set the fallback approval mode: ask, trust, or plan.")
 def _policy_mode(ctx: typer.Context, mode: Literal["ask", "trust", "plan"]) -> None:
     def _set_mode(runtime: HostRuntime) -> str:
-        from runtime.commands import set_policy_mode  # noqa: PLC0415
-        from runtime.policy import PolicyMode  # noqa: PLC0415
+        from runtime.commands import set_policy_mode
+        from runtime.policy import PolicyMode
 
         return set_policy_mode(runtime, PolicyMode(mode))
 
@@ -2180,7 +2180,7 @@ def _policy_mode(ctx: typer.Context, mode: Literal["ask", "trust", "plan"]) -> N
 @policy_app.command("bare", help="Toggle approval for unsandboxed execute actions.")
 def _policy_bare(ctx: typer.Context, setting: Literal["on", "off"]) -> None:
     def _set_bare(runtime: HostRuntime) -> str:
-        from runtime.commands import set_policy_bare  # noqa: PLC0415
+        from runtime.commands import set_policy_bare
 
         return set_policy_bare(runtime, setting == "on")
 
@@ -2190,7 +2190,7 @@ def _policy_bare(ctx: typer.Context, setting: Literal["on", "off"]) -> None:
 @policy_rule_app.command("list", help="List allow, ask, and deny rules with remove addresses.")
 def _policy_rule_list(ctx: typer.Context) -> None:
     def _list_rules(runtime: HostRuntime) -> str:
-        from runtime.commands import render_policy_rules  # noqa: PLC0415
+        from runtime.commands import render_policy_rules
 
         return render_policy_rules(runtime)
 
@@ -2200,7 +2200,7 @@ def _policy_rule_list(ctx: typer.Context) -> None:
 @policy_rule_app.command("remove", help="Remove a rule by its list address, e.g. allow:1.")
 def _policy_rule_remove(ctx: typer.Context, address: str) -> None:
     def _remove_rule(runtime: HostRuntime) -> str:
-        from runtime.commands import remove_policy_rule  # noqa: PLC0415
+        from runtime.commands import remove_policy_rule
 
         return remove_policy_rule(runtime, address)
 
@@ -2208,7 +2208,7 @@ def _policy_rule_remove(ctx: typer.Context, address: str) -> None:
 
 
 @policy_rule_app.command("add", help="Add an allow, ask, or deny rule.")
-def _policy_rule_add(  # noqa: PLR0917  # Typer requires each rule matcher as a CLI option.
+def _policy_rule_add(  # Typer requires each rule matcher as a CLI option.
     ctx: typer.Context,
     rule_list: Literal["allow", "ask", "deny"],
     tool: str = typer.Option("", "--tool", help="Exact capability tool ID."),
@@ -2220,7 +2220,7 @@ def _policy_rule_add(  # noqa: PLR0917  # Typer requires each rule matcher as a 
     """Parse policy matchers with Typer and pass their values to the host policy writer."""
 
     def _add_rule(runtime: HostRuntime) -> str:
-        from runtime.commands import add_policy_rule  # noqa: PLC0415
+        from runtime.commands import add_policy_rule
 
         return add_policy_rule(
             runtime,
@@ -2236,7 +2236,7 @@ def _policy_rule_add(  # noqa: PLR0917  # Typer requires each rule matcher as a 
 
 
 @app.command("approve", help="Approve one pending action without starting a model turn.")
-def _approve_command(  # noqa: PLR0917  # Match shared runtime options used by one-shot commands.
+def _approve_command(  # Match shared runtime options used by one-shot commands.
     request_id: str = typer.Argument(
         _PENDING_APPROVAL_TARGET,
         help="Approval request ID, or omit it to target the single pending request.",
@@ -2282,7 +2282,7 @@ def _approve_command(  # noqa: PLR0917  # Match shared runtime options used by o
 
 
 @app.command("deny", help="Deny one pending action without starting a model turn.")
-def _deny_command(  # noqa: PLR0917  # Match shared runtime options used by one-shot commands.
+def _deny_command(  # Match shared runtime options used by one-shot commands.
     request_id: str = typer.Argument(
         _PENDING_APPROVAL_TARGET,
         help="Approval request ID, or omit it to target the single pending request.",
@@ -2335,7 +2335,7 @@ def _deny_command(  # noqa: PLR0917  # Match shared runtime options used by one-
         "slash-command string."
     ),
 )
-def _run_command_command(  # noqa: PLR0917  # Match shared runtime options used by one-shot commands.
+def _run_command_command(  # Match shared runtime options used by one-shot commands.
     command: Annotated[
         list[str] | None,
         typer.Argument(help="Slash command and its arguments."),
@@ -2371,13 +2371,7 @@ def _run_command_command(  # noqa: PLR0917  # Match shared runtime options used 
         console.print("[red]No slash command given. Example: lisa run '/policy mode trust'[/red]")
         raise typer.Exit(code=2)
     parts = list(command)
-    if len(parts) == 1:
-        # Quoted-as-one-string form may include embedded whitespace and
-        # shell quotes; keep it verbatim so the runtime parser sees the
-        # exact user intent.
-        command_str = parts[0]
-    else:
-        command_str = " ".join(shlex.quote(part) for part in parts)
+    command_str = parts[0] if len(parts) == 1 else " ".join(shlex.quote(part) for part in parts)
     if not command_str.startswith("/"):
         command_str = "/" + command_str
     _run_host_command(
@@ -2558,12 +2552,12 @@ async def _run_prompt_with_teardown(
     (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
     the response itself is written verbatim to stdout by the transport.
     """
-    from runtime.handle_message import (  # noqa: PLC0415  # lazy: defers turn import cost
+    from runtime.handle_message import (  # lazy: defers turn import cost
         decide_pending_approval,
         handle_message,
     )
 
-    from hosts.cli.transport import PromptTransport  # noqa: PLC0415  # lazy: defers transport import
+    from hosts.cli.transport import PromptTransport  # lazy: defers transport import
 
     transport_console: Console = Console(stderr=True) if raw else console
     transport = PromptTransport(
@@ -2616,7 +2610,7 @@ def _collect_model_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]
     turn on an unreadable manifest.
     """
     try:
-        from runtime.model_manifest import load_model_manifest  # noqa: PLC0415
+        from runtime.model_manifest import load_model_manifest
 
         manifest = load_model_manifest(runtime.paths.models_path)
     except Exception:  # pylint: disable=broad-except
@@ -2638,7 +2632,7 @@ def _collect_model_cache_prices(runtime: HostRuntime) -> dict[str, tuple[float, 
     the footer's estimate treat every prompt as uncached (legacy behavior).
     """
     try:
-        from runtime.model_manifest import load_model_manifest  # noqa: PLC0415
+        from runtime.model_manifest import load_model_manifest
 
         manifest = load_model_manifest(runtime.paths.models_path)
     except Exception:  # pylint: disable=broad-except
@@ -2679,7 +2673,7 @@ def _intake_command(
         from runtime.intake import run_intake
     except ImportError:
         console.print("[red]intake module not available in this host.[/red]")
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=2) from None
 
     state = asyncio.run(run_intake(data_dir=resolved_data_dir))
     console.print(

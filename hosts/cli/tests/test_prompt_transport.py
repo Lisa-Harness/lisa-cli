@@ -13,6 +13,7 @@ activity line never starts and assertions see only the printed lines.
 from __future__ import annotations
 
 import io
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -20,6 +21,21 @@ from rich.console import Console
 from rich.text import Text
 
 from hosts.cli.transport import _TOOL_BOX_MAX_LINES, PromptTransport
+
+
+@pytest.fixture(autouse=True)
+def _close_activity_displays(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    transports: set[PromptTransport] = set()
+    start = PromptTransport.start_activity
+
+    def start_activity(transport: PromptTransport) -> None:
+        transports.add(transport)
+        start(transport)
+
+    monkeypatch.setattr(PromptTransport, "start_activity", start_activity)
+    yield
+    for transport in transports:
+        transport.stop_activity()
 
 
 def _make_transport() -> tuple[PromptTransport, io.StringIO]:
@@ -465,7 +481,7 @@ def _make_tty_transport(**kwargs: Any) -> tuple[PromptTransport, Console]:
     ``record=True`` captures everything the Console renders, including the
     transient Live region, so activity-line assertions read the export.
     """
-    console = Console(record=True, force_terminal=True, width=100)
+    console = Console(file=io.StringIO(), record=True, force_terminal=True, width=100)
     return PromptTransport(console=console, **kwargs), console
 
 
