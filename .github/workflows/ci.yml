@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -10,6 +11,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: ${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +33,7 @@ jobs:
       - name: Install dependencies
         # Resolves all framework deps from PyPI — no sibling checkout required.
         # This validates the "clone just cli and run" path.
-        run: uv sync --extra dev
+        run: uv sync --no-sources --extra dev
 
       - name: Format check (ruff)
         run: uv run ruff format --check hosts/cli/src
@@ -44,6 +47,8 @@ jobs:
   diagnose-smoke:
     name: Diagnose smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: "3.12"
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +66,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --no-sources --extra dev
 
       - name: Run verify
         run: uv run lisa verify

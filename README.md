@@ -2,6 +2,17 @@
 
 [Lisa Harness](https://github.com/Lisa-Harness/lisa) CLI host.
 
+## Releases
+
+Follow the [coordinated release checklist](https://github.com/Lisa-Harness/lisa#publishing-releases).
+The `Publish` workflow runs CI, builds and checks the `lisa-cli` distributions,
+and, for a `v<version>` tag, publishes to PyPI and creates a GitHub release with
+the wheel and source distribution attached. A manual run validates without
+publishing. Configure the PyPI pending publisher before the first tag.
+Framework and optional pack dependencies must be published first: CI uses
+`uv sync --no-sources --extra dev` to test registry dependencies rather than
+the local development overrides.
+
 ## Install
 
 ### Give Lisa model access

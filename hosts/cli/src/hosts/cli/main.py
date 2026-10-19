@@ -341,9 +341,7 @@ class _LisaGroup(typer.core.TyperGroup):
         if cmd_name.startswith("/"):
             bare = cmd_name.lstrip("/") or None
             if bare and (super().get_command(ctx, bare) is not None or bare in _pack_commands()):
-                raise typer.BadParameter(
-                    f"Slash commands are not subcommands. Try 'lisa {bare}'."
-                )
+                raise typer.BadParameter(f"Slash commands are not subcommands. Try 'lisa {bare}'.")
             raise typer.BadParameter(
                 f"Slash commands are not subcommands. Try 'lisa {cmd_name}' "
                 "without the leading '/'."
@@ -748,9 +746,7 @@ def _initialize_runtime_or_exit(**kwargs: Any) -> HostRuntime | None:
         raise typer.Exit(code=2) from exc
 
 
-def _render_runtime_error(
-    console: Console, exc: Exception, *, title: str = "Error"
-) -> None:
+def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Error") -> None:
     """Render a runtime/startup error in a red Rich panel.
 
     The exception's first line is bolded up to its first colon so the cause
@@ -1647,8 +1643,7 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
         return
     except TimeoutError:
         logger.warning(
-            "Runtime teardown exceeded %.0fs; falling back to direct "
-            "subprocess termination",
+            "Runtime teardown exceeded %.0fs; falling back to direct subprocess termination",
             timeout_s,
         )
     except asyncio.CancelledError:
@@ -1710,11 +1705,7 @@ async def _collect_mcp_tools(
     commands degrade to showing only the internal tool catalog instead of
     crashing.
     """
-    warm_ids = {
-        c.server_id
-        for c in _mcp_configs(runtime, warm=True)
-        if hasattr(c, "server_id")
-    }
+    warm_ids = {c.server_id for c in _mcp_configs(runtime, warm=True) if hasattr(c, "server_id")}
     if not warm_ids and not _mcp_configs(runtime, warm=False):
         return ({}, {})
     allowed = warm_ids | (connect_server_ids or set())
@@ -2173,6 +2164,8 @@ def _policy_group(  # noqa: PLR0917  # Typer exposes shared runtime options as C
             return render_policy_document(runtime)
 
         _run_policy_action(_show_document, **ctx.obj)
+
+
 @policy_app.command("mode", help="Set the fallback approval mode: ask, trust, or plan.")
 def _policy_mode(ctx: typer.Context, mode: Literal["ask", "trust", "plan"]) -> None:
     def _set_mode(runtime: HostRuntime) -> str:

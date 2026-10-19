@@ -496,15 +496,15 @@ def render_approval_panel(
 
     body.append("\nDecide from the same shell, without a session:\n", style=STYLE_TEXT_MUTED)
     body.append(
-        f'  lisa approve {request_id}                # run it\n',
+        f"  lisa approve {request_id}                # run it\n",
         style=STYLE_TEXT_PRIMARY,
     )
     body.append(
-        f'  lisa approve {request_id} --remember <prefix>\n',
+        f"  lisa approve {request_id} --remember <prefix>\n",
         style=STYLE_TEXT_MUTED,
     )
     body.append(
-        f'  lisa deny {request_id}   ·   lisa policy\n',
+        f"  lisa deny {request_id}   ·   lisa policy\n",
         style=STYLE_TEXT_MUTED,
     )
 
