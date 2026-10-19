@@ -1,0 +1,6 @@
+version: 1
+mode_models:
+  default: gpt-4o
+models:
+  - model_id: gpt-4o
+    provider: openai

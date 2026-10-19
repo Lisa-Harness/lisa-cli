@@ -72,6 +72,10 @@ lisa verify     # run the diagnostic smoke check
 lisa --help     # show all commands
 ```
 
+`lisa verify` expects a configured model manifest; run `lisa models discover`
+and `lisa models apply` first. CI supplies a static manifest for its offline
+installation smoke check and does not invoke a model provider.
+
 ### Prompting (`prompt` with stdin and `--raw`)
 
 `prompt` reads piped stdin automatically (when stdin is not a tty) and attaches

@@ -49,6 +49,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       UV_PYTHON: "3.12"
+      LISA_DATA_DIR: ${{ github.workspace }}/.lisa-smoke
+      LISA_PACKS_VENV: ${{ github.workspace }}/.lisa-smoke-packs
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +69,12 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --no-sources --extra dev
+
+      - name: Configure offline smoke manifest
+        shell: bash
+        run: |
+          mkdir -p "$LISA_DATA_DIR/config"
+          cp .github/fixtures/models.yaml "$LISA_DATA_DIR/config/models.yaml"
 
       - name: Run verify
         run: uv run --no-sync lisa verify
