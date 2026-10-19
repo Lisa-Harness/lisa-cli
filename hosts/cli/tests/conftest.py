@@ -76,3 +76,20 @@ def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         if name.startswith(_SCRUB_PREFIXES):
             monkeypatch.delenv(name, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _close_activity_displays(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from hosts.cli.transport import PromptTransport
+
+    transports: set[PromptTransport] = set()
+    start = PromptTransport.start_activity
+
+    def start_activity(transport: PromptTransport) -> None:
+        transports.add(transport)
+        start(transport)
+
+    monkeypatch.setattr(PromptTransport, "start_activity", start_activity)
+    yield
+    for transport in transports:
+        transport.stop_activity()

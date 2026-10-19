@@ -13,7 +13,6 @@ activity line never starts and assertions see only the printed lines.
 from __future__ import annotations
 
 import io
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -23,19 +22,11 @@ from rich.text import Text
 from hosts.cli.transport import _TOOL_BOX_MAX_LINES, PromptTransport
 
 
-@pytest.fixture(autouse=True)
-def _close_activity_displays(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    transports: set[PromptTransport] = set()
-    start = PromptTransport.start_activity
-
-    def start_activity(transport: PromptTransport) -> None:
-        transports.add(transport)
-        start(transport)
-
-    monkeypatch.setattr(PromptTransport, "start_activity", start_activity)
-    yield
-    for transport in transports:
-        transport.stop_activity()
+@pytest.fixture
+def _transport_clock(monkeypatch: pytest.MonkeyPatch) -> float:
+    now = 1000.0
+    monkeypatch.setattr("hosts.cli.transport.perf_counter", lambda: now)
+    return now
 
 
 def _make_transport() -> tuple[PromptTransport, io.StringIO]:
@@ -928,14 +919,12 @@ async def test_box_title_shows_velocity_or_size() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stall_segment_hidden_while_streaming() -> None:
+async def test_stall_segment_hidden_while_streaming(_transport_clock: float) -> None:
     """Fresh deltas keep the no-data segment off the status line."""
-    import time
-
     transport, _ = _make_tty_transport(streaming_mode="hybrid")
     transport.start_turn("hi")
     await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
-    transport._last_delta_perf = time.perf_counter() - 3.0  # pylint: disable=protected-access
+    transport._last_delta_perf = _transport_clock - 3.0  # pylint: disable=protected-access
     transport._status_reasoning_chars = 500  # pylint: disable=protected-access
     body = transport._compose_status_body(100).plain
     assert "no data" not in body
@@ -945,15 +934,13 @@ async def test_stall_segment_hidden_while_streaming() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stall_segment_after_threshold() -> None:
+async def test_stall_segment_after_threshold(_transport_clock: float) -> None:
     """A quiet stream past the threshold renders `no data Ns` in gold."""
-    import time
-
     transport, _ = _make_tty_transport(streaming_mode="hybrid")
     transport.start_turn("hi")
     await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
     await transport.on_text_chunk("", reasoning="initial burst of thinking")
-    transport._last_delta_perf = time.perf_counter() - 20.0  # pylint: disable=protected-access
+    transport._last_delta_perf = _transport_clock - 20.0  # pylint: disable=protected-access
     transport._status_reasoning_chars = 800  # pylint: disable=protected-access
     body = transport._compose_status_body(100)
     assert "no data 20s" in body.plain
@@ -964,15 +951,13 @@ async def test_stall_segment_after_threshold() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stall_segment_escalates_to_red_at_alert() -> None:
+async def test_stall_segment_escalates_to_red_at_alert(_transport_clock: float) -> None:
     """Past the alert age the stall segment switches to the error style."""
-    import time
-
     transport, _ = _make_tty_transport(streaming_mode="hybrid")
     transport.start_turn("hi")
     await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
     await transport.on_text_chunk("", reasoning="initial burst")
-    transport._last_delta_perf = time.perf_counter() - 90.0  # pylint: disable=protected-access
+    transport._last_delta_perf = _transport_clock - 90.0  # pylint: disable=protected-access
     transport._status_reasoning_chars = 800  # pylint: disable=protected-access
     body = transport._compose_status_body(100)
     assert "no data 90s" in body.plain
@@ -982,15 +967,13 @@ async def test_stall_segment_escalates_to_red_at_alert() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_model_call_resets_stall_clock() -> None:
+async def test_new_model_call_resets_stall_clock(_transport_clock: float) -> None:
     """model_call re-arms the stall clock: pre-call silence is warmup."""
-    import time
-
     transport, _ = _make_tty_transport(streaming_mode="hybrid")
     transport.start_turn("hi")
     await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
     await transport.on_text_chunk("", reasoning="thinking once")
-    transport._last_delta_perf = time.perf_counter() - 200.0  # pylint: disable=protected-access
+    transport._last_delta_perf = _transport_clock - 200.0  # pylint: disable=protected-access
     assert transport._no_data_age_s() >= 200.0
     await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
     assert transport._last_delta_perf == 0.0
@@ -999,18 +982,16 @@ async def test_new_model_call_resets_stall_clock() -> None:
     assert "no data" not in body
 
 
-def test_stalled_stream_switches_spinner_to_clock() -> None:
+def test_stalled_stream_switches_spinner_to_clock(_transport_clock: float) -> None:
     """A stalled stream uses the slow clock spinner, not the work spinners."""
-    import time
-
     transport, _ = _make_tty_transport()
     transport._model_call_count = 1
     transport._active_reasoning_model = True
     transport._reasoning_seen = True
-    transport._last_delta_perf = time.perf_counter() - 30.0  # pylint: disable=protected-access
+    transport._last_delta_perf = _transport_clock - 30.0  # pylint: disable=protected-access
     assert transport._activity_spinner() == "clock"
     # Fresh data → back to the calm reasoning spinner.
-    transport._last_delta_perf = time.perf_counter()  # pylint: disable=protected-access
+    transport._last_delta_perf = _transport_clock  # pylint: disable=protected-access
     assert transport._activity_spinner() == "aesthetic"
 
 
