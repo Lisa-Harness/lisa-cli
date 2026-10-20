@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     Installs the `lisa` CLI as a uv tool (no repo clone needed), creates
-    ~\.lisa\.env for the selected model providers, and bootstraps the model
+    ~\.lisa\.env for the selected model providers, seeds a starter session
+    context (~\.lisa\config\session_context.md), and bootstraps the model
     manifest via `lisa models discover` + `lisa models apply`. After this
     script, `lisa` works from any directory - no checkout, no `uv run`.
 
@@ -386,12 +387,78 @@ function New-LisaEnvFile {
     }
 }
 
+function New-LisaSessionContext {
+    <#
+    .SYNOPSIS
+        Seed a minimal-but-useful starter session context. Existing files are
+        preserved - this is a first-run convenience, not a policy override.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Installer UX is deliberately host-colored output.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Creates one session context file; plural is a legacy artifact.')]
+    param()
+    Set-StrictMode -Version Latest
+
+    $configDir = Join-Path $script:LisaHome "config"
+    $ctxFile = Join-Path $configDir "session_context.md"
+    if (Test-Path $ctxFile) {
+        Write-Host "  $ctxFile already exists - preserved" -ForegroundColor Yellow
+        return
+    }
+
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+
+    # The required external packs auto-install from GitHub on first use.
+    $content = @'
+---
+schema_version: 2
+name: my-session
+surface:
+  type: personal_dm
+  id: host-console
+  memory_scope: personal
+resources:
+  packs:
+    configuration: {}
+    required:
+      - lisa-pack-markdown
+      - lisa-pack-personas
+      - lisa-pack-search
+providers:
+  capabilities:
+    memory: lisa-pack-memory
+  # Web search requires a web search provider pack, e.g., lisa-pack-tavily
+  # Add one to the required packs list above then designate it as the tool below
+  # tools:
+    # web_search: lisa-pack-tavily
+routing: { from: { pack: lisa-pack-core, session: default } }
+---
+# My Session
+
+The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
+However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
+'@
+    if ($PSCmdlet.ShouldProcess($ctxFile, "Seed starter session context")) {
+        # UTF8 without BOM on PS5.1 (Set-Content -Encoding UTF8 emits a BOM
+        # there, and the kernel front-matter parser does not strip one).
+        [System.IO.File]::WriteAllText($ctxFile, $content, [System.Text.UTF8Encoding]::new($false))
+        Write-Host "  Created $ctxFile (starter: memory, web search, personas, markdown)" -ForegroundColor Green
+    }
+}
+
 function Update-LisaModelManifest {
     <#
     .SYNOPSIS
-        First-run model bootstrap: discover what providers can see, then
-        promote models.proposed.yaml to the active models.yaml. Non-fatal:
-        with no reachable provider nothing is proposed; we skip instead.
+        First-run model bootstrap: discover what providers can see (writes
+        state\models.proposed.yaml), then promote it to the active
+        config\models.yaml. Graceful at every step: reinstall (existing
+        active manifest skips), no provider reachable (print recovery
+        commands), stale proposal (--force re-discovers so a re-run after
+        pulling models actually picks them up). Non-fatal throughout.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
@@ -404,32 +471,39 @@ function Update-LisaModelManifest {
         return
     }
 
-    if (Test-Path (Join-Path $lisaHome "models.yaml")) {
-        Write-Host "  Existing models.yaml found - skipping model bootstrap" -ForegroundColor Yellow
+    $activeFile = Join-Path $lisaHome "config\models.yaml"
+    $proposalFile = Join-Path $lisaHome "state\models.proposed.yaml"
+
+    if (Test-Path $activeFile) {
+        $count = (Select-String -LiteralPath $activeFile -Pattern "model_id:" -AllMatches -ErrorAction SilentlyContinue).Count
+        Write-Host "  Existing $activeFile ($count model(s)) - skipping model bootstrap" -ForegroundColor Yellow
         return
     }
 
     Write-Verbose "Discovering models from configured provider(s)"
     if (Get-Command lisa -ErrorAction SilentlyContinue) {
         # Best-effort: never fail the install on a discovery hiccup, and don't
-        # leak its exit code to callers.
-        $null = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "discover")
+        # leak its exit code to callers. --force overwrites a stale proposal
+        # from an earlier run so re-runs actually re-discover.
+        $null = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "discover", "--force")
     }
     else {
         Write-Verbose "lisa not on PATH; skipping discover"
     }
 
-    if (-not (Test-Path (Join-Path $lisaHome "models.proposed.yaml"))) {
-        Write-Host "  No models discovered (no provider reachable yet)." -ForegroundColor Yellow
-        Write-Host "  After installing Ollama models or filling in your API key, run:"
+    if (-not (Test-Path $proposalFile)) {
+        Write-Host "  No models discovered yet (no provider reachable or configured)." -ForegroundColor Yellow
+        Write-Host "  After installing Ollama models or filling in your API keys, run:"
         Write-Host "    lisa models discover; lisa models apply"
+        Write-Host "  (lisa verify will flag the missing manifest until then - expected.)"
         return
     }
 
     Write-Verbose "Promoting discovered models to active manifest"
     $null = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "apply")
-    if (Test-Path (Join-Path $lisaHome "models.yaml")) {
-        Write-Host "  OK: $(Join-Path $lisaHome "models.yaml") ready" -ForegroundColor Green
+    if (Test-Path $activeFile) {
+        $count = (Select-String -LiteralPath $activeFile -Pattern "model_id:" -AllMatches -ErrorAction SilentlyContinue).Count
+        Write-Host "  OK: $activeFile ready ($count model(s))" -ForegroundColor Green
     }
     else {
         Write-Warning "models apply did not complete; run manually: lisa models apply"
@@ -474,6 +548,9 @@ function Write-PostInstallGuidance {
 
     Write-Host "  Quick start (from any directory):"
     Write-Host "    lisa prompt `"Let's get started, Lisa!`""
+    Write-Host ""
+    Write-Host "  The starter session auto-installs a few packs from GitHub"
+    Write-Host "  (markdown, personas, search, serper) on first use."
     Write-Host ""
 
     if ($Provider -contains "ollama") {
@@ -532,20 +609,23 @@ function Install-LisaFramework {
     $lisaVersion = (& lisa --version 2>$null | Select-Object -Last 1)
     Write-Host "  OK: $lisaVersion" -ForegroundColor Green
 
-    Write-Step -Step 3 -Total 5 -Message "Configuring providers in $($script:LisaHome)..."
+    Write-Step -Step 3 -Total 6 -Message "Configuring providers in $($script:LisaHome)..."
     New-LisaEnvFile
 
-    Write-Step -Step 4 -Total 5 -Message "Bootstrapping model manifest (discover + apply)..."
+    Write-Step -Step 4 -Total 6 -Message "Seeding starter session context..."
+    New-LisaSessionContext
+
+    Write-Step -Step 5 -Total 6 -Message "Bootstrapping model manifest (discover + apply)..."
     Update-LisaModelManifest
 
     if (-not $SkipDiagnostics) {
-        Write-Step -Step 5 -Total 5 -Message "Running diagnostics..."
+        Write-Step -Step 6 -Total 6 -Message "Running diagnostics..."
         Write-Host ""
         $null = Invoke-Native -FilePath "lisa" -ArgumentList @("verify")
         Write-Host ""
     }
     else {
-        Write-Step -Step 5 -Total 5 -Message "Done."
+        Write-Step -Step 6 -Total 6 -Message "Done."
     }
 
     Write-PostInstallGuidance

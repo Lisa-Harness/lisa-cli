@@ -2,7 +2,8 @@
 # Lisa Framework installer for Linux/macOS
 #
 # Installs the `lisa` CLI as a uv tool, creates ~/.lisa/.env for the selected
-# model providers, and bootstraps the model manifest via `lisa models
+# model providers, seeds a starter session context (~/.lisa/config/
+# session_context.md), and bootstraps the model manifest via `lisa models
 # discover` + `lisa models apply`. After this script, `lisa` works from any
 # directory — no checkout, no `uv run`.
 #
@@ -245,23 +246,77 @@ generate_env_file() {
     printf "  Created %s — %d provider(s) configured\n" "$env_file" "${#PROVIDERS[@]}"
 }
 
+generate_session_context() {
+    # Seed a minimal-but-useful starter session (personal DM, memory
+    # capability, web search, personas, markdown operations). The required
+    # external packs auto-install from GitHub on first use. An existing
+    # file is preserved — this is a first-run convenience, not a policy
+    # override.
+    local ctx="$LISA_HOME/config/session_context.md"
+    if [[ -f "$ctx" ]]; then
+        printf "  %s already exists — preserved\n" "$ctx"
+        return 0
+    fi
+    mkdir -p "$LISA_HOME/config"
+    cat > "$ctx" <<'SESSION_CONTEXT'
+---
+schema_version: 2
+name: my-session
+surface:
+  type: personal_dm
+  id: host-console
+  memory_scope: personal
+resources:
+  packs:
+    configuration: {}
+    required:
+      - lisa-pack-markdown
+      - lisa-pack-personas
+      - lisa-pack-search
+providers:
+  capabilities:
+    memory: lisa-pack-memory
+  # Web search requires a web search provider pack, e.g., lisa-pack-tavily
+  # Add one to the required packs list above then designate it as the tool below
+  # tools:
+    # web_search: lisa-pack-tavily
+routing: { from: { pack: lisa-pack-core, session: default } }
+---
+# My Session
+
+The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
+However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
+SESSION_CONTEXT
+    printf "  Created %s (starter: memory, web search, personas, markdown)\n" "$ctx"
+}
+
 bootstrap_models() {
     # First-run model bootstrap: discover what the configured providers can
-    # see, write models.proposed.yaml, then promote it to the active
-    # models.yaml. Non-fatal: with no reachable provider, discover writes no
-    # proposal — skip and tell the user what to do instead.
-    if [[ -f "$LISA_HOME/models.yaml" ]]; then
-        printf "  Existing models.yaml found — skipping model bootstrap\n"
+    # see (writes state/models.proposed.yaml), then promote it to the active
+    # config/models.yaml. Graceful at every step:
+    #   - reinstall: an existing active manifest skips the bootstrap
+    #   - no provider reachable: discover writes no proposal — print the
+    #     recovery commands instead of failing
+    #   - stale proposal from an earlier run: --force re-discovers so a
+    #     re-run after pulling models actually picks them up
+    local active="$LISA_HOME/config/models.yaml"
+    local proposal="$LISA_HOME/state/models.proposed.yaml"
+    local count
+
+    if [[ -f "$active" ]]; then
+        count=$(grep -c 'model_id:' "$active" 2>/dev/null || true)
+        printf "  Existing %s (%s model(s)) — skipping model bootstrap\n" "$active" "${count:-0}"
         return 0
     fi
 
     printf "  Discovering models from configured provider(s)...\n"
-    lisa models discover || true
+    lisa models discover --force || true
 
-    if [[ ! -f "$LISA_HOME/models.proposed.yaml" ]]; then
-        printf "  No models discovered (no provider reachable yet).\n"
-        printf "  After installing Ollama models or filling in your API key, run:\n"
+    if [[ ! -f "$proposal" ]]; then
+        printf "  No models discovered yet (no provider reachable or configured).\n"
+        printf "  After installing Ollama models or filling in your API keys, run:\n"
         printf "    lisa models discover && lisa models apply\n"
+        printf "  (lisa verify will flag the missing manifest until then — expected.)\n"
         return 0
     fi
 
@@ -271,8 +326,8 @@ bootstrap_models() {
         printf "    lisa models apply\n"
         return 0
     fi
-    printf "  OK: %s/models.yaml ready (%d model(s))\n" "$LISA_HOME" \
-        "$(grep -c 'name:' "$LISA_HOME/models.yaml" 2>/dev/null || echo 0)"
+    count=$(grep -c 'model_id:' "$active" 2>/dev/null || true)
+    printf "  OK: %s ready (%s model(s))\n" "$active" "${count:-0}"
 }
 
 post_install_guidance() {
@@ -321,6 +376,9 @@ post_install_guidance() {
     printf "  Quick start (from any directory):\n"
     printf "    lisa prompt \"Let's get started!\"\n"
     printf "\n"
+    printf "  The starter session auto-installs a few packs from GitHub\n"
+    printf "  (markdown, personas, search, serper) on first use.\n"
+    printf "\n"
 
     local is_ollama=false
     for prov in ${PROVIDERS[@]}; do
@@ -356,31 +414,34 @@ main() {
     if ! have_cmd git; then
         error_exit "git is required for the ${SOURCE} install source but was not found on PATH"
     fi
-    step 1 5 "Checking uv..."
+    step 1 6 "Checking uv..."
     install_uv
     local uv_version
     uv_version=$(uv --version 2>/dev/null | cut -d' ' -f2 || echo "installed")
     printf "  OK: uv %s\n" "$uv_version"
 
-    step 2 5 "Installing lisa CLI (uv tool, source: $SOURCE)..."
+    step 2 6 "Installing lisa CLI (uv tool, source: $SOURCE)..."
     install_lisa
     local lisa_version
     lisa_version=$(lisa --version 2>/dev/null | tail -1 || echo "installed")
     printf "  OK: %s\n" "$lisa_version"
 
-    step 3 5 "Configuring providers in $LISA_HOME..."
+    step 3 6 "Configuring providers in $LISA_HOME..."
     generate_env_file
 
-    step 4 5 "Bootstrapping model manifest (discover + apply)..."
+    step 4 6 "Seeding starter session context..."
+    generate_session_context
+
+    step 5 6 "Bootstrapping model manifest (discover + apply)..."
     bootstrap_models
 
     if ! $SKIP_DIAGNOSTICS; then
-        step 5 5 "Running diagnostics..."
+        step 6 6 "Running diagnostics..."
         printf "\n"
         lisa verify || true
         printf "\n"
     else
-        step 5 5 "Done."
+        step 6 6 "Done."
     fi
 
     post_install_guidance
