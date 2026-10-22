@@ -251,3 +251,140 @@ def test_history_path_framework_default(monkeypatch: pytest.MonkeyPatch, tmp_pat
     path = prompt_history_path("", "")
     assert path.name == "prompt_history.txt"
     assert path.parent.name == "state"
+
+
+# ── LISA_PROMPT_PS1 hint contract ─────────────────────────────────────
+
+
+def test_ps1_unset_keeps_default_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No LISA_PROMPT_PS1: prompt_ps1 is None and readers print the default."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.delenv(entry_mod._PROMPT_PS1_ENV, raising=False)
+    assert entry_mod.prompt_ps1() is None
+    out = io.StringIO()
+    plain_console = Console(file=out, record=True, width=200)
+
+    lines = iter(["hi"])
+
+    def _fake_input() -> str:
+        try:
+            return next(lines)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+    entry_mod.read_prompt_message(plain_console)
+    text = plain_console.export_text()
+    assert entry_mod._HINT_PLAIN in text
+
+
+def test_ps1_empty_suppresses_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LISA_PROMPT_PS1='' suppresses the plain reader's banner entirely."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.setenv(entry_mod._PROMPT_PS1_ENV, "")
+    assert entry_mod.prompt_ps1() is None
+    out = io.StringIO()
+    console = Console(file=out, record=True, width=200)
+    lines = iter([])
+
+    def _fake_input() -> str:
+        try:
+            return next(lines)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+    entry_mod.read_prompt_message(console)
+    assert entry_mod._HINT_PLAIN not in console.export_text()
+
+
+def test_ps1_custom_text_replaces_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LISA_PROMPT_PS1=<text> replaces the plain reader's banner verbatim."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.setenv(entry_mod._PROMPT_PS1_ENV, "chat> ")
+    assert entry_mod.prompt_ps1() == "chat> "
+    out = io.StringIO()
+    console = Console(file=out, record=True, width=200)
+    lines = iter([])
+
+    def _fake_input() -> str:
+        try:
+            return next(lines)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+    entry_mod.read_prompt_message(console)
+    export = console.export_text()
+    assert "chat> " in export
+    assert entry_mod._HINT_PLAIN not in export
+
+
+def test_ps1_whitespace_only_suppresses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A whitespace-only PS1 value suppresses like empty — no blank banner."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.setenv(entry_mod._PROMPT_PS1_ENV, "   ")
+    assert entry_mod.prompt_ps1() is None
+
+
+# ── Grapheme-cluster deletion (emoji-safe backspace/delete) ───────────
+
+
+def test_grapheme_backspace_deletes_zwj_family_whole() -> None:
+    """Backspace removes a ZWJ family emoji as one cluster — no tearing."""
+    from hosts.cli import entry as entry_mod
+
+    before = "prefix 👨‍👩‍👧‍👦!"
+    assert entry_mod._delete_last_grapheme(before) == 1  # '!'
+    torn = before[: len(before) - 1]
+    assert entry_mod._delete_last_grapheme(torn) == 7  # the whole family
+    rest = torn[: len(torn) - 7]
+    assert rest == "prefix "
+
+
+def test_grapheme_backspace_never_leaves_dangling_zwj() -> None:
+    """No delete path leaves a dangling U+200D behind the cursor."""
+    from hosts.cli import entry as entry_mod
+
+    text = "x 👨‍👩‍👧‍👦"
+    for _ in range(len(text)):
+        cut = entry_mod._delete_last_grapheme(text)
+        text = text[: len(text) - cut]
+        if text and "\u200d" in text:
+            assert not text.endswith("\u200d")
+    assert text in {"x ", ""}
+
+
+def test_grapheme_delete_forward_removes_flag_pair() -> None:
+    """Forward delete removes a complete flag pair, never one half."""
+    from hosts.cli import entry as entry_mod
+
+    assert entry_mod._delete_first_grapheme("🇺🇸 tail") == 2
+    assert entry_mod._delete_first_grapheme("👍🏽 x") == 2  # base + skin tone
+    assert entry_mod._delete_first_grapheme("é") == 1  # precomposed é
+    assert entry_mod._delete_first_grapheme("e\u0301") == 2  # decomposed
+    half = "🇺"
+    assert entry_mod._delete_first_grapheme(half) == 1
+
+
+def test_grapheme_backspace_empty_and_noise() -> None:
+    """Empty text and pure combining noise delete without error."""
+    from hosts.cli import entry as entry_mod
+
+    assert entry_mod._delete_last_grapheme("") == 0
+    noise = "\u200d\u0301"
+    assert entry_mod._delete_last_grapheme(noise) == len(noise)
+    assert entry_mod._delete_last_grapheme("a\u200d") == 2  # dangling ZWJ rides with 'a'
+
+
+def test_grapheme_backspace_keep_word_motion_scenarios() -> None:
+    """Plain ASCII and CJK delete one codepoint (no over-reach)."""
+    from hosts.cli import entry as entry_mod
+
+    assert entry_mod._delete_last_grapheme("hello") == 1
+    assert entry_mod._delete_last_grapheme("世界") == 1
+    assert entry_mod._delete_last_grapheme("🙂") == 1
