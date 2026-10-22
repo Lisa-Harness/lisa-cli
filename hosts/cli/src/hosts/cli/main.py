@@ -1936,7 +1936,7 @@ def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> _Prearm
     return _PrearmedDecision(request_id=target, approve=False, remember="")
 
 
-async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
+async def _run_host_command_turn(runtime: HostRuntime, command: str) -> str:
     """Run one host-command message (no model turn), then close the pool.
 
     Mirrors the prompt-turn path without transport rendering: the

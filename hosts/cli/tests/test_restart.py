@@ -51,7 +51,7 @@ def test_prompt_pack_mutation_exits_zero(tmp_path: Path, monkeypatch: pytest.Mon
         pytest.raises(typer.Exit) as exc_info,
     ):
         cli_main._prompt_command(
-            message="continue",
+            message=["continue"],
             stdin=False,
             raw=False,
             log_level="",
