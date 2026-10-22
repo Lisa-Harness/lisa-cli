@@ -644,6 +644,21 @@ PromptRememberOption = Annotated[
         ),
     ),
 ]
+PromptSwapKeysOption = Annotated[
+    bool | None,
+    typer.Option(
+        "--swap-keys/--no-swap-keys",
+        help=(
+            "No-args editor key layout. Shipped default: Enter inserts a "
+            "newline; Ctrl-J or Alt+Enter sends — Enter never fires the "
+            "turn, so a hurried keypress cannot send a half-typed message "
+            "nor leak to the shell after the run. --swap-keys reverses to "
+            "chat-box (Enter sends); LISA_PROMPT_KEYS truthy does the same "
+            "without the flag; --no-swap-keys pins the shipped default "
+            "against a truthy env."
+        ),
+    ),
+]
 # ---------------------------------------------------------------------------
 # Runtime initialization (builds HostRuntime, not _RUNTIME_STATE)
 # ---------------------------------------------------------------------------
@@ -784,6 +799,12 @@ def _cli_callback(
         hidden=True,
         help="With lazy prompt routing: hoist --no-stdin onto the injected prompt turn.",
     ),
+    swap_keys: bool | None = typer.Option(
+        None,
+        "--swap-keys/--no-swap-keys",
+        hidden=True,
+        help="With lazy prompt routing: hoist the prompt turn's key-layout flag.",
+    ),
 ) -> None:
     # The group-level copies of the prompt-only flags exist so Click parses
     # `lisa -r "fix it"` as [group flags, prompt] instead of dying on an
@@ -791,9 +812,10 @@ def _cli_callback(
     # prompt command to OR in (Typer commands cannot read click's
     # thread-local context — see the hoist comment in ``_prompt_command``).
     # They are hidden (not documented) — the documented home for these flags
-    # is `lisa prompt`.
-    _GROUP_HOIST.update(raw=raw, quiet=quiet, no_stdin=no_stdin)
-    ctx.obj = {"raw": raw, "quiet": quiet, "no_stdin": no_stdin}
+    # is `lisa prompt`. swap_keys stays tri-state (None = not given) so the
+    # prompt command's env fallback can still fire.
+    _GROUP_HOIST.update(raw=raw, quiet=quiet, no_stdin=no_stdin, swap_keys=swap_keys)
+    ctx.obj = {"raw": raw, "quiet": quiet, "no_stdin": no_stdin, "swap_keys": swap_keys}
     if version:
         console.print(f"lisa v{_get_version()}")
         raise typer.Exit()
@@ -1916,7 +1938,12 @@ _prompt_reader: Callable[..., str | None] | None = None
 
 
 def _collect_interactive_or_error(
-    full_instruction: str, payload: str, data_dir: str, profile: str
+    full_instruction: str,
+    payload: str,
+    data_dir: str,
+    profile: str,
+    *,
+    swap_keys: bool | None = None,
 ) -> str:
     """Resolve the no-input case: editor on a tty, usage error otherwise.
 
@@ -1925,8 +1952,16 @@ def _collect_interactive_or_error(
     message is collected outside the shell's argument grammar — quote
     characters arrive literally (see :mod:`hosts.cli.entry`), and
     ``$(cmd)`` is expanded over the editor text (:mod:`hosts.cli.expand`).
-    Under redirection there is no editor: a pipeline wants an error, not
-    a prompt. Returns the message or raises ``typer.Exit``.
+
+    ``swap_keys`` is tri-state and names the EXCEPTIONAL layout:
+    ``True`` (``--swap-keys``) = chat-box, Enter sends; ``False``
+    (``--no-swap-keys``) = pin the shipped swapped layout against a
+    truthy ``LISA_PROMPT_KEYS``; ``None`` (flag absent) = the env
+    decides in the entry module (truthy env = chat-box, else the
+    shipped default). The reader receives the resolved layout as
+    ``swapped_keys`` (True = Enter-newline shipped default; False =
+    chat-box). Under redirection there is no editor: a pipeline wants
+    an error, not a prompt. Returns the message or raises ``typer.Exit``.
     """
     del full_instruction  # empty by contract; parameter documents intent
     if sys.stdin.isatty() and sys.stdout.isatty():
@@ -1934,9 +1969,21 @@ def _collect_interactive_or_error(
 
         reader = _prompt_reader or entry_mod.read_prompt_message_tui
         if reader is entry_mod.read_prompt_message_tui:
+            # Flag state -> reader layout (True=shipped, False=chat-box):
+            #   absent (None)      -> env decides (swapped_keys=None)
+            #   --no-swap-keys     -> shipped (swapped_keys=True)
+            #   --swap-keys        -> chat-box (swapped_keys=False)
+            resolved: bool | None
+            if swap_keys is None:
+                resolved = None
+            elif swap_keys is False:
+                resolved = True
+            else:
+                resolved = False
             terminal_message = reader(
                 console,
                 history_path=entry_mod.prompt_history_path(data_dir, profile),
+                swapped_keys=resolved,
             )
         else:
             terminal_message = reader(console)
@@ -2459,6 +2506,7 @@ def _prompt_command(
     approve: PromptApproveOption = "",
     deny: PromptDenyOption = "",
     remember: PromptRememberOption = "",
+    swap_keys: PromptSwapKeysOption = None,
 ) -> None:
     # Group-level hoist: `lisa -r "fix it"` parses -r at group level (see
     # _cli_callback) and lazy-routing lands here; OR the hoisted values in.
@@ -2471,8 +2519,11 @@ def _prompt_command(
     raw = raw or bool(group_obj.get("raw"))
     quiet = quiet or bool(group_obj.get("quiet"))
     stdin = stdin and not bool(group_obj.get("no_stdin"))
-    quiet = quiet or bool(group_obj.get("quiet"))
-    stdin = stdin and not bool(group_obj.get("no_stdin"))
+    # swap_keys is tri-state (None = absent): let the env decide — unless
+    # the hoist ORing pattern would clobber it, so read the hoist only
+    # when this command's own flag is absent.
+    if swap_keys is None:
+        swap_keys = group_obj.get("swap_keys")
     # Pre-armed decisions are handled below; standalone approve/deny
     # commands are registered with Typer and never enter this function.
     words = message or []
@@ -2489,11 +2540,12 @@ def _prompt_command(
     decision = _prompt_prearmed_decision(approve, deny, remember)
     if not full_instruction.strip() and not payload.strip() and decision is None:
         full_instruction = _collect_interactive_or_error(
-            full_instruction, payload, data_dir, profile
+            full_instruction, payload, data_dir, profile, swap_keys=swap_keys
         )
     full_message = _compose_prompt_message(full_instruction, payload)
     if raw:
         full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
+    del swap_keys  # consumed above; the editor call resolved the layout
     runtime = _initialize_runtime_or_exit(
         log_level=log_level,
         log_path=log,

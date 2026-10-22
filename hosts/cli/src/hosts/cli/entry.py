@@ -13,11 +13,14 @@ Two readers, same contract:
   Ctrl-Z+Enter on Windows).
 - :func:`read_prompt_message_tui` — prompt_toolkit single-box editor
   (when the optional ``lisa-cli[prompt]`` extra is installed, with
-  graceful fallback to the plain reader). Enter/numpad-Enter submits;
-  Ctrl-J and Alt+Enter (``escape, enter``) start a new line — the
-  reverse of prompt_toolkit's ``multiline=True`` defaults, matching the
-  chat-box semantics the pre-REPL CLI settled on, portable across
-  kitty/CSI-u terminals where Shift+Enter cannot be distinguished.
+  graceful fallback to the plain reader). Send and newline are
+  swappable between Enter and Ctrl-J (Alt+Enter follows Ctrl-J in both
+  layouts); the shipped default is swapped — Enter inserts a newline
+  and Ctrl-J / Alt+Enter sends — so a hurried Enter never fires the
+  turn (finish with Ctrl-J, or Ctrl-D on an empty line in the plain
+  reader) and no trailing keystroke can reach the caller's shell.
+  ``--swap-keys`` / truthy ``LISA_PROMPT_KEYS`` restores chat-box
+  semantics (Enter sends).
 
 The TUI reader owns its navigation model rather than trusting
 prompt_toolkit's defaults: Ctrl+Up/Ctrl+Down are inert (prompt_toolkit
@@ -69,15 +72,41 @@ _RI_PAIR = 2  # one flag = exactly two regional indicators
 #: verbatim (plain text — no template expansion); unset keeps defaults.
 _PROMPT_PS1_ENV = "LISA_PROMPT_PS1"
 
+#: Env var selecting the editor key model, PS1-style. Unset or falsy
+#: (``0/false/no/off``): swapped default — Enter inserts a newline, Ctrl-J
+#: or Alt+Enter sends (newline-first, so an impatient finisher cannot
+#: send a half-typed message, and a double-tap cannot reach the shell).
+#: Truthy (``1/true/yes/on``): chat-box — Enter sends, Ctrl-J or
+#: Alt+Enter adds a newline. ``--swap-keys`` wins over the env var.
+_PROMPT_KEYS_ENV = "LISA_PROMPT_KEYS"
+_TRUTHY = {"1", "true", "yes", "on"}
+
 #: Marker printed before the plain reader so the operator knows the
 #: terminal, not argv, owns the input now. $() expands (expand.py runs
 #: over editor text); quote characters survive because no shell ever
 #: tokenized this input.
 _HINT_PLAIN = (
     "Lisa prompt - quotes are literal; $(cmd) is expanded. "
-    "Ctrl-D or Ctrl-Z (Ctrl-C aborts), on the last line to send."
+    "Ctrl-D on an empty line sends; Ctrl-C aborts. "
+    "(Ctrl-Z suspends to your shell, it does not send.)"
 )
-_HINT_SUBMIT = "Enter sends · Alt+Enter or Ctrl-J adds a line · Ctrl-C aborts"
+_HINT_SUBMIT_CHAT = "Enter sends · Alt+Enter or Ctrl-J adds a line · Ctrl-C aborts"
+_HINT_SUBMIT_SWAP = "Enter adds a line · Alt+Enter or Ctrl-J sends · Ctrl-C aborts"
+
+
+def prompt_keys_env_wants_enter_send() -> bool:
+    """Resolve the key model from ``LISA_PROMPT_KEYS`` (env back for the flag).
+
+    The reader calls this only when neither ``--swap-keys`` nor
+    ``--no-swap-keys`` was given. Returns ``True`` when the env asks for
+    chat-box (Enter sends — the exceptional model); ``False`` otherwise
+    (unset/env falsy = the shipped swapped layout, Enter = newline).
+    """
+    value = os.getenv(_PROMPT_KEYS_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUTHY
+
 
 #: prompt_toolkit pieces when the optional extra is installed; ``None``
 #: means the plain reader is the only reader. The import lives here
@@ -247,25 +276,38 @@ def _delete_first_grapheme(text: str) -> int:
     return i
 
 
-def _add_navigate_bindings(bindings: Any) -> None:
-    """Bind submit/newline and navigation keys (chat-box semantics).
+def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
+    """Bind submit/newline and navigation keys.
 
-    Enter/numpad-Enter submit; Ctrl-J and Alt+Enter add a newline.
-    Ctrl+Up/Down are inert (prompt_toolkit's history navigation replaces
-    the whole multiline buffer); Alt+Up/Down walk prompt history.
+    ``swapped`` (the default) puts newline on Enter and send on
+    Ctrl-J / Alt+Enter / Esc-then-Enter — the impatient-finisher-safe
+    model: Enter never sends, so a hurried double-tap adds a blank line
+    instead of firing the turn, and no buffered keystroke can reach the
+    caller's shell after the process exits. ``swapped=False`` is
+    chat-box semantics (Enter sends), opt-in via ``--swap-keys`` /
+    ``LISA_PROMPT_KEYS``. Either way Ctrl+Up/Down stay inert
+    (prompt_toolkit's history navigation replaces the whole multiline
+    buffer) and Alt+Up/Down walk prompt history.
     """
+    send_seqs, newline_seqs = (
+        ((("c-j",), ("escape", "enter")), (("enter",),))
+        if swapped
+        else ((("enter",),), (("c-j",), ("escape", "enter")))
+    )
 
-    @bindings.add("enter", eager=True)
-    def _submit(event: Any) -> None:
+    def _send(event: Any) -> None:
         event.current_buffer.validate_and_handle()
 
-    @bindings.add("c-j")
-    def _newline_ctrl_j(event: Any) -> None:
+    def _newline(event: Any) -> None:
         event.current_buffer.insert_text("\n")
 
-    @bindings.add("escape", "enter")
-    def _newline_alt_enter(event: Any) -> None:
-        event.current_buffer.insert_text("\n")
+    for seq in send_seqs:
+        # eager on the single Enter key: swallow it before PT's
+        # buffer-complete machinery; the escape-enter sequence is a
+        # two-key prefix match and must not be eager.
+        bindings.add(*seq, eager=len(seq) == 1)(_send)
+    for seq in newline_seqs:
+        bindings.add(*seq)(_newline)
 
     @bindings.add("c-up", eager=True)
     def _inert_c_up(event: Any) -> None:
@@ -312,27 +354,36 @@ def _add_grapheme_delete_bindings(bindings: Any) -> None:
         buffer.cursor_position = pos
 
 
-def _tui_key_bindings() -> Any:
-    """Build the chat-box key model for the TUI reader.
+def _tui_key_bindings(swapped: bool = True) -> Any:
+    """Build the owned key model for the TUI reader.
 
-    See :func:`read_prompt_message_tui` for the semantics each binding
-    implements; this exists so the reader body stays under its
-    complexity budget.
+    ``swapped`` selects the send/newline layout (see
+    :func:`_add_navigate_bindings`); this exists so the reader body
+    stays under its complexity budget.
     """
     bindings = _PT["KeyBindings"]()
-    _add_navigate_bindings(bindings)
+    _add_navigate_bindings(bindings, swapped=swapped)
     _add_grapheme_delete_bindings(bindings)
     return bindings
 
 
-def read_prompt_message_tui(console: Console, *, history_path: Path) -> str | None:
+def read_prompt_message_tui(
+    console: Console, *, history_path: Path, swapped_keys: bool | None = None
+) -> str | None:
     """Read a single-box message with prompt_toolkit (extra installed).
 
-    Chat-box semantics, owned key model (prompt_toolkit's defaults are
-    not trusted for a multiline chat box):
+    Owned key model (prompt_toolkit's defaults are not trusted for a
+    multiline chat box); ``swapped_keys`` picks the layout, tri-state:
 
-    - Enter / numpad-Enter submit; Ctrl-J and Alt+Enter (the
-      ``escape, enter`` sequence) start a new line.
+    - ``True`` (the shipped default; also when the flag is absent and
+      ``LISA_PROMPT_KEYS`` is unset/falsy): Enter inserts a newline;
+      Ctrl-J, Alt+Enter, or Esc-then-Enter sends. Enter never sends — a
+      hurried double-tap adds a blank line instead of firing the turn,
+      and no buffered keystroke can reach the caller's shell after the
+      process exits.
+    - ``False`` (chat-box, opt-in via ``--swap-keys`` or truthy
+      ``LISA_PROMPT_KEYS``): Enter sends; Ctrl-J and Alt+Enter add a
+      newline.
     - Ctrl+Up / Ctrl+Down are inert: prompt_toolkit binds them to
       previous/next-history, which replaces the whole multiline buffer
       with a history entry — the corruption that forced Ctrl-C.
@@ -350,11 +401,19 @@ def read_prompt_message_tui(console: Console, *, history_path: Path) -> str | No
     """
     if _PT is None:
         return read_prompt_message(console)
+    if swapped_keys is None:
+        # Neither flag nor parameter picked a layout: the env decides.
+        # Truthy LISA_PROMPT_KEYS = chat-box (Enter sends); unset or
+        # falsy = the shipped swapped layout (Enter = newline).
+        swapped_keys = not prompt_keys_env_wants_enter_send()
     history_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         history = _PT["FileHistory"](str(history_path))
-        bindings = _tui_key_bindings()
-        hint = prompt_ps1() if _PROMPT_PS1_ENV in os.environ else _HINT_SUBMIT
+        bindings = _tui_key_bindings(swapped=swapped_keys)
+        if _PROMPT_PS1_ENV in os.environ:
+            hint = prompt_ps1()
+        else:
+            hint = _HINT_SUBMIT_SWAP if swapped_keys else _HINT_SUBMIT_CHAT
         hint_html: Any | None = (
             _PT["HTML"](f"<style fg='ansibrightblack'>{hint}</style>") if hint else None
         )
@@ -376,4 +435,9 @@ def read_prompt_message_tui(console: Console, *, history_path: Path) -> str | No
     return text.strip("\n")
 
 
-__all__ = ["prompt_history_path", "read_prompt_message", "read_prompt_message_tui"]
+__all__ = [
+    "prompt_history_path",
+    "prompt_keys_env_wants_enter_send",
+    "read_prompt_message",
+    "read_prompt_message_tui",
+]

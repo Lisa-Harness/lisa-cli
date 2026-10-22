@@ -98,15 +98,20 @@ expands before lisa even runs.
 **2. No arguments on a terminal (lisa-managed input; no shell rules).**
 `lisa prompt` with nothing to send drops into an input editor. Quote
 characters, backticks, and apostrophes are collected literally — no
-escaping — and Enter submits (Alt+Enter or Ctrl-J adds a line; Ctrl-C
-aborts with the SIGINT exit code). `$(command)` is expanded here as shell
+escaping. Key layout is swapped by default: **Enter inserts a newline;
+Ctrl-J (or Alt+Enter) sends** — Enter never fires the turn, so a hurried
+keypress can't send a half-typed message or leak to your shell after the
+run (and Ctrl-Z stays a plain shell suspend). Ctrl-C aborts with the
+SIGINT exit code. `$(command)` is expanded here as shell
 substitution (nesting works; a failed command is a loud error, exit 2;
 escape with `\$(` for a literal `$(`). Single-quoted spans don't expand
 and backticks stay literal. Submitted prompts persist to
-`<data-dir>/state/prompt_history.txt` for Up-arrow reuse. The editor uses
+`<data-dir>/state/prompt_history.txt` for Alt+Up reuse. The editor uses
 prompt_toolkit when the optional `lisa-cli[prompt]` extra is installed,
-otherwise a plain line-at-a-time reader (Ctrl-D — or Ctrl-Z then Enter on
-Windows — sends).
+otherwise a plain line-at-a-time reader (Ctrl-D on an empty line sends;
+Ctrl-Z does not). Prefer chat-box Enter-sends? Pass `--no-swap-keys`,
+or set `LISA_PROMPT_KEYS=1` (any truthy value; the flag wins over the
+env).
 
 **3. Piped stdin (payload rules).** When stdin is not a tty its contents
 are attached ahead of your instruction, so config/data can flow through

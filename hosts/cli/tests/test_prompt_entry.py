@@ -11,6 +11,11 @@ payload, and no pre-armed decision, it drops into lisa-managed input
   bypasses both the shell and the $() expander by design in tests).
 - Ctrl-C / no input aborts with the SIGINT exit code (130); whitespace
   input is a usage error (exit 2).
+- Key layout: swapped by default (Enter = newline, Ctrl-J/Alt+Enter =
+  send); ``--swap-keys`` (hoisted at group level too) or truthy
+  ``LISA_PROMPT_KEYS`` selects chat-box (Enter sends). The TUI binding
+  builder is exercised directly for both layouts, plus the env
+  resolver's truthy set.
 
 The reader seam (``cli_main._prompt_reader``) is monkeypatched so no
 test touches a real terminal.
@@ -388,3 +393,153 @@ def test_grapheme_backspace_keep_word_motion_scenarios() -> None:
     assert entry_mod._delete_last_grapheme("hello") == 1
     assert entry_mod._delete_last_grapheme("世界") == 1
     assert entry_mod._delete_last_grapheme("🙂") == 1
+
+
+# ── Key layout: swapped default, --swap-keys / LISA_PROMPT_KEYS opt-in ─
+
+
+def test_prompt_keys_default_is_swapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No LISA_PROMPT_KEYS: the shipped swapped layout (Enter = newline)."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.delenv(entry_mod._PROMPT_KEYS_ENV, raising=False)
+    assert entry_mod.prompt_keys_env_wants_enter_send() is False
+
+
+@pytest.mark.parametrize("val", ["0", "false", "no", "off", " "])
+def test_prompt_keys_falsy_env_keeps_swap(monkeypatch: pytest.MonkeyPatch, val: str) -> None:
+    """Falsy LISA_PROMPT_KEYS is still the shipped swapped default."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.setenv(entry_mod._PROMPT_KEYS_ENV, val)
+    assert entry_mod.prompt_keys_env_wants_enter_send() is False
+
+
+@pytest.mark.parametrize("val", ["1", "true", "yes", "on", "YES"])
+def test_prompt_keys_truthy_env_wants_enter_send(monkeypatch: pytest.MonkeyPatch, val: str) -> None:
+    """Truthy LISA_PROMPT_KEYS selects chat-box (Enter sends)."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.setenv(entry_mod._PROMPT_KEYS_ENV, val)
+    assert entry_mod.prompt_keys_env_wants_enter_send() is True
+
+
+def test_binding_layouts_swap_send_and_newline_keys() -> None:
+    """Enter and Ctrl-J land on opposite actions in the two layouts."""
+    from hosts.cli import entry as entry_mod
+
+    def _layout(swapped: bool) -> dict[tuple, str]:
+        actions: dict[tuple, str] = {}
+
+        class _FakeBindings:
+            def add(self, *keys: Any, **_kw: Any):
+                def _decorator(fn: Any) -> Any:
+                    actions[keys] = "send" if fn.__name__ == "_send" else "newline"
+                    return fn
+
+                return _decorator
+
+        entry_mod._add_navigate_bindings(_FakeBindings(), swapped=swapped)
+        return actions
+
+    swapped = _layout(True)
+    chat = _layout(False)
+    assert swapped[("enter",)] == "newline"
+    assert swapped[("c-j",)] == "send"
+    assert swapped[("escape", "enter")] == "send"
+    assert chat[("enter",)] == "send"
+    assert chat[("c-j",)] == "newline"
+    assert chat[("escape", "enter")] == "newline"
+
+
+def test_tui_bindings_eager_send_keys_in_both_layouts() -> None:
+    """Single-key send bindings are eager; sequence bindings are not."""
+    from hosts.cli import entry as entry_mod
+
+    def _captured(swapped: bool) -> dict[tuple, bool]:
+        calls: dict[tuple, bool] = {}
+
+        class _FakeBindings:
+            def add(self, *keys: Any, eager: Any = False, **_kw: Any):
+                def _decorator(fn: Any) -> Any:
+                    calls[keys] = bool(eager)
+                    return fn
+
+                return _decorator
+
+        entry_mod._add_navigate_bindings(_FakeBindings(), swapped=swapped)
+        return calls
+
+    swapped = _captured(True)
+    chat = _captured(False)
+    assert swapped[("c-j",)] is True  # single-key send swallowed eagerly
+    assert swapped[("escape", "enter")] is False  # sequence: not eager
+    assert chat[("enter",)] is True  # chat-box Enter-send is eager too
+    assert chat[("escape", "enter")] is False
+
+
+def test_tui_reader_hint_follows_layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """The toolbar hint names the active layout: swapped vs chat-box."""
+    from prompt_toolkit.key_binding import KeyBindings as _RealKB
+
+    from hosts.cli import entry as entry_mod
+
+    seen: dict[str, Any] = {}
+
+    class _FakeSession:
+        def __init__(self, **kwargs: Any) -> None:
+            seen["toolbar"] = kwargs.get("bottom_toolbar")
+            seen["bindings"] = kwargs.get("key_bindings")
+
+        def prompt(self, *_a: Any, **_kw: Any) -> str:
+            return "hello"
+
+    real_pt = entry_mod._PT
+    fake_pt = dict(real_pt)
+    fake_pt["PromptSession"] = _FakeSession
+    fake_pt["KeyBindings"] = _RealKB
+    monkeypatch.setattr(entry_mod, "_PT", fake_pt)
+    hist = tmp_path / "state" / "prompt_history.txt"
+
+    # swapped (shipped default: no env, no flag)
+    monkeypatch.delenv(entry_mod._PROMPT_KEYS_ENV, raising=False)
+    entry_mod.read_prompt_message_tui(Console(quiet=True, file=io.StringIO()), history_path=hist)
+    assert entry_mod._HINT_SUBMIT_SWAP in str(seen["toolbar"])
+    # chat-box via truthy env (Enter sends hint)
+    monkeypatch.setenv(entry_mod._PROMPT_KEYS_ENV, "1")
+    entry_mod.read_prompt_message_tui(Console(quiet=True, file=io.StringIO()), history_path=hist)
+    assert entry_mod._HINT_SUBMIT_CHAT in str(seen["toolbar"])
+    assert entry_mod._HINT_SUBMIT_SWAP not in str(seen["toolbar"])
+    # explicit swapped_keys=True pins the shipped layout against the env
+    entry_mod.read_prompt_message_tui(
+        Console(quiet=True, file=io.StringIO()), history_path=hist, swapped_keys=True
+    )
+    assert entry_mod._HINT_SUBMIT_SWAP in str(seen["toolbar"])
+
+
+def test_seam_threads_swap_keys_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """The flag passes through tri-state: absent -> env, True -> chat-box."""
+    calls: list[dict[str, Any]] = []
+
+    def _fake_tui(console: Any, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "msg"
+
+    monkeypatch.setattr("hosts.cli.entry.read_prompt_message_tui", _fake_tui)
+    monkeypatch.delenv("LISA_PROMPT_KEYS", raising=False)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    stdout_obj: Any = io.StringIO()
+    stdout_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    monkeypatch.setattr(sys, "stdout", stdout_obj)
+
+    # Flag absent: the env decides inside the reader (swapped_keys=None).
+    cli_main._collect_interactive_or_error("", "", "/tmp/d", "", swap_keys=None)
+    assert calls[-1].get("swapped_keys") is None
+    # --no-swap-keys pins the shipped swapped layout.
+    cli_main._collect_interactive_or_error("", "", "/tmp/d", "", swap_keys=False)
+    assert calls[-1].get("swapped_keys") is True
+    # --swap-keys selects chat-box (Enter sends).
+    cli_main._collect_interactive_or_error("", "", "/tmp/d", "", swap_keys=True)
+    assert calls[-1].get("swapped_keys") is False
