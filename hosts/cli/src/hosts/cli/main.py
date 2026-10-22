@@ -1942,13 +1942,28 @@ def _collect_interactive_or_error(
         if terminal_message is None:
             raise typer.Exit(code=_ABORT_EXIT) from None
         if terminal_message.strip():
-            return terminal_message
+            return _expand_editor_message(terminal_message)
     console.print(
         "[red]No message and no piped input. Pass a message and/or pipe data on "
         "stdin.[/red]"
     )
     raise typer.Exit(code=2)
 
+
+def _expand_editor_message(text: str) -> str:
+    """Run ``$()`` substitution over editor-collected text (see expand.py).
+
+    A failed substitution is loud: the failing command is printed to
+    stderr and the run exits 2 — never a silently-mutated message.
+    """
+    from hosts.cli.expand import expand_shell_substitutions
+
+    expanded, failures = expand_shell_substitutions(text)
+    if failures:
+        shown = "; ".join(f"$({cmd})" for cmd in failures)
+        console.print(f"[red]Shell substitution failed: {shown}[/red]")
+        raise typer.Exit(code=2)
+    return expanded
 
 
 def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> _PrearmedDecision | None:
