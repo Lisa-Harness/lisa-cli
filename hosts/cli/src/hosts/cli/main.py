@@ -382,13 +382,6 @@ app.add_typer(policy_app, name="policy")
 # "Response" rule).
 _STYLE_RESPONSE = "dark_sea_green4"
 
-# Exit code returned when a restart is required (e.g. after a pack lifecycle
-# change). Scripts can detect this to distinguish "restart needed" from a
-# clean exit; re-running the command in a fresh process reloads entry points,
-# pack catalogs, and MCP manifests. Matches the BSD sysexits.h value for
-# EX_UNAVAILABLE.
-_RESTART_REQUIRED_EXIT = 69
-
 # Exit code returned when a `prompt` turn ends with an unresolved approval
 # request. A prompt run has no interactive loop to decide an approval, so
 # the request stays durable and the process exits non-zero — scripts detect
@@ -760,32 +753,6 @@ def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Err
             lines[0] = f"[bold]{head.strip()}[/bold]:{tail}"
     body = "\n".join(lines) or exc.__class__.__name__
     console.print(Panel(body, title=title, border_style="indian_red"))
-
-
-# ---------------------------------------------------------------------------
-# Restart helper
-# ---------------------------------------------------------------------------
-
-
-def _exit_restart_required() -> None:
-    """Print a restart-required notice and exit for one-shot commands.
-
-    Used by ``prompt`` and ``pack install/uninstall/update`` after a successful
-    pack lifecycle change. One-shot commands do NOT re-exec (re-running the
-    same command would redo the mutation). Instead, print a clear notice and
-    exit with :data:`_RESTART_REQUIRED_EXIT` on all platforms so the user
-    manually re-runs the next command with a fresh process.
-    """
-    console.print(
-        Panel(
-            "A runtime change requires a restart to reload entry points,\n"
-            "pack catalogs, and MCP manifests.\n\n"
-            "Please re-run [bold]lisa[/bold] to continue.",
-            title="Restart Required",
-            border_style="gold3",
-        )
-    )
-    raise typer.Exit(code=_RESTART_REQUIRED_EXIT)
 
 
 # ---------------------------------------------------------------------------
@@ -1558,7 +1525,7 @@ def _dispatch_constant_command(command: str, *, title: str, **runtime_kwargs: An
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    _restart, text = asyncio.run(_run_host_command_turn(runtime, command))
+    text = asyncio.run(_run_host_command_turn(runtime, command))
     _render_markdown_response(text, title=title)
 
 
@@ -1873,16 +1840,13 @@ def _finish_pack_mutation(runtime: HostRuntime, result: tuple[bool, str]) -> Non
     """Print a pack lifecycle result and apply the exit-code contract.
 
     Failure prints the details in red and exits 1; success prints the
-    details and exits via :func:`_exit_restart_required` when the runtime
-    flagged a restart, else 0.
+    details and exits 0 — the runtime reloads pack state on next boot.
     """
     ok, details = result
     if not ok:
         console.print(f"[red]{details}[/red]")
         raise typer.Exit(code=1)
     console.print(details)
-    if runtime.session.restart_required:
-        _exit_restart_required()
     raise typer.Exit(code=0)
 
 
@@ -1975,7 +1939,7 @@ def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> _Prearm
 async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bool, str]:
     """Run one host-command message (no model turn), then close the pool.
 
-    Mirrors ``_run_prompt_with_teardown`` without transport rendering: the
+    Mirrors the prompt-turn path without transport rendering: the
     command path returns text (or a structured result) that this helper
     prints through the shared console. The MCP pool starts in this event
     loop and closes in the same one (anyio same-loop contract).
@@ -1988,8 +1952,7 @@ async def _run_host_command_turn(runtime: HostRuntime, command: str) -> tuple[bo
         result = await handle_message(runtime, command, NullTransport())
     finally:
         await runtime.aclose()
-    text = getattr(result, "text", "") or str(result)
-    return runtime.session.restart_required, text
+    return getattr(result, "text", "") or str(result)
 
 
 async def _resolve_pending_request_id(runtime: HostRuntime) -> str:
@@ -2024,7 +1987,7 @@ async def _decide_approval_turn(
     request_id: str,
     approve: bool,
     remember: str,
-) -> tuple[bool, str]:
+) -> str:
     """Decide one approval through the typed core, then close the pool.
 
     Mirrors ``_run_host_command_turn``: no transport rendering — the
@@ -2053,8 +2016,7 @@ async def _decide_approval_turn(
         )
     finally:
         await runtime.aclose()
-    text = getattr(result, "text", "") or str(result)
-    return runtime.session.restart_required, text
+    return getattr(result, "text", "") or str(result)
 
 
 def _run_decision(
@@ -2069,18 +2031,16 @@ def _run_decision(
     The CLI's runtime options are forwarded verbatim; the decision is a
     value (id + direction + optional remember prefix), never a command
     string, so no quoting round trip exists between the CLI and the host.
-    Prints the reply and applies the restart-required exit contract.
+    Prints the reply and exits 0.
     """
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    restart_required, text = asyncio.run(
+    text = asyncio.run(
         _decide_approval_turn(runtime, request_id=request_id, approve=approve, remember=remember)
     )
     if text:
         console.print(text)
-    if restart_required:
-        _exit_restart_required()
     raise typer.Exit(code=0)
 
 
@@ -2091,19 +2051,16 @@ def _run_host_command(command: str, **runtime_kwargs: Any) -> None:
     normalized to its slash form and dispatched via ``handle_message``
     exactly as a persistent host would send it. This keeps pack commands and
     other host-admin replies host-owned while bypassing the model-turn path.
-    Prints the reply and applies the restart-required exit contract when
-    required.
+    Prints the reply and exits 0.
     """
     if not command.startswith("/"):
         command = "/" + command
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    restart_required, text = asyncio.run(_run_host_command_turn(runtime, command))
+    text = asyncio.run(_run_host_command_turn(runtime, command))
     if text:
         console.print(text)
-    if restart_required:
-        _exit_restart_required()
     raise typer.Exit(code=0)
 
 
@@ -2408,16 +2365,22 @@ def _compose_prompt_message(instruction: str, payload: str) -> str:
 
 @app.command("prompt", help="Run a single turn and print the response.")
 def _prompt_command(
-    message: str = typer.Argument(
-        "",
-        help=(
-            "Message to route through the host. When stdin is piped (not a tty), "
-            "its contents are attached as the turn payload, e.g. "
-            "`cat f.conf | lisa prompt -r 'fix this config'`. "
-            "Approval decisions that skip the turn: `lisa approve <id> "
-            "[--remember <prefix>]` and `lisa deny <id>`."
+    message: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help=(
+                "Message to route through the host; multiple words are joined "
+                "with spaces, so short prompts work unquoted: "
+                "`lisa prompt fix the config parser`. Quote only to preserve "
+                "inner spaces, quote characters, or shell-expansion semantics. "
+                "When stdin is piped (not a tty), its contents are attached as "
+                "the turn payload, e.g. "
+                "`cat f.conf | lisa prompt -r 'fix this config'`. "
+                "Approval decisions that skip the turn: `lisa approve <id> "
+                "[--remember <prefix>]` and `lisa deny <id>`."
+            ),
         ),
-    ),
+    ] = None,
     stdin: StdinOption = True,
     raw: RawOption = False,
     log_level: LogLevelOption = "",
@@ -2454,6 +2417,8 @@ def _prompt_command(
     stdin = stdin and not bool(group_obj.get("no_stdin"))
     # Pre-armed decisions are handled below; standalone approve/deny
     # commands are registered with Typer and never enter this function.
+    words = message or []
+    full_instruction = " ".join(words)
     payload = ""
     if stdin and not sys.stdin.isatty():
         try:
@@ -2464,12 +2429,12 @@ def _prompt_command(
     # A pre-armed decision (--approve/--deny) carries no message and no
     # piped payload; it is consumed at the end of the turn.
     decision = _prompt_prearmed_decision(approve, deny, remember)
-    if not message.strip() and not payload.strip() and decision is None:
+    if not full_instruction.strip() and not payload.strip() and decision is None:
         console.print(
             "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
         )
         raise typer.Exit(code=2)
-    full_message = _compose_prompt_message(message, payload)
+    full_message = _compose_prompt_message(full_instruction, payload)
     if raw:
         full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
     runtime = _initialize_runtime_or_exit(
@@ -2491,7 +2456,7 @@ def _prompt_command(
     if runtime is None:
         return
     try:
-        restart_required, transport = asyncio.run(
+        transport = asyncio.run(
             _run_prompt_with_teardown(
                 runtime,
                 full_message,
@@ -2523,8 +2488,7 @@ def _prompt_command(
         # printed to stderr; stdout got nothing. Exit non-zero so pipelines
         # never mistake the question for the requested artifact.
         raise typer.Exit(code=_YIELD_UNRESOLVED_EXIT)
-    if restart_required:
-        _exit_restart_required()
+    raise typer.Exit(code=0)
 
 
 async def _run_prompt_with_teardown(
@@ -2536,7 +2500,7 @@ async def _run_prompt_with_teardown(
     tool_detail: int = 0,
     streaming_mode: str = "none",
     decision: _PrearmedDecision | None = None,
-) -> tuple[bool, PromptTransport]:
+) -> PromptTransport:
     """Run one turn (and any pre-armed decision), then close the MCP pool.
 
     A pre-armed decision (``--approve``/``--deny``) is dispatched FIRST,
@@ -2545,8 +2509,8 @@ async def _run_prompt_with_teardown(
     before the turn runs with it. ``--remember`` persists an allow rule for
     the decided prefix (default prefix when no explicit value is given).
 
-    Returns ``(restart_required, transport)`` — the transport is returned so
-    the caller can inspect post-turn state (``approval_unresolved``).
+    Returns the transport so the caller can inspect post-turn state
+    (``approval_unresolved``).
 
     In raw mode the transport console moves to stderr so activity output
     (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
@@ -2592,13 +2556,13 @@ async def _run_prompt_with_teardown(
                 transport.stop_activity()
                 await runtime.aclose()
                 await transport.on_response(decision_text)
-                return runtime.session.restart_required, transport
+                return transport
         if message:
             await handle_message(runtime, message, transport)
     finally:
         transport.stop_activity()
         await runtime.aclose()
-    return runtime.session.restart_required, transport
+    return transport
 
 
 def _collect_model_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]]:

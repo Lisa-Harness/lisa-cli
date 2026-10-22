@@ -4,9 +4,9 @@ The CLI ``lisa pack update`` command mirrors the in-REPL ``/pack update``
 command by delegating to :func:`runtime.commands.run_pack_update` (single
 pack) or :func:`runtime.commands.run_pack_update_all` (``--all``). These
 tests verify the dispatch wiring, argument validation, exit codes, and
-the restart-required contract without paying the full
-``_initialize_runtime`` cost: we stub the runtime builder and the core
-framework functions, then invoke the Typer callback directly.
+the restart-flag tolerance (success exits 0 regardless) without paying
+the full ``_initialize_runtime`` cost: we stub the runtime builder and
+the core framework functions, then invoke the Typer callback directly.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ def _invoke_pack_update(
                 thread_dir="",
                 no_thread=False,
                 session_context="",
-                    timezone="",
+                timezone="",
                 state_snapshot="",
                 streaming="none",
                 host_log="",
@@ -216,13 +216,15 @@ def test_pack_update_unknown_action_exits_2(tmp_path: Path) -> None:
     assert any("Unknown action" in line for line in console.lines)
 
 
-# ── restart contract ──────────────────────────────────────────────────
+# ── restart-flag tolerance ────────────────────────────────────────────
 
 
-def test_pack_update_restart_required_exits_with_restart_code(
-    tmp_path: Path,
-) -> None:
-    """After a successful update, restart_required exits _RESTART_REQUIRED_EXIT."""
+def test_pack_update_restart_flag_exits_zero(tmp_path: Path) -> None:
+    """A successful update still exits 0 even when restart_required is set.
+
+    The framework reloads pack state on its next boot, so the CLI does not
+    demand a manual restart.
+    """
     runtime = _make_runtime(tmp_path)
     runtime.session.request_restart("pack update: lisa-pack-cloudflare")
 
@@ -232,14 +234,12 @@ def test_pack_update_restart_required_exits_with_restart_code(
         runtime=runtime,
         update_result=(True, "Updated 'lisa-pack-cloudflare'."),
     )
-    assert exit_code == cli_main_restart_exit()
+    assert exit_code == 0
     assert captured["update"] == "lisa-pack-cloudflare"
 
 
-def test_pack_update_all_restart_required_exits_with_restart_code(
-    tmp_path: Path,
-) -> None:
-    """After update --all, restart_required exits _RESTART_REQUIRED_EXIT."""
+def test_pack_update_all_restart_flag_exits_zero(tmp_path: Path) -> None:
+    """After update --all with restart_required set, the CLI exits 0."""
     runtime = _make_runtime(tmp_path)
     runtime.session.request_restart("pack update-all: 2 pack(s)")
 
@@ -249,16 +249,16 @@ def test_pack_update_all_restart_required_exits_with_restart_code(
         runtime=runtime,
         update_all_result=(True, "Updated 2 pack(s)."),
     )
-    assert exit_code == cli_main_restart_exit()
+    assert exit_code == 0
 
 
-def test_pack_update_all_noop_does_not_require_restart(
+def test_pack_update_all_noop_exits_zero(
     tmp_path: Path,
 ) -> None:
     """run_pack_update_all's nothing-to-update result exits 0 cleanly.
 
     The framework returns (True, ...) with restart_required unset when
-    every pack is bundled/placeholder; the CLI must not demand a restart.
+    every pack is bundled/placeholder; the CLI exits cleanly.
     """
     runtime = _make_runtime(tmp_path)
     _console, _captured, exit_code = _invoke_pack_update(
@@ -272,13 +272,6 @@ def test_pack_update_all_noop_does_not_require_restart(
     )
     assert exit_code == 0
     assert runtime.session.restart_required is False
-
-
-def cli_main_restart_exit() -> int:
-    """The restart-required exit code from hosts.cli.main."""
-    from hosts.cli import main as cli_main
-
-    return cli_main._RESTART_REQUIRED_EXIT
 
 
 # ── no cross-action leakage ───────────────────────────────────────────

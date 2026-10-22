@@ -75,7 +75,9 @@ def test_run_single_token_with_leading_slash_unchanged(_captured: Any) -> None:
     assert _captured["commands"] == ["/mode chat"]
 
 
-def test_run_forwards_shared_runtime_options(_captured: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_forwards_shared_runtime_options(
+    _captured: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Shared runtime flags are forwarded alongside the command string."""
     kwargs_seen: dict[str, Any] = {}
 
@@ -115,13 +117,16 @@ def test_run_with_double_dash_separator(_captured: Any) -> None:
     assert _captured["commands"] == ["/--help"]
 
 
-def test_run_silently_handles_restart_required(_captured: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A restart-required response surfaces the console notice and exit 69."""
-    monkeypatch.setattr(
-        cli_main,
-        "_run_host_command",
-        lambda _cmd, **_kw: cli_main._exit_restart_required(),
-    )
+def test_run_silently_handles_dispatch(_captured: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful dispatch (recorder stub) keeps the process's exit at 0."""
+    recorder: dict[str, Any] = {"commands": []}
+
+    def _success_run(command: str, **_kwargs: Any) -> None:
+        recorder["commands"].append(command)
+
+    # The stub simulates a clean dispatch: no typer.Exit raised.
+    monkeypatch.setattr(cli_main, "_run_host_command", _success_run)
     with patch.object(cli_main, "console", new=Console(quiet=True, record=True)):
         result = runner.invoke(cli_main.app, ["run", "/pack install foo"])
-    assert result.exit_code == cli_main._RESTART_REQUIRED_EXIT
+    assert result.exit_code == 0
+    assert recorder["commands"] == ["/pack install foo"]
