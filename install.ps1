@@ -428,13 +428,13 @@ resources:
       - lisa-pack-markdown
       - lisa-pack-personas
       - lisa-pack-search
+    # - lisa-pack-tavily
+# Web search requires a web search provider pack, e.g., lisa-pack-tavily
+# Add one above then designate it as the web_search tool below
 providers:
   capabilities:
     memory: lisa-pack-memory
-  # Web search requires a web search provider pack, e.g., lisa-pack-tavily
-  # Add one to the required packs list above then designate it as the tool below
-  # tools:
-    # web_search: lisa-pack-tavily
+  # tools: { web_search: lisa-pack-tavily }
 routing: { from: { pack: lisa-pack-core, session: default } }
 ---
 # My Session
