@@ -7,7 +7,8 @@ payload, and no pre-armed decision, it drops into lisa-managed input
 - The editor is only offered on the interactive path (stdin AND stdout
   are ttys); redirection keeps the exit-2 usage error.
 - A submitted message becomes the one-shot turn verbatim (multi-line
-  text joined as-is; shell metacharacters pass literally).
+  text joined as-is; quote characters pass literally — the reader seam
+  bypasses both the shell and the $() expander by design in tests).
 - Ctrl-C / no input aborts with the SIGINT exit code (130); whitespace
   input is a usage error (exit 2).
 
@@ -113,7 +114,9 @@ def test_no_args_tty_opens_editor_and_sends_text(
     )
     assert result == 0
     assert captured["reader_called"] is True
-    # Quotes pass literally — the whole point of lisa-managed input.
+    # Quote characters pass literally — the whole point of lisa-managed
+    # input. (The seam bypasses the $() expander; its path is tested in
+    # test_prompt_expand.py.)
     assert captured["message"] == 'say "hello" now\nsecond line'
 
 

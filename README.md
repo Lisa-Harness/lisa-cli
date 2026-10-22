@@ -96,10 +96,10 @@ or a quote you wanted in the message needs shell quoting, and `$(...)`
 expands before lisa even runs.
 
 **2. No arguments on a terminal (lisa-managed input; no shell rules).**
-`lisa prompt` with nothing to send drops into an input editor. Text is
-collected literally — quotes, backticks, and apostrophes need no escaping
-— and Enter submits (Alt+Enter or Ctrl-J adds a line; Ctrl-C aborts with
-the SIGINT exit code). `$(command)` is expanded here as shell
+`lisa prompt` with nothing to send drops into an input editor. Quote
+characters, backticks, and apostrophes are collected literally — no
+escaping — and Enter submits (Alt+Enter or Ctrl-J adds a line; Ctrl-C
+aborts with the SIGINT exit code). `$(command)` is expanded here as shell
 substitution (nesting works; a failed command is a loud error, exit 2;
 escape with `\$(` for a literal `$(`). Single-quoted spans don't expand
 and backticks stay literal. Submitted prompts persist to

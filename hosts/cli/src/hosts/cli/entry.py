@@ -22,8 +22,10 @@ Two readers, same contract:
 Both return ``None`` to mean "operator aborted with no message"; the
 caller turns that into the conventional SIGINT exit. Whitespace-only
 text means "nothing entered" and is a usage error at the call site.
-The history file under ``state/`` persists submitted prompts for
-``Up``-arrow reuse in the TUI reader.
+Quote characters survive because no shell ever tokenized this input;
+``$(cmd)`` does NOT pass literally — the editor path expands it
+(:mod:`hosts.cli.expand`). The history file under ``state/`` persists
+submitted prompts for ``Up``-arrow reuse in the TUI reader.
 """
 
 from __future__ import annotations
@@ -35,10 +37,12 @@ from typing import Any
 from rich.console import Console
 
 #: Marker printed before the plain reader so the operator knows the
-#: terminal, not argv, owns the input now.
+#: terminal, not argv, owns the input now. $() expands (expand.py runs
+#: over editor text); quote characters survive because no shell ever
+#: tokenized this input.
 _HINT_PLAIN = (
-    "Enter your message (quotes and $() pass literally). "
-    "Ctrl-D — or Ctrl-Z then Enter on Windows — on the last line to send."
+    "Lisa prompt - quotes arrive literally; $(cmd) is expanded. "
+    "Ctrl-D or Ctrl-Z (Ctrl-C aborts), on the last line to send."
 )
 _HINT_SUBMIT = "Enter sends · Alt+Enter or Ctrl-J adds a line · Ctrl-C aborts"
 
@@ -91,7 +95,9 @@ def read_prompt_message(console: Console) -> str | None:
     "cancelled, not crashed"; the caller exits with ``_ABORT_EXIT``.
 
     Pasting is safe: a paste of N lines adds N lines of buffer and does
-    not submit, so quotes, backticks, and ``$()`` arrive literally.
+    not submit, so quotes, backticks, and apostrophes arrive literally
+    (no shell ever tokenizes this input; ``$(cmd)`` is expanded by the
+    call site — see :mod:`hosts.cli.expand`).
     """
     console.print(f"[dim]{_HINT_PLAIN}[/dim]")
     lines: list[str] = []

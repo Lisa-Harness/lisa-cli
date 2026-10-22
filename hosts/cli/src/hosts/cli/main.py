@@ -1922,8 +1922,9 @@ def _collect_interactive_or_error(
 
     Called when argv, piped stdin, and pre-armed decisions all carried
     nothing. On an interactive terminal (stdin AND stdout ttys) the
-    message is collected outside the shell's argument grammar — quotes,
-    backticks, and ``$()`` arrive literally (see :mod:`hosts.cli.entry`).
+    message is collected outside the shell's argument grammar — quote
+    characters arrive literally (see :mod:`hosts.cli.entry`), and
+    ``$(cmd)`` is expanded over the editor text (:mod:`hosts.cli.expand`).
     Under redirection there is no editor: a pipeline wants an error, not
     a prompt. Returns the message or raises ``typer.Exit``.
     """
