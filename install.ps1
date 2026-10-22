@@ -441,12 +441,50 @@ routing: { from: { pack: lisa-pack-core, session: default } }
 
 The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
 However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
+
+The interactive prompt editor's hints (key layout, what sends, what adds
+a line) are operator-configurable in config/prompt_hints.yaml - read it
+when the user asks about prompt editor keys or complains about Enter or
+Ctrl-J behavior, rather than assuming defaults.
 '@
     if ($PSCmdlet.ShouldProcess($ctxFile, "Seed starter session context")) {
         # UTF8 without BOM on PS5.1 (Set-Content -Encoding UTF8 emits a BOM
         # there, and the kernel front-matter parser does not strip one).
         [System.IO.File]::WriteAllText($ctxFile, $content, [System.Text.UTF8Encoding]::new($false))
         Write-Host "  Created $ctxFile (starter: memory, web search, personas, markdown)" -ForegroundColor Green
+    }
+}
+
+function New-PromptHints {
+    # Seed the prompt-editor hint settings (documenting the shipped layout).
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+    Set-StrictMode -Version Latest
+
+    $configDir = Join-Path $script:LisaHome "config"
+    $hintsFile = Join-Path $configDir "prompt_hints.yaml"
+    if (Test-Path $hintsFile) {
+        Write-Host "  $hintsFile already exists - preserved" -ForegroundColor Yellow
+        return
+    }
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+    $hints = @'
+# Prompt-editor hint fragments (lisa prompt, no args). Each key overrides
+# that fragment of the hint line; delete a key to restore the built-in.
+# Whole-line override: env LISA_PROMPT_PS1 (empty value suppresses hints).
+# Per-fragment env backstops: LISA_PROMPT_HINT_SEND / _NEWLINE / _ABORT /
+# _BANNER (env > this file > built-in). Key layout itself: --swap-keys /
+# LISA_PROMPT_KEYS (truthy = Enter sends; default Enter adds a line).
+send: "Ctrl-J or Alt+Enter sends"
+newline: "Enter adds a line"
+abort: "Ctrl-C aborts"
+banner: "Lisa prompt - quotes are literal; $(cmd) is expanded. ✨"
+'@
+    if ($PSCmdlet.ShouldProcess($hintsFile, "Seed prompt-editor hint settings")) {
+        [System.IO.File]::WriteAllText($hintsFile, $hints, [System.Text.UTF8Encoding]::new($false))
+        Write-Host "  Created $hintsFile (prompt-editor hint settings)" -ForegroundColor Green
     }
 }
 
@@ -614,6 +652,7 @@ function Install-LisaFramework {
 
     Write-Step -Step 4 -Total 6 -Message "Seeding starter session context..."
     New-LisaSessionContext
+    New-PromptHints
 
     Write-Step -Step 5 -Total 6 -Message "Bootstrapping model manifest (discover + apply)..."
     Update-LisaModelManifest

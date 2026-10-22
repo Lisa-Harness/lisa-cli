@@ -1984,8 +1984,11 @@ def _collect_interactive_or_error(
                 console,
                 history_path=entry_mod.prompt_history_path(data_dir, profile),
                 swapped_keys=resolved,
+                data_dir=data_dir,
+                profile=profile,
             )
         else:
+            # Custom reader seam (tests): the plain-reader contract.
             terminal_message = reader(console)
         if terminal_message is None:
             raise typer.Exit(code=_ABORT_EXIT) from None

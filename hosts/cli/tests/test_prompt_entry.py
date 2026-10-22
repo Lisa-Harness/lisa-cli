@@ -543,3 +543,184 @@ def test_seam_threads_swap_keys_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     # --swap-keys selects chat-box (Enter sends).
     cli_main._collect_interactive_or_error("", "", "/tmp/d", "", swap_keys=True)
     assert calls[-1].get("swapped_keys") is False
+
+
+# ── Hint-fragment settings (prompt_hints.yaml + env backstops) ────────
+
+
+def test_settings_file_path_resolution(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """prompt_hints.yaml sits under <data-dir>/config/, profile-aware."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    assert entry_mod.settings_file_path(tmp_path, "") == (tmp_path / "config" / "prompt_hints.yaml")
+
+
+def test_settings_file_absent_means_no_fragments(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No prompt_hints.yaml: the loader returns an empty mapping."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    assert entry_mod.load_hint_fragments(tmp_path, "") == {}
+
+
+def test_settings_file_fragments_load(tmp_path: Any) -> None:
+    """A valid YAML blob's recognized string keys surface as fragments."""
+    from hosts.cli import entry as entry_mod
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "prompt_hints.yaml").write_text(
+        'send: "Ctrl-K sends"\nnewline: "Tab adds a line"\njunk: ignored\n',
+        encoding="utf-8",
+    )
+    fragments = entry_mod.load_hint_fragments(tmp_path, "")
+    assert fragments == {"send": "Ctrl-K sends", "newline": "Tab adds a line"}
+
+
+def test_settings_fragment_values_suppress(
+    tmp_path: Any,
+) -> None:
+    """Empty/null fragment values are treated as absent, not suppression."""
+    import yaml as yaml_mod
+
+    from hosts.cli import entry as entry_mod
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "prompt_hints.yaml").write_text(
+        "send: ''\nnewline: null\nabort: 'Abort with Ctrl-C'\n", encoding="utf-8"
+    )
+    fragments = entry_mod.load_hint_fragments(tmp_path, "")
+    assert fragments == {"abort": "Abort with Ctrl-C"}
+    del yaml_mod
+
+
+def test_settings_file_malformed_is_loud_but_nonfatal(tmp_path: Any, capsys: Any) -> None:
+    """A broken YAML file warns on stderr and falls back to built-ins."""
+    from hosts.cli import entry as entry_mod
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "prompt_hints.yaml").write_text("send: [unclosed\n", encoding="utf-8")
+    assert entry_mod.load_hint_fragments(tmp_path, "") == {}
+    err = capsys.readouterr().err
+    assert "ignoring unreadable" in err
+
+
+def test_resolve_hints_precedence_env_over_file_over_default(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env backstop > settings file > built-in, per fragment."""
+    from hosts.cli import entry as entry_mod
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "prompt_hints.yaml").write_text('send: "file says ctrl-k"\n', encoding="utf-8")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    # file wins over built-in
+    hints = entry_mod.resolve_hints(tmp_path, "", layout="swap")
+    assert hints["send"] == "file says ctrl-k"
+    assert hints["abort"] == entry_mod._DEFAULT_ABORT
+    # env wins over file
+    monkeypatch.setenv(entry_mod._FRAGMENT_ENV["send"], "env says f4")
+    hints = entry_mod.resolve_hints(tmp_path, "", layout="swap")
+    assert hints["send"] == "env says f4"
+
+
+def test_resolve_hints_layout_selects_key_facts(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without settings, the layout determines the send/newline facts."""
+    from hosts.cli import entry as entry_mod
+
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    for frag in entry_mod._FRAGMENT_ENV.values():
+        monkeypatch.delenv(frag, raising=False)
+    swap = entry_mod.resolve_hints(tmp_path, "", layout="swap")
+    chat = entry_mod.resolve_hints(tmp_path, "", layout="chat")
+    plain = entry_mod.resolve_hints(tmp_path, "", layout="plain")
+    assert swap["send"] == entry_mod._DEFAULT_SEND["swap"]
+    assert chat["send"] == entry_mod._DEFAULT_SEND["chat"]
+    assert plain["send"] == entry_mod._DEFAULT_SEND["plain"]
+    assert swap["newline"] == entry_mod._DEFAULT_NEWLINE["swap"]
+    assert chat["newline"] == entry_mod._DEFAULT_NEWLINE["chat"]
+
+
+def test_plain_reader_assembles_resolved_fragments(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plain banner renders the settings-file fragments."""
+    from hosts.cli import entry as entry_mod
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "prompt_hints.yaml").write_text('send: "Ctrl-K on blank line sends"\n', encoding="utf-8")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.delenv(entry_mod._PROMPT_PS1_ENV, raising=False)
+    for frag in entry_mod._FRAGMENT_ENV.values():
+        monkeypatch.delenv(frag, raising=False)
+    out = io.StringIO()
+    console = Console(file=out, record=True, width=200)
+    lines = iter([])
+
+    def _fake_input() -> str:
+        try:
+            return next(lines)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+    entry_mod.read_prompt_message(console, data_dir=tmp_path)
+    text = console.export_text()
+    assert "Ctrl-K on blank line sends" in text
+    assert entry_mod._DEFAULT_BANNER in text  # untouched fragments stay built-in
+
+
+def test_tui_toolbar_assembles_resolved_fragments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The TUI toolbar renders settings fragments (swap layout here)."""
+    import yaml as yaml_mod
+    from prompt_toolkit.formatted_text import HTML as _HTML
+
+    from hosts.cli import entry as entry_mod
+
+    cfg = tmp_path / "config"
+    cfg.mkdir(parents=True)
+    (cfg / "prompt_hints.yaml").write_text('send: "F5 transmits"\n', encoding="utf-8")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+
+    seen: dict[str, Any] = {}
+
+    class _FakeSession:
+        def __init__(self, **kwargs: Any) -> None:
+            seen["toolbar"] = kwargs.get("bottom_toolbar")
+
+        def prompt(self, *_a: Any, **_kw: Any) -> str:
+            return "x"
+
+    class _FakeHTML:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def __repr__(self) -> str:
+            return f"HTML({self.text!r})"
+
+    real_pt = entry_mod._PT
+    fake_pt = dict(real_pt)
+    fake_pt["PromptSession"] = _FakeSession
+    fake_pt["HTML"] = _FakeHTML
+    monkeypatch.setattr(entry_mod, "_PT", fake_pt)
+    entry_mod.read_prompt_message_tui(
+        Console(quiet=True, file=io.StringIO()),
+        history_path=tmp_path / "state" / "h.txt",
+        swapped_keys=True,
+        data_dir=tmp_path,
+    )
+    assert "F5 transmits" in repr(seen["toolbar"])
+    import prompt_toolkit.formatted_text
+
+    del yaml_mod, _HTML, prompt_toolkit

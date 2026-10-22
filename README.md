@@ -113,6 +113,23 @@ Ctrl-Z does not). Prefer chat-box Enter-sends? Pass `--no-swap-keys`,
 or set `LISA_PROMPT_KEYS=1` (any truthy value; the flag wins over the
 env).
 
+The hint text is settings, not a constant. Precedence per fragment:
+
+1. `LISA_PROMPT_PS1` — verbatim whole-line replace; empty value
+   suppresses hints entirely (highest precedence, env).
+2. Per-fragment env backstops: `LISA_PROMPT_HINT_SEND`, `_NEWLINE`,
+   `_ABORT`, `_BANNER` (empty value suppresses that fragment).
+3. `<data-dir>/config/prompt_hints.yaml` — hand-editable blob the
+   installers seed; the model can read it when asked about prompt keys
+   (the seeded session context points it there).
+4. Built-in facts per key layout (what actually sends/adds a line).
+
+The settings cannot contradict behavior: the layout facts (Enter sends
+vs Enter adds a line) follow `--swap-keys`/`LISA_PROMPT_KEYS`, and the
+Ctrl-Z-suspends note is not overridable — a hint that lies about keys
+is worse than no hint. A malformed `prompt_hints.yaml` warns on stderr
+once and falls back to built-ins; settings never block a turn.
+
 **3. Piped stdin (payload rules).** When stdin is not a tty its contents
 are attached ahead of your instruction, so config/data can flow through
 the model into another command. A quoted heredoc is the fully literal

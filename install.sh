@@ -286,8 +286,37 @@ routing: { from: { pack: lisa-pack-core, session: default } }
 
 The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
 However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
+
+The interactive prompt editor's hints (key layout, what sends, what adds
+a line) are operator-configurable in config/prompt_hints.yaml — read it
+when the user asks about prompt editor keys or complains about Enter or
+Ctrl-J behavior, rather than assuming defaults.
 SESSION_CONTEXT
     printf "  Created %s (starter: memory, web search, personas, markdown)\n" "$ctx"
+}
+
+generate_prompt_hints() {
+    # Seed the prompt-editor hint settings (documenting the shipped key
+    # layout as an editable starting point). Existing file is preserved.
+    local hints="$LISA_HOME/config/prompt_hints.yaml"
+    if [[ -f "$hints" ]]; then
+        printf "  %s already exists — preserved\n" "$hints"
+        return 0
+    fi
+    mkdir -p "$LISA_HOME/config"
+    cat > "$hints" <<'PROMPT_HINTS'
+# Prompt-editor hint fragments (lisa prompt, no args). Each key overrides
+# that fragment of the hint line; delete a key to restore the built-in.
+# Whole-line override: env LISA_PROMPT_PS1 (empty value suppresses hints).
+# Per-fragment env backstops: LISA_PROMPT_HINT_SEND / _NEWLINE / _ABORT /
+# _BANNER (env > this file > built-in). Key layout itself: --swap-keys /
+# LISA_PROMPT_KEYS (truthy = Enter sends; default Enter adds a line).
+send: "Ctrl-J or Alt+Enter sends"
+newline: "Enter adds a line"
+abort: "Ctrl-C aborts"
+banner: "Lisa prompt - quotes are literal; $(cmd) is expanded. ✨"
+PROMPT_HINTS
+    printf "  Created %s (prompt-editor hint settings)\n" "$hints"
 }
 
 bootstrap_models() {
@@ -431,6 +460,7 @@ main() {
 
     step 4 6 "Seeding starter session context..."
     generate_session_context
+    generate_prompt_hints
 
     step 5 6 "Bootstrapping model manifest (discover + apply)..."
     bootstrap_models

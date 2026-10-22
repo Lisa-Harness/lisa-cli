@@ -69,8 +69,32 @@ _RI_PAIR = 2  # one flag = exactly two regional indicators
 
 #: Env var customizing the editor hints, PS1-style. Empty value suppresses
 #: the hints entirely; any other value replaces the default hint text
-#: verbatim (plain text — no template expansion); unset keeps defaults.
+#: verbatim (plain text — no template expansion); unset defers to the
+#: settings file, then built-in defaults.
 _PROMPT_PS1_ENV = "LISA_PROMPT_PS1"
+
+#: Settings file for the editor hints: ``<data-dir>/config/prompt_hints.yaml``.
+#: A hand-editable YAML blob; each recognized key overrides that fragment of
+#: the default hint line (or ``null``/``""`` suppresses it):
+#:
+#:     send: "Ctrl-J sends"            # how the editor sends
+#:     newline: "Enter adds a line"    # what plain Enter does
+#:     abort: "Ctrl-C aborts"          # how to back out
+#:     banner: "…quoted are literal…"  # plain reader's first line
+#:
+#: Precedence for the whole-line text: ``LISA_PROMPT_PS1`` (verbatim, or
+#: empty = suppressed) > the settings file (fragments assembled) > the
+#: built-in defaults. Per-fragment env backstops
+#: (``LISA_PROMPT_HINT_SEND`` etc.) sit between the file and the default:
+#: env > file > built-in, per fragment.
+_PROMPT_HINTS_FILE = "prompt_hints.yaml"
+_PROMPT_HINT_ENV_PREFIX = "LISA_PROMPT_HINT_"
+_FRAGMENT_ENV = {
+    "send": "LISA_PROMPT_HINT_SEND",
+    "newline": "LISA_PROMPT_HINT_NEWLINE",
+    "abort": "LISA_PROMPT_HINT_ABORT",
+    "banner": "LISA_PROMPT_HINT_BANNER",
+}
 
 #: Env var selecting the editor key model, PS1-style. Unset or falsy
 #: (``0/false/no/off``): swapped default — Enter inserts a newline, Ctrl-J
@@ -84,14 +108,26 @@ _TRUTHY = {"1", "true", "yes", "on"}
 #: Marker printed before the plain reader so the operator knows the
 #: terminal, not argv, owns the input now. $() expands (expand.py runs
 #: over editor text); quote characters survive because no shell ever
-#: tokenized this input.
-_HINT_PLAIN = (
-    "Lisa prompt - quotes are literal; $(cmd) is expanded. "
-    "Ctrl-D on an empty line sends; Ctrl-C aborts. "
-    "(Ctrl-Z suspends to your shell, it does not send.)"
-)
-_HINT_SUBMIT_CHAT = "Enter sends · Alt+Enter or Ctrl-J adds a line · Ctrl-C aborts"
-_HINT_SUBMIT_SWAP = "Enter adds a line · Alt+Enter or Ctrl-J sends · Ctrl-C aborts"
+#: tokenized this input. The three strings below are the built-in
+#: fallbacks; the settings file (prompt_hints.yaml) and env backstops
+#: override fragments — see :func:`resolve_hints`.
+_DEFAULT_BANNER = "Lisa prompt - quotes are literal; $(cmd) is expanded. ✨"
+_DEFAULT_SEND = {
+    "plain": "Ctrl-D on an empty line sends",
+    "chat": "Enter sends",
+    "swap": "Ctrl-J or Alt+Enter sends",
+}
+_DEFAULT_NEWLINE = {
+    "plain": "each line is kept",
+    "chat": "Alt+Enter or Ctrl-J adds a line",
+    "swap": "Enter adds a line",
+}
+_DEFAULT_ABORT = "Ctrl-C aborts"
+_PLAIN_SUSPEND_NOTE = "(Ctrl-Z suspends to your shell, it does not send.)"
+
+_HINT_PLAIN = f"{_DEFAULT_BANNER} {_DEFAULT_SEND['plain']}; {_DEFAULT_ABORT}. {_PLAIN_SUSPEND_NOTE}"
+_HINT_SUBMIT_CHAT = f"{_DEFAULT_SEND['chat']} · {_DEFAULT_NEWLINE['chat']} · {_DEFAULT_ABORT}"
+_HINT_SUBMIT_SWAP = f"{_DEFAULT_SEND['swap']} · {_DEFAULT_NEWLINE['swap']} · {_DEFAULT_ABORT}"
 
 
 def prompt_keys_env_wants_enter_send() -> bool:
@@ -147,6 +183,99 @@ def prompt_ps1() -> str | None:
     return value  # verbatim — no strip, the operator owns the spacing
 
 
+def settings_file_path(data_dir: str | Path, profile: str) -> Path:
+    """The prompt-hints settings file under the profile's config dir.
+
+    ``<data-dir>/config/prompt_hints.yaml`` — hand-editable, alongside the
+    other authored config (models.yaml, policy.yaml). Profile resolution
+    mirrors :func:`prompt_history_path`.
+    """
+    from runtime.config import profile_data_dir  # lazy: import cost
+
+    base = str(data_dir).strip() if str(data_dir).strip() else ""
+    if not base and profile.strip():
+        base = str(profile_data_dir(profile.strip()))
+    if not base:
+        base = os.getenv("LISA_DATA_DIR", "") or str(Path.home() / ".lisa")
+    return Path(base).expanduser() / "config" / _PROMPT_HINTS_FILE
+
+
+def load_hint_fragments(data_dir: str | Path, profile: str) -> dict[str, str | None]:
+    """Read the settings-file hint fragments (missing file: all absent).
+
+    Recognized keys (send, newline, abort, banner) map to their string
+    value, or ``None`` when the file does not exist, is unreadable, is
+    not valid YAML, or the key is missing/an empty string (which the
+    resolver treats as "fragment not set" — to suppress a fragment use
+    the key's YAML null... which is the same as absent: both mean the
+    backstops decide; there is no per-fragment suppression by design,
+    a hint line with a hole is worse than no hole).
+
+    A malformed file is a loud stderr warning once per process, then the
+    resolver falls back to built-ins — settings never block a turn.
+    """
+    path = settings_file_path(data_dir, profile)
+    if not path.is_file():
+        return {}
+    try:
+        import yaml  # pyyaml is a hard dependency of the CLI host
+
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except Exception:  # pylint: disable=broad-except  # settings must not block
+        import sys
+
+        print(f"lisa: ignoring unreadable {path}", file=sys.stderr, flush=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str | None] = {}
+    for key in ("send", "newline", "abort", "banner"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value
+    return out
+
+
+def resolve_hints(
+    data_dir: str | Path,
+    profile: str,
+    *,
+    layout: str,
+) -> dict[str, str | None]:
+    """Assemble the effective hint fragments for one reader invocation.
+
+    ``layout`` selects the key-model facts: ``"plain"`` (EOF-send), or
+    ``"chat"`` / ``"swap"`` (which of Enter/Ctrl-J sends). Precedence
+    per fragment: env backstop > settings file > built-in default.
+    Returns ``{send, newline, abort, banner}`` — a ``None`` value means
+    the fragment is suppressed (only possible when the env backstop or
+    settings file sets it explicitly empty... which :func:`load_hint_
+    fragments` treats as absent today; the assembly below keeps the
+    None slot so callers can render "suppressed" cleanly later).
+    """
+    file_fragments = load_hint_fragments(data_dir, profile)
+    resolved: dict[str, str | None] = {}
+    for key in ("send", "newline", "abort", "banner"):
+        env_value = os.getenv(_FRAGMENT_ENV[key])
+        if env_value is not None:
+            resolved[key] = env_value.strip() or None
+            continue
+        if key in file_fragments:
+            resolved[key] = file_fragments[key]
+            continue
+        resolved[key] = None
+    # Facts no settings file should be able to contradict: the layout
+    # determines the send/newline text when the operator has not spoken.
+    if resolved["send"] is None:
+        resolved["send"] = _DEFAULT_SEND[layout]
+    if resolved["newline"] is None:
+        resolved["newline"] = _DEFAULT_NEWLINE[layout]
+    if resolved["abort"] is None:
+        resolved["abort"] = _DEFAULT_ABORT
+    return resolved
+
+
 def prompt_history_path(data_dir: str | Path, profile: str) -> Path:
     """History file for prompt-mode input under the profile's state dir.
 
@@ -166,7 +295,12 @@ def prompt_history_path(data_dir: str | Path, profile: str) -> Path:
     return Path(base).expanduser() / "state" / "prompt_history.txt"
 
 
-def read_prompt_message(console: Console) -> str | None:
+def read_prompt_message(
+    console: Console,
+    *,
+    data_dir: str | Path = "",
+    profile: str = "",
+) -> str | None:
     """Read a multiline message from the plain terminal (no dependencies).
 
     Lines accumulate until EOF on an empty line (Ctrl-D on POSIX,
@@ -179,12 +313,28 @@ def read_prompt_message(console: Console) -> str | None:
     (no shell ever tokenizes this input; ``$(cmd)`` is expanded by the
     call site — see :mod:`hosts.cli.expand`).
 
-    The banner respects ``LISA_PROMPT_PS1``: unset prints the built-in
-    hint, empty prints nothing, any other value replaces it verbatim.
+    The banner respects ``LISA_PROMPT_PS1`` (whole-line replace/suppress)
+    and the hint-fragment settings (prompt_hints.yaml / env backstops)
+    for banner, send, and abort fragments; the Ctrl-Z note stays (a
+    settings file cannot claim Ctrl-Z sends — it suspends, factually).
     """
-    hint = prompt_ps1() if _PROMPT_PS1_ENV in os.environ else _HINT_PLAIN
-    if hint:
-        console.print(f"[dim]{hint}[/dim]")
+    hint = prompt_ps1() if _PROMPT_PS1_ENV in os.environ else None
+    if _PROMPT_PS1_ENV in os.environ:
+        # PS1 present: an empty/whitespace value means explicitly
+        # suppressed — no fragments, no banner. A value is a verbatim
+        # whole-line replace. The settings file only participates when
+        # PS1 is unset.
+        if hint:
+            console.print(f"[dim]{hint}[/dim]")
+    else:
+        fragments = resolve_hints(data_dir, profile, layout="plain")
+        if any(fragments.values()):
+            parts = [
+                fragments.get("banner") or _DEFAULT_BANNER,
+                f"{fragments['send']}; {fragments['abort']}.",
+                _PLAIN_SUSPEND_NOTE,
+            ]
+            console.print(f"[dim]{' '.join(parts)}[/dim]")
     lines: list[str] = []
     while True:
         try:
@@ -368,7 +518,12 @@ def _tui_key_bindings(swapped: bool = True) -> Any:
 
 
 def read_prompt_message_tui(
-    console: Console, *, history_path: Path, swapped_keys: bool | None = None
+    console: Console,
+    *,
+    history_path: Path,
+    swapped_keys: bool | None = None,
+    data_dir: str | Path = "",
+    profile: str = "",
 ) -> str | None:
     """Read a single-box message with prompt_toolkit (extra installed).
 
@@ -413,7 +568,12 @@ def read_prompt_message_tui(
         if _PROMPT_PS1_ENV in os.environ:
             hint = prompt_ps1()
         else:
-            hint = _HINT_SUBMIT_SWAP if swapped_keys else _HINT_SUBMIT_CHAT
+            fragments = resolve_hints(data_dir, profile, layout="swap" if swapped_keys else "chat")
+            hint = (
+                f"{fragments['send']} · {fragments['newline']} · {fragments['abort']}"
+                if any(fragments[k] for k in ("send", "newline", "abort"))
+                else None
+            )
         hint_html: Any | None = (
             _PT["HTML"](f"<style fg='ansibrightblack'>{hint}</style>") if hint else None
         )
