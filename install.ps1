@@ -434,7 +434,7 @@ resources:
 providers:
   capabilities:
     memory: lisa-pack-memory
-  # tools: { web_search: lisa-pack-tavily }
+# tools: { web_search: lisa-pack-tavily }
 routing: { from: { pack: lisa-pack-core, session: default } }
 ---
 # My Session
