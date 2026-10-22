@@ -39,6 +39,9 @@ dev = [
     "ruff>=0.8.0",
     "types-PyYAML>=6.0",
 ]
+# Interactive no-args `lisa prompt` editor: single-box input with
+# history. Without the extra the plain EOF-terminated reader is used.
+prompt = ["prompt-toolkit>=3.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -62,6 +65,9 @@ ignore = ["PLR0913"]
 # Startup ordering and lazy imports keep CLI help fast; Typer owns command signatures.
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
 "**/hosts/cli/render.py" = ["PLC0415"]
+# Interactive entry is imported only on the no-args path; the PT prompt
+# glyph is intentional (matches the transport's palette).
+"**/hosts/cli/entry.py" = ["PLC0415", "RUF001"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

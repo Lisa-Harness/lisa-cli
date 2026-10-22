@@ -813,6 +813,9 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
+prompt = [
+    { name = "prompt-toolkit" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -826,6 +829,7 @@ requires-dist = [
     { name = "lisa-pack-memory", editable = "../lisa/sdk/packs/memory" },
     { name = "lisa-pack-recovery", editable = "../lisa/sdk/packs/recovery" },
     { name = "openai", specifier = ">=1.30.0" },
+    { name = "prompt-toolkit", marker = "extra == 'prompt'", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -837,7 +841,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12.3" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "prompt"]
 
 [[package]]
 name = "lisa-cli-root"
@@ -879,7 +883,7 @@ provides-extras = ["dev", "markdown", "personas", "search"]
 
 [[package]]
 name = "lisa-harness-kernel"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/kernel" }
 dependencies = [
     { name = "httpx" },
@@ -915,7 +919,7 @@ provides-extras = ["dev", "memory"]
 
 [[package]]
 name = "lisa-harness-mcp-servers"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/mcp_server" }
 dependencies = [
     { name = "lisa-harness-kernel" },
@@ -939,7 +943,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-harness-runtime"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/runtime" }
 dependencies = [
     { name = "cel-python" },
@@ -981,7 +985,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-harness-sdk"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/sdk" }
 dependencies = [
     { name = "cel-python" },
@@ -1016,7 +1020,7 @@ provides-extras = ["bedrock", "dev"]
 
 [[package]]
 name = "lisa-pack-core"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/sdk/packs/core" }
 
 [package.metadata]
@@ -1030,7 +1034,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-introspect"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/sdk/packs/introspect" }
 dependencies = [
     { name = "lisa-harness-kernel" },
@@ -1072,7 +1076,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-memory"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/sdk/packs/memory" }
 
 [package.metadata]
@@ -1092,11 +1096,17 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "lisa-harness-sdk" }]
+requires-dist = [
+    { name = "lisa-harness-sdk" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-recovery"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "../lisa/sdk/packs/recovery" }
 dependencies = [
     { name = "lisa-harness-kernel" },
@@ -1348,6 +1358,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "prompt-toolkit"
+version = "3.0.53"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/ea/39b988c938f75cb75d7045b5c69f8bfed47ee2152c8837fb403de29d6fb8/prompt_toolkit-3.0.53.tar.gz", hash = "sha256:9ec8a0ad96d5c56148b3f914aa79c1564c3fde5d2e6b876e7bc327e353cf8fa6", size = 435492, upload-time = "2026-07-26T20:56:14.758Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/6f/84908cad2d6aa5144abcf7b42709fe4fdb459bc640ec7ac5786e7693dabc/prompt_toolkit-3.0.53-py3-none-any.whl", hash = "sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2", size = 392288, upload-time = "2026-07-26T20:56:12.512Z" },
 ]
 
 [[package]]

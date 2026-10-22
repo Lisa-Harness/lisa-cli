@@ -51,6 +51,9 @@ ignore = ["PLR0913"]
 # Startup ordering and lazy imports keep CLI help fast; Typer owns command signatures.
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
 "**/hosts/cli/render.py" = ["PLC0415"]
+# Interactive entry is imported only on the no-args path; the PT prompt
+# glyph is intentional (matches the transport's palette).
+"**/hosts/cli/entry.py" = ["PLC0415", "RUF001"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

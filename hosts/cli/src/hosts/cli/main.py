@@ -1909,6 +1909,48 @@ class _PrearmedDecision(NamedTuple):
     remember: str
 
 
+#: Interactive reader seam: assigned the real function lazily on the
+#: no-args interactive path (keeps --help and piped runs free of the
+#: entry module). Tests monkeypatch this to script terminal input.
+_prompt_reader: Callable[..., str | None] | None = None
+
+
+def _collect_interactive_or_error(
+    full_instruction: str, payload: str, data_dir: str, profile: str
+) -> str:
+    """Resolve the no-input case: editor on a tty, usage error otherwise.
+
+    Called when argv, piped stdin, and pre-armed decisions all carried
+    nothing. On an interactive terminal (stdin AND stdout ttys) the
+    message is collected outside the shell's argument grammar — quotes,
+    backticks, and ``$()`` arrive literally (see :mod:`hosts.cli.entry`).
+    Under redirection there is no editor: a pipeline wants an error, not
+    a prompt. Returns the message or raises ``typer.Exit``.
+    """
+    del full_instruction  # empty by contract; parameter documents intent
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        from hosts.cli import entry as entry_mod
+
+        reader = _prompt_reader or entry_mod.read_prompt_message_tui
+        if reader is entry_mod.read_prompt_message_tui:
+            terminal_message = reader(
+                console,
+                history_path=entry_mod.prompt_history_path(data_dir, profile),
+            )
+        else:
+            terminal_message = reader(console)
+        if terminal_message is None:
+            raise typer.Exit(code=_ABORT_EXIT) from None
+        if terminal_message.strip():
+            return terminal_message
+    console.print(
+        "[red]No message and no piped input. Pass a message and/or pipe data on "
+        "stdin.[/red]"
+    )
+    raise typer.Exit(code=2)
+
+
+
 def _prompt_prearmed_decision(approve: str, deny: str, remember: str) -> _PrearmedDecision | None:
     """Parse the pre-armed decision flags for a prompt turn, or None.
 
@@ -2430,10 +2472,9 @@ def _prompt_command(
     # piped payload; it is consumed at the end of the turn.
     decision = _prompt_prearmed_decision(approve, deny, remember)
     if not full_instruction.strip() and not payload.strip() and decision is None:
-        console.print(
-            "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
+        full_instruction = _collect_interactive_or_error(
+            full_instruction, payload, data_dir, profile
         )
-        raise typer.Exit(code=2)
     full_message = _compose_prompt_message(full_instruction, payload)
     if raw:
         full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
