@@ -120,6 +120,41 @@ def test_unknown_routes_to_prompt_with_env(
     assert seen["message"] == "continue the task"
 
 
+def test_unknown_multi_token_routes_to_prompt_and_joins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """With routing on, several unknown positionals join into one message.
+
+    This is the unquoted-prompt payoff of the multi-word Argument: the
+    shell hands over N argv tokens and the joined string is the turn.
+    """
+    monkeypatch.setenv(cli_main._PROMPT_UNKNOWN_ENV, "1")
+    import io
+    import sys
+
+    from runtime.testing import build_test_runtime
+
+    runtime = build_test_runtime(tmp_path, models_yaml="")
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kw: runtime)
+
+    import runtime.handle_message as hm
+
+    seen: dict[str, Any] = {}
+
+    async def _fake(_rt, message, _transport):
+        seen["message"] = message
+        return "ok"
+
+    monkeypatch.setattr(hm, "handle_message", _fake)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    result = runner.invoke(cli_main.app, ["fix", "the", "parser"])
+    assert result.exit_code == 0
+    assert seen["message"] == "fix the parser"
+
+
 def test_hoisted_raw_flag_parses_at_group_level(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,

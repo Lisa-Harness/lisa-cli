@@ -68,6 +68,7 @@ after configuring your environment for model access per above.
 ```bash
 lisa            # show help (every command is one-shot)
 lisa prompt "summarize the thread"   # run a single turn
+lisa prompt     # no args: type the message in the editor (no shell quoting)
 lisa verify     # run the diagnostic smoke check
 lisa --help     # show all commands
 ```
@@ -76,15 +77,48 @@ lisa --help     # show all commands
 and `lisa models apply` first. CI supplies a static manifest for its offline
 installation smoke check and does not invoke a model provider.
 
-### Prompting (`prompt` with stdin and `--raw`)
+### Prompting (`prompt` with stdin, the editor, and `--raw`)
 
-`prompt` reads piped stdin automatically (when stdin is not a tty) and attaches
-it to the turn ahead of your instruction, so config/data can flow through the
-model into another command:
+`prompt` takes its message from three sources, in fallback order. Quote
+rules differ per source — pick the one that fits:
+
+**1. Arguments (shell rules apply).** Multiple words are joined with spaces,
+so short prompts work unquoted; quote only to preserve inner spaces or
+literal quote characters:
+
+```bash
+lisa prompt fix the config parser
+lisa prompt "summarize the thread"
+```
+
+The shell still owns argv: an apostrophe (`lisa prompt fix what's broken`)
+or a quote you wanted in the message needs shell quoting, and `$(...)`
+expands before lisa even runs.
+
+**2. No arguments on a terminal (lisa-managed input; no shell rules).**
+`lisa prompt` with nothing to send drops into an input editor. Text is
+collected literally — quotes, backticks, and apostrophes need no escaping
+— and Enter submits (Alt+Enter or Ctrl-J adds a line; Ctrl-C aborts with
+the SIGINT exit code). `$(command)` is expanded here as shell
+substitution (nesting works; a failed command is a loud error, exit 2;
+escape with `\$(` for a literal `$(`). Single-quoted spans don't expand
+and backticks stay literal. Submitted prompts persist to
+`<data-dir>/state/prompt_history.txt` for Up-arrow reuse. The editor uses
+prompt_toolkit when the optional `lisa-cli[prompt]` extra is installed,
+otherwise a plain line-at-a-time reader (Ctrl-D — or Ctrl-Z then Enter on
+Windows — sends).
+
+**3. Piped stdin (payload rules).** When stdin is not a tty its contents
+are attached ahead of your instruction, so config/data can flow through
+the model into another command. A quoted heredoc is the fully literal
+power path:
 
 ```bash
 cat /etc/whatever.conf | lisa prompt "recommend improvements"
 sudo systemctl status whatever 2>&1 | lisa prompt -r "fix it for me." > whatever.conf.new
+lisa prompt <<'EOF'
+fix the "config" parser for $(this) host: it can't handle 'quoted values'
+EOF
 ```
 
 `-r`/`--raw` writes the response verbatim to stdout — no Rule header, no
@@ -294,7 +328,9 @@ subcommands (`verify`, `pack`, `models`, …) and generated pack commands
 on. Runtime options belong to each subcommand (`lisa prompt --log-level
 debug …`). Prompt-only flags (`-r/--raw`, `-q/--quiet`, `--no-stdin`)
 appearing before the positional parse at group level and ride onto the
-injected turn, so `lisa -r "fix it"` behaves as `lisa prompt -r "fix it"`.
+injected turn, so `lisa -r "fix it"` behaves as `lisa prompt -r "fix it"`,
+and a bare `lisa -r` (no positional, routing on) also opens the editor
+with the raw contract applied to the submitted text.
 
 ### Profiles (`--profile`, `LISA_PROFILE`)
 

@@ -122,6 +122,28 @@ def test_no_stdin_tty_uses_message_only(tmp_path: Any, monkeypatch: pytest.Monke
     assert captured["message"] == "plain message"
 
 
+def test_multi_word_arguments_are_joined_with_spaces(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unquoted multi-word prompts arrive as one space-joined message."""
+    captured: dict[str, Any] = {}
+    _invoke_prompt(
+        monkeypatch,
+        tmp_path,
+        ["fix", "the", "config", "parser"],
+        captured=captured,
+    )
+    assert captured["message"] == "fix the config parser"
+
+
+def test_multi_word_empty_token_still_exits_2(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tokens that join to whitespace only are not a message (exit 2)."""
+    result = _invoke_prompt(monkeypatch, tmp_path, ["", " "])
+    assert result == 2
+
+
 def test_no_message_and_no_stdin_exits_2(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Neither message nor piped input is a usage error (exit 2)."""
     result = _invoke_prompt(monkeypatch, tmp_path, [])
