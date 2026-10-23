@@ -1995,8 +1995,7 @@ def _collect_interactive_or_error(
         if terminal_message.strip():
             return _expand_editor_message(terminal_message)
     console.print(
-        "[red]No message and no piped input. Pass a message and/or pipe data on "
-        "stdin.[/red]"
+        "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
     )
     raise typer.Exit(code=2)
 
