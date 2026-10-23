@@ -32,8 +32,10 @@ jobs:
 
       - name: Install dependencies
         # Resolves all framework deps from PyPI — no sibling checkout required.
-        # This validates the "clone just cli and run" path.
-        run: uv sync --no-sources --extra dev
+        # This validates the "clone just cli and run" path. The prompt extra
+        # provides prompt_toolkit: the TUI prompt tests exercise real key
+        # bindings (KeyProcessor match), so they need it installed.
+        run: uv sync --no-sources --extra dev --extra prompt
 
       - name: Format check (ruff)
         run: uv run --no-sync ruff format --check hosts/cli/src

@@ -820,14 +820,14 @@ prompt = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "lisa-harness-kernel", editable = "../lisa/kernel" },
-    { name = "lisa-harness-mcp-servers", editable = "../lisa/mcp_server" },
-    { name = "lisa-harness-runtime", editable = "../lisa/runtime" },
-    { name = "lisa-harness-sdk", editable = "../lisa/sdk" },
-    { name = "lisa-pack-core", editable = "../lisa/sdk/packs/core" },
-    { name = "lisa-pack-introspect", editable = "../lisa/sdk/packs/introspect" },
-    { name = "lisa-pack-memory", editable = "../lisa/sdk/packs/memory" },
-    { name = "lisa-pack-recovery", editable = "../lisa/sdk/packs/recovery" },
+    { name = "lisa-harness-kernel" },
+    { name = "lisa-harness-mcp-servers" },
+    { name = "lisa-harness-runtime" },
+    { name = "lisa-harness-sdk" },
+    { name = "lisa-pack-core" },
+    { name = "lisa-pack-introspect" },
+    { name = "lisa-pack-memory" },
+    { name = "lisa-pack-recovery" },
     { name = "openai", specifier = ">=1.30.0" },
     { name = "prompt-toolkit", marker = "extra == 'prompt'", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
@@ -864,27 +864,31 @@ markdown = [
 personas = [
     { name = "lisa-pack-personas" },
 ]
+prompt = [
+    { name = "lisa-cli", extra = ["prompt"] },
+]
 search = [
     { name = "lisa-pack-search" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "lisa-cli", editable = "hosts/cli" },
-    { name = "lisa-pack-markdown", marker = "extra == 'markdown'", editable = "../lisa-packs/markdown" },
-    { name = "lisa-pack-personas", marker = "extra == 'personas'", editable = "../lisa-packs/personas" },
-    { name = "lisa-pack-search", marker = "extra == 'search'", editable = "../lisa-packs/search" },
+    { name = "lisa-cli" },
+    { name = "lisa-cli", extras = ["prompt"], marker = "extra == 'prompt'" },
+    { name = "lisa-pack-markdown", marker = "extra == 'markdown'" },
+    { name = "lisa-pack-personas", marker = "extra == 'personas'" },
+    { name = "lisa-pack-search", marker = "extra == 'search'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
 ]
-provides-extras = ["dev", "markdown", "personas", "search"]
+provides-extras = ["dev", "prompt", "markdown", "personas", "search"]
 
 [[package]]
 name = "lisa-harness-kernel"
 version = "0.1.1"
-source = { editable = "../lisa/kernel" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "mcp" },
@@ -896,55 +900,30 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mcp", specifier = ">=2.0.0" },
-    { name = "opentelemetry-api", specifier = ">=1.40.0,<2.0.0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.40.0,<2.0.0" },
-    { name = "pydantic", specifier = ">=2.7.0" },
-    { name = "pydantic-settings", specifier = ">=2.3.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "sqlite-vec", marker = "extra == 'memory'", specifier = ">=0.1.9" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "tzdata", marker = "sys_platform == 'win32'", specifier = ">=2024.1" },
+sdist = { url = "https://files.pythonhosted.org/packages/54/f6/a4c061b2819c163e5d98015268ee4b51df2c5655a9c572bf8e7e8142560f/lisa_harness_kernel-0.1.1.tar.gz", hash = "sha256:c8439c486648c893e034fe476ca6d62c954318b9e2f60527436b7ed83f45d170", size = 736476, upload-time = "2026-10-20T16:11:08.618Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/e3/ead5258010c29d49b3f528e4d8f7a5c302477f2284571b9214b467886959/lisa_harness_kernel-0.1.1-py3-none-any.whl", hash = "sha256:58ca143df1c91a5ed6f650db5f827a2b54742791d1d2865d162900221734e7f4", size = 534765, upload-time = "2026-10-20T16:11:05.505Z" },
 ]
-provides-extras = ["dev", "memory"]
 
 [[package]]
 name = "lisa-harness-mcp-servers"
 version = "0.1.1"
-source = { editable = "../lisa/mcp_server" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lisa-harness-kernel" },
     { name = "lisa-harness-sdk" },
     { name = "mcp" },
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "lisa-harness-kernel", editable = "../lisa/kernel" },
-    { name = "lisa-harness-sdk", editable = "../lisa/sdk" },
-    { name = "mcp", specifier = ">=2.0.0" },
-    { name = "pydantic", specifier = ">=2.13.4" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/f5/7f/1373fa396b6f34dea06517c4bab661031169b94446fe53dfb3d00461c16e/lisa_harness_mcp_servers-0.1.1.tar.gz", hash = "sha256:fee32cf3091d6c11759d706e51bba31758769604c7fcb0cb944addc4e1bc5382", size = 38272, upload-time = "2026-10-20T16:11:11.724Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/e7/e831fffef9dfbb301e9ef7918a4a0c7dd334b2e08160628cabd63ba76cfc/lisa_harness_mcp_servers-0.1.1-py3-none-any.whl", hash = "sha256:a338cb5d7001f81a4fd144b396bd36e31bd2c4f09ec35a3a98f2c8bb039fbec1", size = 46159, upload-time = "2026-10-20T16:11:10.24Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-harness-runtime"
 version = "0.1.1"
-source = { editable = "../lisa/runtime" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cel-python" },
     { name = "httpx" },
@@ -960,33 +939,15 @@ dependencies = [
     { name = "pyyaml" },
     { name = "zstandard" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "cel-python", specifier = ">=0.5.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "lisa-harness-kernel", editable = "../lisa/kernel" },
-    { name = "lisa-harness-mcp-servers", editable = "../lisa/mcp_server" },
-    { name = "lisa-harness-sdk", editable = "../lisa/sdk" },
-    { name = "lisa-pack-core", editable = "../lisa/sdk/packs/core" },
-    { name = "lisa-pack-introspect", editable = "../lisa/sdk/packs/introspect" },
-    { name = "lisa-pack-memory", editable = "../lisa/sdk/packs/memory" },
-    { name = "lisa-pack-recovery", editable = "../lisa/sdk/packs/recovery" },
-    { name = "openai", specifier = ">=1.30.0" },
-    { name = "pydantic", specifier = ">=2.7.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "zstandard", specifier = ">=0.23.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/b5/6e/4e82fa02310e63609f6fefa4260cdf8b6a4d9c4e0f3681018f650838dc97/lisa_harness_runtime-0.1.1.tar.gz", hash = "sha256:5936f3860786c88131863413b5334b49760e135b58b305381ea40083525ed407", size = 449372, upload-time = "2026-10-20T16:11:11.977Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/53/96692093bd5e506531fed4311eb1afa38ec790dfeb8c970659dc6f28eecc/lisa_harness_runtime-0.1.1-py3-none-any.whl", hash = "sha256:e97edb44944c337abc0b026b0e7ca77179342feec491209e54051c3ce54d4f11", size = 357169, upload-time = "2026-10-20T16:11:10.24Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-harness-sdk"
 version = "0.1.1"
-source = { editable = "../lisa/sdk" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cel-python" },
     { name = "diskcache" },
@@ -998,61 +959,36 @@ dependencies = [
     { name = "tiktoken" },
     { name = "wcmatch" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.34" },
-    { name = "cel-python", specifier = ">=0.5.0" },
-    { name = "diskcache", specifier = ">=5.6" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "lisa-harness-kernel", editable = "../lisa/kernel" },
-    { name = "openai", specifier = ">=1.59.0" },
-    { name = "pydantic", specifier = ">=2.13.4" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
-    { name = "sqlite-vec", specifier = ">=0.1.9" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "wcmatch", specifier = ">=8.5" },
+sdist = { url = "https://files.pythonhosted.org/packages/b0/56/34a6d86139fc0d4e808fa4c74bbfc439ecc2e0f58d60fe8771ee646af80b/lisa_harness_sdk-0.1.1.tar.gz", hash = "sha256:73068ab496c58f99249395deff90d756501b62c5f19cf02f45945243223cbe0f", size = 343843, upload-time = "2026-10-20T16:11:10.686Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/2b/7a6a46b62526bcd75526ea4282324c9f73707cd48b18c5b3405e79790bf3/lisa_harness_sdk-0.1.1-py3-none-any.whl", hash = "sha256:8bd54c0c56b5902980331f0b9eb9d08fb937463ced67edc65a39b9809f20f7f7", size = 179475, upload-time = "2026-10-20T16:11:09.141Z" },
 ]
-provides-extras = ["bedrock", "dev"]
 
 [[package]]
 name = "lisa-pack-core"
 version = "0.1.1"
-source = { editable = "../lisa/sdk/packs/core" }
-
-[package.metadata]
-requires-dist = [
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/22/2e768d0f772a9446cd66b0abb12cd97a3062e5ac34bac626f5831ec0c840/lisa_pack_core-0.1.1.tar.gz", hash = "sha256:399aac0763d8e274485a40c2f835bb860f3b2b71d0e3d1272dc25a267878c161", size = 33394, upload-time = "2026-10-20T16:11:10.81Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/a0/e4577a07151b110e4ca335582b998906dfd62ef63b483a45fcd7ad1e9e53/lisa_pack_core-0.1.1-py3-none-any.whl", hash = "sha256:6ed847355063cdad0005047ae74b55e537efe6b495d7f1a3dd7612be1cfb876f", size = 37974, upload-time = "2026-10-20T16:11:09.406Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-introspect"
 version = "0.1.1"
-source = { editable = "../lisa/sdk/packs/introspect" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lisa-harness-kernel" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "lisa-harness-kernel" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/d4/a8/659058be2e63a4f45e358f6205e25aa9a32460ba97c423eee3be20750a1a/lisa_pack_introspect-0.1.1.tar.gz", hash = "sha256:93d39579bf791731fdb9487bda555251ce8a7c328f88a0b7cd99afbc9f9d21f8", size = 7140, upload-time = "2026-10-20T16:11:13.403Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/bd/517918444780784b5ac34527675fe3ea3bed698d4da99dc86b7d3c1ecd37/lisa_pack_introspect-0.1.1-py3-none-any.whl", hash = "sha256:da87f71f737352ee3ccc5f01fa34f3381f67d3410df5eb8c868483811eece191", size = 10000, upload-time = "2026-10-20T16:11:12.323Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-markdown"
 version = "0.1.0"
-source = { editable = "../lisa-packs/markdown" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lisa-harness-kernel" },
     { name = "lisa-harness-sdk" },
@@ -1060,79 +996,52 @@ dependencies = [
     { name = "mdformat" },
     { name = "pymarkdownlnt" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "lisa-harness-kernel" },
-    { name = "lisa-harness-sdk" },
-    { name = "markdown-it-py", specifier = ">=3.0.0" },
-    { name = "mdformat", specifier = ">=0.7.0" },
-    { name = "pymarkdownlnt", specifier = ">=0.9" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/27/c9/037c52b53f8aab048b3e6300944485e36587ea75b0351714cb11252b137c/lisa_pack_markdown-0.1.0.tar.gz", hash = "sha256:7593264e376acb50c3be0410e7344ae6f8260abc84d61f3c235fdcf9fca34f2d", size = 96386, upload-time = "2026-10-19T19:50:30.937Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/2d/7f80b08370189149a9837d12f433d9632a60ea52f3a909a00ea65313ead1/lisa_pack_markdown-0.1.0-py3-none-any.whl", hash = "sha256:52cbde7a6cdae915ae768e985abd38eb509506203004764c2198955392a6b011", size = 117793, upload-time = "2026-10-19T19:50:29.678Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-memory"
 version = "0.1.1"
-source = { editable = "../lisa/sdk/packs/memory" }
-
-[package.metadata]
-requires-dist = [
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/96/bccc782bfb4b498eb88f6b666852cefac3cd530e34828d5e2c26cf9be598/lisa_pack_memory-0.1.1.tar.gz", hash = "sha256:4e621010f3d464d1a65c0385419619cfbcf0ed470e2f0424ee2809442785707b", size = 47734, upload-time = "2026-10-20T16:11:09.964Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/80/34/6cf873419202d744de259f430366ba7a6bd0d5555a44963e4e1fbe4835e2/lisa_pack_memory-0.1.1-py3-none-any.whl", hash = "sha256:7ce95a74442c2c8d1b2c5c6a71559609ca52f0f8a6592fc66e0f992c0965dd38", size = 39227, upload-time = "2026-10-20T16:11:08.771Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-personas"
 version = "0.1.0"
-source = { editable = "../lisa-packs/personas" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lisa-harness-sdk" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "lisa-harness-sdk" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/49/b6/a302b985d33ad347019cb04d2fa881d018ba6d451ca2a7a116657f7746cd/lisa_pack_personas-0.1.0.tar.gz", hash = "sha256:e22b6c06395e2bade9a39ab8836afeb5a1fd866f030c8e798b4b5aa9f9a4fcd6", size = 3538, upload-time = "2026-10-19T19:50:28.353Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f8/12/e9cf6a1e935bd34b83ec0cac949c41ad88a1384c1e88f49f9cc237ce346f/lisa_pack_personas-0.1.0-py3-none-any.whl", hash = "sha256:33d4d8f66bd9e519a9b6af188d6a192b0ff4ead2bc734e7007c10102c1769cce", size = 4147, upload-time = "2026-10-19T19:50:27.111Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-recovery"
 version = "0.1.1"
-source = { editable = "../lisa/sdk/packs/recovery" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lisa-harness-kernel" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "lisa-harness-kernel" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/77/93/5d228c9ecd0c3d8e89d7cc11834a881354bc8c235e438de556cd8602326f/lisa_pack_recovery-0.1.1.tar.gz", hash = "sha256:8c8438a26d045fedd84fabc38362817264842a3c70638bc31debe520bc783e2b", size = 15144, upload-time = "2026-10-20T16:11:10.303Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/92/c6f6d6c3c3a4bb53e67978caf8d04f6929d299400c08209845aebf3a4779/lisa_pack_recovery-0.1.1-py3-none-any.whl", hash = "sha256:cebcb928610d8225374d7a080089d782c466cd71ae09c647b1090cd6b717713e", size = 9115, upload-time = "2026-10-20T16:11:09.213Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "lisa-pack-search"
 version = "0.1.0"
-source = { editable = "../lisa-packs/search" }
-
-[package.metadata]
-requires-dist = [
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/7e/9b2f9f45bcf8fe5030b81e188433129bc484a39d30f7204cc0e840e83c0d/lisa_pack_search-0.1.0.tar.gz", hash = "sha256:48f96c0080303265c43073d93b21b693a493de77646c849e1a80889b2e165ad7", size = 8618, upload-time = "2026-10-19T19:52:25.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/2a/74cbdff0695131b9ca9645c95d21f34f2ce5eef169c61045458650eddd44/lisa_pack_search-0.1.0-py3-none-any.whl", hash = "sha256:1ceecac93da77a632ae271c5187987776d953b29b5dead54c4bdee3f8e8cde86", size = 13006, upload-time = "2026-10-19T19:52:24.383Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "macholib"
