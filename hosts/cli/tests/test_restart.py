@@ -35,13 +35,9 @@ def test_prompt_pack_mutation_exits_zero(tmp_path: Path, monkeypatch: pytest.Mon
 
     runtime = _make_runtime(tmp_path)
 
-    class _FakeTransport:
-        approval_unresolved = False
-        yield_unresolved = False
-
     async def _fake_run_prompt_with_teardown(_runtime, _message, **_kwargs):
         runtime.session.request_restart("pack enable: lisa-pack-cloudflare")
-        return _FakeTransport()
+        return _kwargs["transport"]
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kw: runtime)
     monkeypatch.setattr(cli_main, "_run_prompt_with_teardown", _fake_run_prompt_with_teardown)

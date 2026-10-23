@@ -99,7 +99,7 @@ expands before lisa even runs.
 `lisa prompt` with nothing to send drops into an input editor. Quote
 characters, backticks, and apostrophes are collected literally — no
 escaping. Key layout is swapped by default: **Enter inserts a newline;
-Ctrl-J (or Alt+Enter) sends** — Enter never fires the turn, so a hurried
+Ctrl-J sends** — Enter never fires the turn, so a hurried
 keypress can't send a half-typed message or leak to your shell after the
 run (and Ctrl-Z stays a plain shell suspend). Ctrl-C aborts with the
 SIGINT exit code. `$(command)` is expanded here as shell
@@ -107,21 +107,29 @@ substitution (nesting works; a failed command is a loud error, exit 2;
 escape with `\$(` for a literal `$(`). Single-quoted spans don't expand
 and backticks stay literal. Submitted prompts persist to
 `<data-dir>/state/prompt_history.txt` for Alt+Up reuse. The editor uses
-prompt_toolkit when the optional `lisa-cli[prompt]` extra is installed,
-otherwise a plain line-at-a-time reader (Ctrl-D on an empty line sends;
-Ctrl-Z does not). Prefer chat-box Enter-sends? Pass `--no-swap-keys`,
+prompt_toolkit, included by both installers via `lisa-cli[prompt]`.
+Without that extra, Lisa warns and uses a plain line-at-a-time reader
+(Ctrl-D on an empty line sends; Ctrl-J does not submit).
+Alt+Enter is not a send or newline shortcut. Prefer chat-box Enter-sends?
+Pass `--swap-keys`,
 or set `LISA_PROMPT_KEYS=1` (any truthy value; the flag wins over the
 env).
 
-The hint text is settings, not a constant. Precedence per fragment:
+Sending immediately shows a `starting runtime` spinner, including while
+`$(command)` substitutions and runtime setup run. It continues into the
+turn's live activity display. `-q` suppresses it; `--raw` sends it to
+stderr, and redirected activity output never contains a spinner.
+
+The editor's hint line is built in and follows the active key layout. To
+customize it, use these overrides. Precedence per fragment:
 
 1. `LISA_PROMPT_PS1` — verbatim whole-line replace; empty value
    suppresses hints entirely (highest precedence, env).
 2. Per-fragment env backstops: `LISA_PROMPT_HINT_SEND`, `_NEWLINE`,
    `_ABORT`, `_BANNER` (empty value suppresses that fragment).
-3. `<data-dir>/config/prompt_hints.yaml` — hand-editable blob the
-   installers seed; the model can read it when asked about prompt keys
-   (the seeded session context points it there).
+3. `<data-dir>/config/prompt_hints.yaml` — optional, hand-created file
+   with `send`, `newline`, `abort`, or `banner` keys (installers do not
+   create it).
 4. Built-in facts per key layout (what actually sends/adds a line).
 
 The settings cannot contradict behavior: the layout facts (Enter sends

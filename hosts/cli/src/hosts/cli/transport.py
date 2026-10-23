@@ -428,7 +428,7 @@ class PromptTransport:
             transient=True,
         )
         with contextlib.suppress(Exception):
-            activity.start()
+            activity.start(refresh=True)
         self._activity = activity
 
     def stop_activity(self) -> None:

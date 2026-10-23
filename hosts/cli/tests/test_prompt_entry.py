@@ -11,7 +11,7 @@ payload, and no pre-armed decision, it drops into lisa-managed input
   bypasses both the shell and the $() expander by design in tests).
 - Ctrl-C / no input aborts with the SIGINT exit code (130); whitespace
   input is a usage error (exit 2).
-- Key layout: swapped by default (Enter = newline, Ctrl-J/Alt+Enter =
+- Key layout: swapped by default (Enter = newline, Ctrl-J =
   send); ``--swap-keys`` (hoisted at group level too) or truthy
   ``LISA_PROMPT_KEYS`` selects chat-box (Enter sends). The TUI binding
   builder is exercised directly for both layouts, plus the env
@@ -23,16 +23,21 @@ test touches a real terminal.
 
 from __future__ import annotations
 
+import asyncio
+
 # pylint: disable=protected-access
 import io
 import sys
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from rich.console import Console
+from rich.live import Live
 
 from hosts.cli import main as cli_main
+from hosts.cli.transport import PromptTransport
 
 
 def _make_runtime(tmp_path: Any) -> Any:
@@ -52,6 +57,8 @@ def _invoke(
     reader_result: Any,
     stdout_tty: bool = True,
     captured: dict[str, Any] | None = None,
+    console: Console | None = None,
+    on_initialize: Callable[[], None] | None = None,
 ) -> int | None:
     """Invoke the prompt command with scripted terminal input.
 
@@ -62,7 +69,13 @@ def _invoke(
     as redirected (a pipe/file), keeping the editor away from pipelines.
     """
     runtime = _make_runtime(tmp_path)
-    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kw: runtime)
+
+    def _initialize(**_kw: Any) -> Any:
+        if on_initialize is not None:
+            on_initialize()
+        return runtime
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _initialize)
 
     import runtime.handle_message as hm_module
 
@@ -90,7 +103,8 @@ def _invoke(
     real_stdout = sys.stdout
     monkeypatch.setattr(sys, "stdout", stdout_obj)
 
-    console = Console(quiet=True, file=stdout_obj)
+    if console is None:
+        console = Console(quiet=True, file=stdout_obj)
     try:
         with patch.object(cli_main, "console", new=console):
             result: int | None = cli_main.app(args=["prompt", *argv], standalone_mode=False)
@@ -100,6 +114,191 @@ def _invoke(
         captured["reader_called"] = bool(reader_calls)
         captured["stdout"] = stdout_obj.getvalue()
     return result
+
+
+@pytest.fixture
+def prompt_transports(monkeypatch: pytest.MonkeyPatch) -> list[PromptTransport]:
+    transports: list[PromptTransport] = []
+    original_init = PromptTransport.__init__
+
+    def _initialize(transport: PromptTransport, **kwargs: Any) -> None:
+        original_init(transport, **kwargs)
+        transports.append(transport)
+
+    monkeypatch.setattr(PromptTransport, "__init__", _initialize)
+    return transports
+
+
+def test_send_shows_activity_before_expansion_and_runtime_setup(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_transports: list[PromptTransport],
+) -> None:
+    output = io.StringIO()
+    terminal = Console(file=output, force_terminal=True)
+    activities: list[Live] = []
+
+    def _check_activity() -> None:
+        assert len(prompt_transports) == 1
+        activity = prompt_transports[0]._activity
+        assert activity is not None
+        assert "starting runtime" in output.getvalue()
+        activities.append(activity)
+
+    def _expand(text: str) -> str:
+        _check_activity()
+        assert text == "submitted prompt"
+        return "expanded prompt"
+
+    monkeypatch.setattr(cli_main, "_expand_editor_message", _expand)
+    original_start_turn = PromptTransport.start_turn
+
+    def _start_turn(transport: PromptTransport, message: str) -> None:
+        _check_activity()
+        assert message == "expanded prompt"
+        original_start_turn(transport, message)
+
+    monkeypatch.setattr(PromptTransport, "start_turn", _start_turn)
+    assert (
+        _invoke(
+            monkeypatch,
+            tmp_path,
+            [],
+            reader_result="submitted prompt",
+            console=terminal,
+            on_initialize=_check_activity,
+        )
+        == 0
+    )
+    assert len(activities) == 3
+    assert all(activity is activities[0] for activity in activities)
+    assert prompt_transports[0]._activity is None
+
+
+@pytest.mark.parametrize("stage", ["expansion", "initialization"])
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_startup_failure_cleans_up_activity(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_transports: list[PromptTransport],
+    stage: str,
+    error: type[BaseException],
+) -> None:
+    terminal = Console(file=io.StringIO(), force_terminal=True)
+
+    def _fail(*_args: Any) -> None:
+        assert prompt_transports[0]._activity is not None
+        raise error("startup interrupted")
+
+    if stage == "expansion":
+        monkeypatch.setattr(cli_main, "_expand_editor_message", _fail)
+
+    def _run() -> int | None:
+        return _invoke(
+            monkeypatch,
+            tmp_path,
+            [],
+            reader_result="submitted prompt",
+            console=terminal,
+            on_initialize=_fail if stage == "initialization" else None,
+        )
+
+    if error is KeyboardInterrupt:
+        assert _run() == cli_main._ABORT_EXIT
+    else:
+        with pytest.raises(error, match="startup interrupted"):
+            _run()
+    assert prompt_transports[0]._activity is None
+
+
+@pytest.mark.parametrize(
+    ("argv", "terminal", "expected_activity"),
+    [([], True, True), (["-q"], True, False), ([], False, False)],
+)
+def test_startup_feedback_respects_quiet_and_redirection(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_transports: list[PromptTransport],
+    argv: list[str],
+    *,
+    terminal: bool,
+    expected_activity: bool,
+) -> None:
+    output = io.StringIO()
+
+    def _check_activity() -> None:
+        assert (prompt_transports[0]._activity is not None) is expected_activity
+        assert ("starting runtime" in output.getvalue()) is expected_activity
+
+    assert (
+        _invoke(
+            monkeypatch,
+            tmp_path,
+            [*argv, "argument prompt"],
+            reader_result="unused",
+            console=Console(file=output, force_terminal=terminal),
+            on_initialize=_check_activity,
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_raw_startup_feedback_uses_stderr(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_transports: list[PromptTransport],
+    quiet: bool,
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    terminal = Console(file=stderr, force_terminal=True)
+
+    def _console(*, stderr: bool) -> Console:
+        assert stderr is True
+        return terminal
+
+    def _check_activity() -> None:
+        assert (prompt_transports[0]._activity is not None) is not quiet
+        assert ("starting runtime" in stderr.getvalue()) is not quiet
+        assert stdout.getvalue() == ""
+
+    monkeypatch.setattr(cli_main, "Console", _console)
+    assert (
+        _invoke(
+            monkeypatch,
+            tmp_path,
+            ["-q", "-r"] if quiet else ["-r"],
+            reader_result="submitted prompt",
+            console=Console(file=stdout, force_terminal=True),
+            on_initialize=_check_activity,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == ""
+
+
+@pytest.mark.parametrize(("message", "exit_code"), [(None, 130), ("   \n", 2)])
+def test_editor_abort_or_empty_submission_does_not_start_activity(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_transports: list[PromptTransport],
+    message: str | None,
+    exit_code: int,
+) -> None:
+    output = io.StringIO()
+    assert (
+        _invoke(
+            monkeypatch,
+            tmp_path,
+            [],
+            reader_result=message,
+            console=Console(file=output, force_terminal=True),
+        )
+        == exit_code
+    )
+    assert prompt_transports[0]._activity is None
+    assert "starting runtime" not in output.getvalue()
 
 
 # ── Editor offered on the interactive path ────────────────────────────
@@ -440,7 +639,10 @@ def test_binding_layouts_swap_send_and_newline_keys() -> None:
         class _FakeBindings:
             def add(self, *keys: Any, **_kw: Any):
                 def _decorator(fn: Any) -> Any:
-                    actions[keys] = "send" if fn.__name__ == "_send" else "newline"
+                    actions[keys] = {
+                        "_send": "send",
+                        "_newline": "newline",
+                    }.get(fn.__name__, "other")
                     return fn
 
                 return _decorator
@@ -452,10 +654,10 @@ def test_binding_layouts_swap_send_and_newline_keys() -> None:
     chat = _layout(False)
     assert swapped[("enter",)] == "newline"
     assert swapped[("c-j",)] == "send"
-    assert swapped[("escape", "enter")] == "send"
+    assert swapped[("escape", "enter")] == "other"
     assert chat[("enter",)] == "send"
     assert chat[("c-j",)] == "newline"
-    assert chat[("escape", "enter")] == "newline"
+    assert chat[("escape", "enter")] == "other"
 
 
 def test_tui_bindings_eager_send_keys_in_both_layouts() -> None:
@@ -739,48 +941,98 @@ def test_tui_toolbar_assembles_resolved_fragments(
     del yaml_mod, _HTML, prompt_toolkit
 
 
-# ── Alt+Enter terminal encodings (CSI-u / kitty) bound to send ────────
+# ── Real terminal input through prompt_toolkit ───────────────────────
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "seq_chars",
-    [
-        "[27;3;13~",  # CSI-u / modifyOtherKeys Alt+Enter (xterm family)
-        "[13;3u",  # kitty keyboard-protocol Alt+Enter
-    ],
+    ("swapped", "keys"),
+    [(True, "first\rsecond\n"), (False, "first\nsecond\r")],
 )
-def test_alt_enter_csi_u_encodings_send(seq_chars: str) -> None:
-    """Real terminals CSI-u-encode Alt+Enter; each encoding must send."""
-    from prompt_toolkit.key_binding.key_processor import KeyPress, KeyProcessor
-    from prompt_toolkit.keys import Keys
+async def test_editor_sends_multiline_text_with_real_key_processing(
+    swapped: bool, keys: str
+) -> None:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
 
     from hosts.cli import entry as entry_mod
 
-    for swapped in (True, False):
-        bindings = entry_mod._tui_key_bindings(swapped=swapped)
-        proc = KeyProcessor.__new__(KeyProcessor)
-        proc._bindings = bindings
-        seq = [KeyPress(Keys.Escape, "\x1b")] + [KeyPress(c, c) for c in seq_chars]
-        matches = proc._get_matches(seq)
-        assert matches, f"no binding for {seq_chars!r} (swapped={swapped})"
-        assert matches[-1].handler.__name__ == "_send"
+    with create_pipe_input() as pipe:
+        session: PromptSession[str] = PromptSession(
+            multiline=True,
+            key_bindings=entry_mod._tui_key_bindings(swapped=swapped),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        pipe.send_text(keys)
+        assert await asyncio.wait_for(session.prompt_async(""), timeout=2) == "first\nsecond"
 
 
-def test_alt_enter_seqs_eager_free() -> None:
-    """The CSI-u send bindings are NOT eager (multi-key prefix match)."""
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swapped", [True, False])
+@pytest.mark.parametrize("alt_enter", ["\x1b\r", "\x1b[27;3;13~", "\x1b[13;3u"])
+async def test_alt_enter_does_not_submit_or_modify_text(swapped: bool, alt_enter: str) -> None:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
     from hosts.cli import entry as entry_mod
 
-    captured: list[tuple[tuple, bool]] = []
+    with create_pipe_input() as pipe:
+        session: PromptSession[str] = PromptSession(
+            multiline=True,
+            key_bindings=entry_mod._tui_key_bindings(swapped=swapped),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        send = "\n" if swapped else "\r"
+        pipe.send_text(f"before{alt_enter}after{send}")
+        assert await asyncio.wait_for(session.prompt_async(""), timeout=2) == "beforeafter"
 
-    class _FakeBindings:
-        def add(self, *keys: Any, eager: Any = False, **_kw: Any):
-            def _decorator(fn: Any) -> Any:
-                captured.append((keys, bool(eager)))
-                return fn
 
-            return _decorator
+@pytest.mark.parametrize("layout", ["plain", "chat", "swap"])
+def test_legacy_installer_hints_follow_active_reader(tmp_path: Any, layout: str) -> None:
+    from hosts.cli import entry as entry_mod
 
-    entry_mod._add_navigate_bindings(_FakeBindings(), swapped=True)
-    for keys, eager in captured:
-        if len(keys) > 1:
-            assert not eager, f"{keys} must not be eager"
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "prompt_hints.yaml").write_text(
+        'send: "Ctrl-J or Alt+Enter sends"\nnewline: "Enter adds a line"\n', encoding="utf-8"
+    )
+    hints = entry_mod.resolve_hints(tmp_path, "", layout=layout)
+    assert hints["send"] == entry_mod._DEFAULT_SEND[layout]
+    assert hints["newline"] == entry_mod._DEFAULT_NEWLINE[layout]
+
+
+def test_missing_editor_dependency_warns_and_uses_correct_hints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from hosts.cli import entry as entry_mod
+
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "prompt_hints.yaml").write_text(
+        'send: "Ctrl-J or Alt+Enter sends"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(entry_mod, "_PT", None)
+    lines = iter(["hello"])
+
+    def _input() -> str:
+        try:
+            return next(lines)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", _input)
+    output = io.StringIO()
+    text = entry_mod.read_prompt_message_tui(
+        Console(file=output, width=200),
+        history_path=tmp_path / "history",
+        data_dir=tmp_path,
+    )
+    assert text == "hello"
+    assert "prompt-toolkit is not installed" in output.getvalue()
+    assert "Ctrl-D on an empty line sends" in output.getvalue()
+    assert "Ctrl-J" not in output.getvalue()
+    assert "Alt+Enter" not in output.getvalue()

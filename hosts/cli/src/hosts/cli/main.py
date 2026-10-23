@@ -650,7 +650,7 @@ PromptSwapKeysOption = Annotated[
         "--swap-keys/--no-swap-keys",
         help=(
             "No-args editor key layout. Shipped default: Enter inserts a "
-            "newline; Ctrl-J or Alt+Enter sends — Enter never fires the "
+            "newline; Ctrl-J sends — Enter never fires the "
             "turn, so a hurried keypress cannot send a half-typed message "
             "nor leak to the shell after the run. --swap-keys reverses to "
             "chat-box (Enter sends); LISA_PROMPT_KEYS truthy does the same "
@@ -1944,6 +1944,7 @@ def _collect_interactive_or_error(
     profile: str,
     *,
     swap_keys: bool | None = None,
+    on_submit: Callable[[], None] | None = None,
 ) -> str:
     """Resolve the no-input case: editor on a tty, usage error otherwise.
 
@@ -1962,6 +1963,9 @@ def _collect_interactive_or_error(
     ``swapped_keys`` (True = Enter-newline shipped default; False =
     chat-box). Under redirection there is no editor: a pipeline wants
     an error, not a prompt. Returns the message or raises ``typer.Exit``.
+
+    ``on_submit`` runs after a non-empty submission, before shell
+    substitutions, so feedback need not wait for an embedded command.
     """
     del full_instruction  # empty by contract; parameter documents intent
     if sys.stdin.isatty() and sys.stdout.isatty():
@@ -1993,6 +1997,8 @@ def _collect_interactive_or_error(
         if terminal_message is None:
             raise typer.Exit(code=_ABORT_EXIT) from None
         if terminal_message.strip():
+            if on_submit is not None:
+                on_submit()
             return _expand_editor_message(terminal_message)
     console.print(
         "[red]No message and no piped input. Pass a message and/or pipe data on stdin.[/red]"
@@ -2540,41 +2546,52 @@ def _prompt_command(
     # A pre-armed decision (--approve/--deny) carries no message and no
     # piped payload; it is consumed at the end of the turn.
     decision = _prompt_prearmed_decision(approve, deny, remember)
-    if not full_instruction.strip() and not payload.strip() and decision is None:
-        full_instruction = _collect_interactive_or_error(
-            full_instruction, payload, data_dir, profile, swap_keys=swap_keys
-        )
-    full_message = _compose_prompt_message(full_instruction, payload)
-    if raw:
-        full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
-    del swap_keys  # consumed above; the editor call resolved the layout
-    runtime = _initialize_runtime_or_exit(
-        log_level=log_level,
-        log_path=log,
-        no_log=no_log,
-        data_dir=data_dir,
-        profile=profile,
-        overlays_dir=overlays_dir,
-        thread_dir=thread_dir,
-        no_thread=no_thread,
-        session_context=session_context,
-        timezone=timezone,
-        state_snapshot_path=state_snapshot,
-        streaming=streaming,
-        host_log_path=host_log,
-        in_process_mcp=True,
+    from hosts.cli.transport import PromptTransport
+
+    transport = PromptTransport(
+        console=Console(stderr=True) if raw else console,
+        quiet=quiet,
+        raw=raw,
+        tool_detail=tool_detail,
     )
-    if runtime is None:
-        return
     try:
+        if not full_instruction.strip() and not payload.strip() and decision is None:
+            full_instruction = _collect_interactive_or_error(
+                full_instruction,
+                payload,
+                data_dir,
+                profile,
+                swap_keys=swap_keys,
+                on_submit=transport.start_activity,
+            )
+        transport.start_activity()
+        full_message = _compose_prompt_message(full_instruction, payload)
+        if raw:
+            full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
+        runtime = _initialize_runtime_or_exit(
+            log_level=log_level,
+            log_path=log,
+            no_log=no_log,
+            data_dir=data_dir,
+            profile=profile,
+            overlays_dir=overlays_dir,
+            thread_dir=thread_dir,
+            no_thread=no_thread,
+            session_context=session_context,
+            timezone=timezone,
+            state_snapshot_path=state_snapshot,
+            streaming=streaming,
+            host_log_path=host_log,
+            in_process_mcp=True,
+        )
+        if runtime is None:
+            return
+        transport.streaming_mode = runtime.config.streaming.mode
         transport = asyncio.run(
             _run_prompt_with_teardown(
                 runtime,
                 full_message,
-                quiet=quiet,
-                raw=raw,
-                tool_detail=tool_detail,
-                streaming_mode=runtime.config.streaming.mode,
+                transport=transport,
                 decision=decision,
             )
         )
@@ -2589,6 +2606,8 @@ def _prompt_command(
         abort_console = Console(stderr=True) if raw else console
         abort_console.print("[red]⏹ Turn aborted by operator (Ctrl-C).[/red]")
         raise typer.Exit(code=_ABORT_EXIT) from None
+    finally:
+        transport.stop_activity()
     if transport.approval_unresolved:
         # The approval request id is durable; the operator must decide it in
         # an interactive session. Exit non-zero so pipelines never mistake an
@@ -2606,10 +2625,7 @@ async def _run_prompt_with_teardown(
     runtime: HostRuntime,
     message: str,
     *,
-    quiet: bool = False,
-    raw: bool = False,
-    tool_detail: int = 0,
-    streaming_mode: str = "none",
+    transport: PromptTransport,
     decision: _PrearmedDecision | None = None,
 ) -> PromptTransport:
     """Run one turn (and any pre-armed decision), then close the MCP pool.
@@ -2621,7 +2637,8 @@ async def _run_prompt_with_teardown(
     the decided prefix (default prefix when no explicit value is given).
 
     Returns the transport so the caller can inspect post-turn state
-    (``approval_unresolved``).
+    (``approval_unresolved``). The caller starts its activity display before
+    runtime construction and owns cleanup if construction fails.
 
     In raw mode the transport console moves to stderr so activity output
     (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
@@ -2632,16 +2649,6 @@ async def _run_prompt_with_teardown(
         handle_message,
     )
 
-    from hosts.cli.transport import PromptTransport  # lazy: defers transport import
-
-    transport_console: Console = Console(stderr=True) if raw else console
-    transport = PromptTransport(
-        console=transport_console,
-        quiet=quiet,
-        raw=raw,
-        tool_detail=tool_detail,
-        streaming_mode=streaming_mode,
-    )
     transport.model_prices = _collect_model_prices(runtime)
     transport.model_cache_prices = _collect_model_cache_prices(runtime)
     transport.start_turn(message)

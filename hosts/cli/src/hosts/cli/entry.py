@@ -14,9 +14,8 @@ Two readers, same contract:
 - :func:`read_prompt_message_tui` — prompt_toolkit single-box editor
   (when the optional ``lisa-cli[prompt]`` extra is installed, with
   graceful fallback to the plain reader). Send and newline are
-  swappable between Enter and Ctrl-J (Alt+Enter follows Ctrl-J in both
-  layouts); the shipped default is swapped — Enter inserts a newline
-  and Ctrl-J / Alt+Enter sends — so a hurried Enter never fires the
+  swappable between Enter and Ctrl-J; the shipped default is swapped —
+  Enter inserts a newline and Ctrl-J sends — so a hurried Enter never fires the
   turn (finish with Ctrl-J, or Ctrl-D on an empty line in the plain
   reader) and no trailing keystroke can reach the caller's shell.
   ``--swap-keys`` / truthy ``LISA_PROMPT_KEYS`` restores chat-box
@@ -98,10 +97,10 @@ _FRAGMENT_ENV = {
 
 #: Env var selecting the editor key model, PS1-style. Unset or falsy
 #: (``0/false/no/off``): swapped default — Enter inserts a newline, Ctrl-J
-#: or Alt+Enter sends (newline-first, so an impatient finisher cannot
+#: sends (newline-first, so an impatient finisher cannot
 #: send a half-typed message, and a double-tap cannot reach the shell).
-#: Truthy (``1/true/yes/on``): chat-box — Enter sends, Ctrl-J or
-#: Alt+Enter adds a newline. ``--swap-keys`` wins over the env var.
+#: Truthy (``1/true/yes/on``): chat-box — Enter sends, Ctrl-J
+#: adds a newline. ``--swap-keys`` wins over the env var.
 _PROMPT_KEYS_ENV = "LISA_PROMPT_KEYS"
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -115,11 +114,11 @@ _DEFAULT_BANNER = "Lisa prompt - quotes are literal; $(cmd) is expanded. ✨"
 _DEFAULT_SEND = {
     "plain": "Ctrl-D on an empty line sends",
     "chat": "Enter sends",
-    "swap": "Ctrl-J or Alt+Enter sends",
+    "swap": "Ctrl-J sends",
 }
 _DEFAULT_NEWLINE = {
     "plain": "each line is kept",
-    "chat": "Alt+Enter or Ctrl-J adds a line",
+    "chat": "Ctrl-J adds a line",
     "swap": "Enter adds a line",
 }
 _DEFAULT_ABORT = "Ctrl-C aborts"
@@ -260,8 +259,18 @@ def resolve_hints(
             resolved[key] = file_fragments[key]
             continue
         resolved[key] = None
-    # Facts no settings file should be able to contradict: the layout
-    # determines the send/newline text when the operator has not spoken.
+    # Old installers seeded TUI defaults even for the plain reader.
+    # Treat those defaults as layout facts, preserving custom hint text.
+    if resolved["send"] in (
+        *_DEFAULT_SEND.values(),
+        "Ctrl-J or Alt+Enter sends",
+    ):
+        resolved["send"] = _DEFAULT_SEND[layout]
+    if resolved["newline"] in (
+        *_DEFAULT_NEWLINE.values(),
+        "Alt+Enter or Ctrl-J adds a line",
+    ):
+        resolved["newline"] = _DEFAULT_NEWLINE[layout]
     if resolved["send"] is None:
         resolved["send"] = _DEFAULT_SEND[layout]
     if resolved["newline"] is None:
@@ -420,32 +429,11 @@ def _delete_first_grapheme(text: str) -> int:
     return i
 
 
-def _alt_enter_key_sequences() -> tuple[tuple[str, ...], ...]:
-    """Terminal encodings of Alt+Enter beyond the ESC+CR pair.
-
-    PT's ANSI table maps CSI-u modified Enter for Shift (``27;2;13~``)
-    and Ctrl (``27;5;13~``) to ControlM — but NOT the Alt form
-    (``27;3;13~``), nor kitty keyboard-protocol's ``13;3u``. Those
-    arrive as raw characters (escape, [, 2, 7, ...), echoing ``^[`` on
-    screen and matching nothing (the 2026-10-22 user report). Bind each
-    encoding char-by-char so Alt+Enter sends in every terminal family:
-    ESC+CR single-write (classic xterm), CSI-u ``ESC[27;3;13~``, and
-    kitty ``ESC[13;3u``.
-    """
-    return (
-        ("escape", "[", "2", "7", ";", "3", ";", "1", "3", "~"),  # ESC[27;3;13~
-        ("escape", "[", "1", "3", ";", "3", "u"),  # ESC[13;3u (kitty)
-    )
-
-
-_ALT_ENTER_SEQS = _alt_enter_key_sequences()
-
-
 def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
     """Bind submit/newline and navigation keys.
 
     ``swapped`` (the default) puts newline on Enter and send on
-    Ctrl-J / Alt+Enter / Esc-then-Enter — the impatient-finisher-safe
+    Ctrl-J — the impatient-finisher-safe
     model: Enter never sends, so a hurried double-tap adds a blank line
     instead of firing the turn, and no buffered keystroke can reach the
     caller's shell after the process exits. ``swapped=False`` is
@@ -454,11 +442,6 @@ def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
     (prompt_toolkit's history navigation replaces the whole multiline
     buffer) and Alt+Up/Down walk prompt history.
     """
-    send_seqs, newline_seqs = (
-        ((("c-j",), ("escape", "enter")), (("enter",),))
-        if swapped
-        else ((("enter",),), (("c-j",), ("escape", "enter")))
-    )
 
     def _send(event: Any) -> None:
         event.current_buffer.validate_and_handle()
@@ -466,18 +449,15 @@ def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
     def _newline(event: Any) -> None:
         event.current_buffer.insert_text("\n")
 
-    for seq in send_seqs:
-        # eager on the single Enter key: swallow it before PT's
-        # buffer-complete machinery; sequence bindings (escape,enter or
-        # the CSI-u alt-enter encodings) must not be eager — eager kills
-        # the multi-key prefix match.
-        bindings.add(*seq, eager=len(seq) == 1)(_send)
-    for seq in newline_seqs:
-        bindings.add(*seq)(_newline)
-    # Alt+Enter's CSI-u encodings follow the escape-pair binding: send in
-    # both layouts (Alt+Enter sends is the universal convention).
-    for alt_seq in _ALT_ENTER_SEQS:
-        bindings.add(*alt_seq)(_send)
+    bindings.add("c-j" if swapped else "enter", eager=True)(_send)
+    bindings.add("enter" if swapped else "c-j")(_newline)
+
+    # Override prompt_toolkit's default Escape+Enter submit binding too.
+    @bindings.add("escape", "[", "2", "7", ";", "3", ";", "1", "3", "~")
+    @bindings.add("escape", "[", "1", "3", ";", "3", "u")
+    @bindings.add("escape", "enter")
+    def _ignore_alt_enter(event: Any) -> None:
+        pass
 
     @bindings.add("c-up", eager=True)
     def _inert_c_up(event: Any) -> None:
@@ -552,12 +532,12 @@ def read_prompt_message_tui(
 
     - ``True`` (the shipped default; also when the flag is absent and
       ``LISA_PROMPT_KEYS`` is unset/falsy): Enter inserts a newline;
-      Ctrl-J, Alt+Enter, or Esc-then-Enter sends. Enter never sends — a
+      Ctrl-J sends. Enter never sends — a
       hurried double-tap adds a blank line instead of firing the turn,
       and no buffered keystroke can reach the caller's shell after the
       process exits.
     - ``False`` (chat-box, opt-in via ``--swap-keys`` or truthy
-      ``LISA_PROMPT_KEYS``): Enter sends; Ctrl-J and Alt+Enter add a
+      ``LISA_PROMPT_KEYS``): Enter sends; Ctrl-J adds a
       newline.
     - Ctrl+Up / Ctrl+Down are inert: prompt_toolkit binds them to
       previous/next-history, which replaces the whole multiline buffer
@@ -575,7 +555,11 @@ def read_prompt_message_tui(
     empty, custom text when set).
     """
     if _PT is None:
-        return read_prompt_message(console)
+        console.print(
+            "[yellow]Full editor unavailable: prompt-toolkit is not installed. "
+            "Using plain input; Ctrl-D on an empty line sends.[/yellow]"
+        )
+        return read_prompt_message(console, data_dir=data_dir, profile=profile)
     if swapped_keys is None:
         # Neither flag nor parameter picked a layout: the env decides.
         # Truthy LISA_PROMPT_KEYS = chat-box (Enter sends); unset or
