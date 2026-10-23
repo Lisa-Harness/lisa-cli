@@ -459,3 +459,10 @@ scrollback. The CLI implements `TransportCallbacks`; the runtime never imports
 Rich, Typer, or any transport-specific code.
 
 See `../lisa/docs/BOUNDARIES.md` for the full architecture.
+
+## License
+
+[MIT](LICENSE), copyright 2026 The Migus Group. The Lisa Harness framework
+itself lives in [`Lisa-Harness/lisa`](https://github.com/Lisa-Harness/lisa)
+and carries the same license; external providers, packs, and dependencies
+have their own licenses and terms.

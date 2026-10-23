@@ -44,6 +44,24 @@ jobs:
       - name: Unit tests (no live)
         run: uv run --no-sync pytest -m "not live" --tb=short -v
 
+  license:
+    name: License
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The MIT text is committed twice: once at the repo root (the canonical
+      # copy GitHub surfaces) and once inside the published package
+      # (hosts/cli/LICENSE, which setuptools ships in the wheel/sdist).
+      # They must stay byte-identical.
+      - name: License copies match
+        run: cmp LICENSE hosts/cli/LICENSE
+
+      - name: License expression is declared
+        run: |
+          grep -q '^license = "MIT"$' hosts/cli/pyproject.toml
+          grep -q '^license-files = \["LICENSE"\]$' hosts/cli/pyproject.toml
+
   diagnose-smoke:
     name: Diagnose smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
