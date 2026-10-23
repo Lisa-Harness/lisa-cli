@@ -2,36 +2,31 @@
 
 [Lisa Harness](https://github.com/Lisa-Harness/lisa) CLI host.
 
-## Releases
-
-Follow the [coordinated release checklist](https://github.com/Lisa-Harness/lisa#publishing-releases).
-The `Publish` workflow runs CI, builds and checks the `lisa-cli` distributions,
-and, for a `v<version>` tag, publishes to PyPI and creates a GitHub release with
-the wheel and source distribution attached. A manual run validates without
-publishing. Configure the PyPI pending publisher before the first tag.
-Framework and optional pack dependencies must be published first: CI uses
-`uv sync --no-sources --extra dev` to test registry dependencies rather than
-the local development overrides.
-
 ## Install
 
-### Give Lisa model access
+### Configure model access
 
 The Lisa Harness CLI host supports several providers out-of-the-box.
 To use one (or more), set the requisite environment variables:
 
 | Provider       | Environment variables                                                                          |
 | -------------- | ---------------------------------------------------------------------------------------------- |
-| `openai`       | `LISA_OPENAI_API_KEY`                                                                          |
-| `azure_openai` | `LISA_AZURE_OPENAI_ENDPOINT`, `LISA_AZURE_OPENAI_API_KEY`, `LISA_AZURE_OPENAI_API_VERSION`     |
-| `anthropic`    | `LISA_ANTHROPIC_API_KEY`, `LISA_ANTHROPIC_BASE_URL`, `LISA_ANTHROPIC_VERSION`                  |
-| `google`       | `LISA_GOOGLE_API_KEY`, `LISA_GOOGLE_API_BASE_URL`                                              |
-| `openrouter`   | `LISA_OPENROUTER_API_KEY`, `LISA_OPENROUTER_BASE_URL`                                          |
+| `anthropic`    | `LISA_ANTHROPIC_API_KEY`, `LISA_ANTHROPIC_VERSION`, `LISA_ANTHROPIC_BASE_URL`                  |
 | `aws`          | `LISA_AWS_ACCESS_KEY_ID`, `LISA_AWS_SECRET_ACCESS_KEY`, `LISA_AWS_REGION`                      |
-| `ollama`       | `LISA_OLLAMA_HOST` *(optional)*                                                                |
+| `azure_openai` | `LISA_AZURE_OPENAI_API_KEY`, `LISA_AZURE_OPENAI_API_VERSION`, `LISA_AZURE_OPENAI_ENDPOINT`     |
+| `google`       | `LISA_GOOGLE_API_KEY`, `LISA_GOOGLE_API_BASE_URL`                                              |
+| `openai`       | `LISA_OPENAI_API_KEY`                                                                          |
+| `openrouter`   | `LISA_OPENROUTER_API_KEY`, `LISA_OPENROUTER_BASE_URL`                                          |
+| `ollama`       | `LISA_OLLAMA_HOST` *(defaults to OLLAMA_HOST=<http://localhost:11434/>)*                       |
 
-Either in the shell that will run Lisa or,
-Create the `~/.lisa` directory and copy/edit the [.env.example](.env.example) into it.
+Either in the shell, e.g.,
+
+```bash
+export LISA_OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+Or, precreate a `.lisa` directory in your home directory,
+and copy/edit the example [.env](.env.example) file into it.
 
 ### Run the installer
 
@@ -56,51 +51,72 @@ The Bash installer accepts options such as `--provider ollama,openai` and
 The PowerShell equivalents are `-Provider ollama,openai` and
 `-Source local -LisaRepo ~/Code/lisa`.
 
-Or with pip / uv directly:
+Or with uv directly:
+
+1. Install via `uv`
+1. Generate a model manifest
+1. Optionally edit it
+1. Apply the it
+1. Verify the setup
 
 ```bash
-# Either
-pip install lisa-cli
-# or
-uv tool install --python 3.12 lisa-cli
+uv tool install --python 3.12 lisa-cli[prompt]
+lisa models discover
+# optionally edit ~/.lisa/state/models.proposed.yaml
+lisa models apply
+lisa verify
 ```
 
-However,
-you will then also need to run `lisa models discover && lisa models apply`
-after configuring your environment for model access per above.
+You will also need to create a `~/.lisa/config/sesion_context.md`;
+the installer generates this:
 
-### Troubleshooting: `google-re2` fails to build on macOS
+```yaml
+---
+schema_version: 2
+name: my-session
+surface:
+  type: personal_dm
+  id: host-console
+  memory_scope: personal
+resources:
+  packs:
+    configuration: {}
+    required:
+      - lisa-pack-markdown
+      - lisa-pack-personas
+      - lisa-pack-search
+    # - lisa-pack-tavily
+# Web search requires a web search provider pack, e.g., lisa-pack-tavily.
+# Add one above then designate it as the web_search tool below.
+# Then remove the hint from the bottom of the text below that.
+providers:
+  capabilities:
+    memory: lisa-pack-memory
+# tools: { web_search: lisa-pack-tavily }
+routing: { from: { pack: lisa-pack-core, session: default } }
+---
+# My Session
 
-If the error mentions `cpython-315` or `python3.15` and a missing
-`absl/strings/string_view.h`, uv selected Python 3.15, for which
-`google-re2==1.1.20251105` has no prebuilt wheel. It then attempted a source
-build requiring additional C++ libraries. The setuptools license warning is
-not the cause.
-
-Use Python 3.12 instead; there is no need to replace your system Python.
-With an older installer, select it explicitly:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | UV_PYTHON=3.12 bash
+The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
+However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
+The user should be reminded to remove this text once they have installed a web search provider pack.
 ```
-
-The current installers select Python 3.12 automatically. This addresses Python
-selection; macOS must also meet the dependency wheel's minimum OS version
-(macOS 13 for the version above).
 
 ## Usage
 
 ```bash
-lisa            # show help (every command is one-shot)
-lisa prompt "summarize the thread"   # run a single turn
-lisa prompt     # no args: type the message in the editor (no shell quoting)
-lisa verify     # run the diagnostic smoke check
-lisa --help     # show all commands
+lisa                                # show usage
+lisa --help                         # also works after subcommands, e.g., prompt --help
+lisa verify                         # runs the diagnostic check including model availability
+lisa prompt                         # run a turn with input via the turn editor
+lisa prompt "Hi"                    # run a turn with the CLI args as the input
+fortune | lisa prompt               # run a turn with stdin as the input
+ls | lisa prompt "look ok to you?"  # run a turn with stdin and CLI args as inputs
 ```
 
-`lisa verify` expects a configured model manifest; run `lisa models discover`
-and `lisa models apply` first. CI supplies a static manifest for its offline
-installation smoke check and does not invoke a model provider.
+`lisa verify` expects a configured model manifest
+`lisa models discover` generates one; use `--force` if one already exists
+`lisa models apply` checks the syntax and router rules before applying
 
 ### Prompting (`prompt` with stdin, the editor, and `--raw`)
 
