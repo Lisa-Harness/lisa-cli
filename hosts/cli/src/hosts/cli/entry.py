@@ -123,11 +123,6 @@ _DEFAULT_NEWLINE = {
     "swap": "Enter adds a line",
 }
 _DEFAULT_ABORT = "Ctrl-C aborts"
-_PLAIN_SUSPEND_NOTE = "(Ctrl-Z suspends to your shell, it does not send.)"
-
-_HINT_PLAIN = f"{_DEFAULT_BANNER} {_DEFAULT_SEND['plain']}; {_DEFAULT_ABORT}. {_PLAIN_SUSPEND_NOTE}"
-_HINT_SUBMIT_CHAT = f"{_DEFAULT_SEND['chat']} · {_DEFAULT_NEWLINE['chat']} · {_DEFAULT_ABORT}"
-_HINT_SUBMIT_SWAP = f"{_DEFAULT_SEND['swap']} · {_DEFAULT_NEWLINE['swap']} · {_DEFAULT_ABORT}"
 
 
 def prompt_keys_env_wants_enter_send() -> bool:
@@ -332,7 +327,6 @@ def read_prompt_message(
             parts = [
                 fragments.get("banner") or _DEFAULT_BANNER,
                 f"{fragments['send']}; {fragments['abort']}.",
-                _PLAIN_SUSPEND_NOTE,
             ]
             console.print(f"[dim]{' '.join(parts)}[/dim]")
     lines: list[str] = []
