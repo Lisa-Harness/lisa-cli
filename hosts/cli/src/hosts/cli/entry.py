@@ -420,6 +420,27 @@ def _delete_first_grapheme(text: str) -> int:
     return i
 
 
+def _alt_enter_key_sequences() -> tuple[tuple[str, ...], ...]:
+    """Terminal encodings of Alt+Enter beyond the ESC+CR pair.
+
+    PT's ANSI table maps CSI-u modified Enter for Shift (``27;2;13~``)
+    and Ctrl (``27;5;13~``) to ControlM — but NOT the Alt form
+    (``27;3;13~``), nor kitty keyboard-protocol's ``13;3u``. Those
+    arrive as raw characters (escape, [, 2, 7, ...), echoing ``^[`` on
+    screen and matching nothing (the 2026-10-22 user report). Bind each
+    encoding char-by-char so Alt+Enter sends in every terminal family:
+    ESC+CR single-write (classic xterm), CSI-u ``ESC[27;3;13~``, and
+    kitty ``ESC[13;3u``.
+    """
+    return (
+        ("escape", "[", "2", "7", ";", "3", ";", "1", "3", "~"),  # ESC[27;3;13~
+        ("escape", "[", "1", "3", ";", "3", "u"),  # ESC[13;3u (kitty)
+    )
+
+
+_ALT_ENTER_SEQS = _alt_enter_key_sequences()
+
+
 def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
     """Bind submit/newline and navigation keys.
 
@@ -447,11 +468,16 @@ def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
 
     for seq in send_seqs:
         # eager on the single Enter key: swallow it before PT's
-        # buffer-complete machinery; the escape-enter sequence is a
-        # two-key prefix match and must not be eager.
+        # buffer-complete machinery; sequence bindings (escape,enter or
+        # the CSI-u alt-enter encodings) must not be eager — eager kills
+        # the multi-key prefix match.
         bindings.add(*seq, eager=len(seq) == 1)(_send)
     for seq in newline_seqs:
         bindings.add(*seq)(_newline)
+    # Alt+Enter's CSI-u encodings follow the escape-pair binding: send in
+    # both layouts (Alt+Enter sends is the universal convention).
+    for alt_seq in _ALT_ENTER_SEQS:
+        bindings.add(*alt_seq)(_send)
 
     @bindings.add("c-up", eager=True)
     def _inert_c_up(event: Any) -> None:

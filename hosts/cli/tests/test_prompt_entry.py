@@ -261,11 +261,14 @@ def test_history_path_framework_default(monkeypatch: pytest.MonkeyPatch, tmp_pat
 # ── LISA_PROMPT_PS1 hint contract ─────────────────────────────────────
 
 
-def test_ps1_unset_keeps_default_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No LISA_PROMPT_PS1: prompt_ps1 is None and readers print the default."""
+def test_ps1_unset_keeps_default_hint(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """No LISA_PROMPT_PS1 no settings file: the built-in default hint."""
     from hosts.cli import entry as entry_mod
 
     monkeypatch.delenv(entry_mod._PROMPT_PS1_ENV, raising=False)
+    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path))  # no prompt_hints.yaml here
+    for frag in entry_mod._FRAGMENT_ENV.values():
+        monkeypatch.delenv(frag, raising=False)
     assert entry_mod.prompt_ps1() is None
     out = io.StringIO()
     plain_console = Console(file=out, record=True, width=200)
@@ -281,7 +284,8 @@ def test_ps1_unset_keeps_default_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("builtins.input", _fake_input)
     entry_mod.read_prompt_message(plain_console)
     text = plain_console.export_text()
-    assert entry_mod._HINT_PLAIN in text
+    assert entry_mod._DEFAULT_BANNER in text
+    assert entry_mod._DEFAULT_SEND["plain"] in text
 
 
 def test_ps1_empty_suppresses_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,7 +306,9 @@ def test_ps1_empty_suppresses_hint(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("builtins.input", _fake_input)
     entry_mod.read_prompt_message(console)
-    assert entry_mod._HINT_PLAIN not in console.export_text()
+    export = console.export_text()
+    assert entry_mod._DEFAULT_BANNER not in export
+    assert entry_mod._DEFAULT_SEND["plain"] not in export
 
 
 def test_ps1_custom_text_replaces_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,7 +331,7 @@ def test_ps1_custom_text_replaces_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     entry_mod.read_prompt_message(console)
     export = console.export_text()
     assert "chat> " in export
-    assert entry_mod._HINT_PLAIN not in export
+    assert entry_mod._DEFAULT_BANNER not in export
 
 
 def test_ps1_whitespace_only_suppresses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -500,21 +506,28 @@ def test_tui_reader_hint_follows_layout(monkeypatch: pytest.MonkeyPatch, tmp_pat
     fake_pt["KeyBindings"] = _RealKB
     monkeypatch.setattr(entry_mod, "_PT", fake_pt)
     hist = tmp_path / "state" / "prompt_history.txt"
+    monkeypatch.setenv("LISA_DATA_DIR", str(tmp_path / "no-settings"))  # no yaml here
 
+    for frag in entry_mod._FRAGMENT_ENV.values():
+        monkeypatch.delenv(frag, raising=False)
     # swapped (shipped default: no env, no flag)
     monkeypatch.delenv(entry_mod._PROMPT_KEYS_ENV, raising=False)
     entry_mod.read_prompt_message_tui(Console(quiet=True, file=io.StringIO()), history_path=hist)
-    assert entry_mod._HINT_SUBMIT_SWAP in str(seen["toolbar"])
+    toolbar = str(seen["toolbar"])
+    assert entry_mod._DEFAULT_SEND["swap"] in toolbar
+    assert entry_mod._DEFAULT_NEWLINE["swap"] in toolbar
     # chat-box via truthy env (Enter sends hint)
     monkeypatch.setenv(entry_mod._PROMPT_KEYS_ENV, "1")
     entry_mod.read_prompt_message_tui(Console(quiet=True, file=io.StringIO()), history_path=hist)
-    assert entry_mod._HINT_SUBMIT_CHAT in str(seen["toolbar"])
-    assert entry_mod._HINT_SUBMIT_SWAP not in str(seen["toolbar"])
+    toolbar = str(seen["toolbar"])
+    assert entry_mod._DEFAULT_SEND["chat"] in toolbar
+    assert entry_mod._DEFAULT_NEWLINE["chat"] in toolbar
+    assert entry_mod._DEFAULT_SEND["swap"] not in toolbar
     # explicit swapped_keys=True pins the shipped layout against the env
     entry_mod.read_prompt_message_tui(
         Console(quiet=True, file=io.StringIO()), history_path=hist, swapped_keys=True
     )
-    assert entry_mod._HINT_SUBMIT_SWAP in str(seen["toolbar"])
+    assert entry_mod._DEFAULT_SEND["swap"] in str(seen["toolbar"])
 
 
 def test_seam_threads_swap_keys_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -724,3 +737,50 @@ def test_tui_toolbar_assembles_resolved_fragments(
     import prompt_toolkit.formatted_text
 
     del yaml_mod, _HTML, prompt_toolkit
+
+
+# ── Alt+Enter terminal encodings (CSI-u / kitty) bound to send ────────
+
+
+@pytest.mark.parametrize(
+    "seq_chars",
+    [
+        "[27;3;13~",  # CSI-u / modifyOtherKeys Alt+Enter (xterm family)
+        "[13;3u",  # kitty keyboard-protocol Alt+Enter
+    ],
+)
+def test_alt_enter_csi_u_encodings_send(seq_chars: str) -> None:
+    """Real terminals CSI-u-encode Alt+Enter; each encoding must send."""
+    from prompt_toolkit.key_binding.key_processor import KeyPress, KeyProcessor
+    from prompt_toolkit.keys import Keys
+
+    from hosts.cli import entry as entry_mod
+
+    for swapped in (True, False):
+        bindings = entry_mod._tui_key_bindings(swapped=swapped)
+        proc = KeyProcessor.__new__(KeyProcessor)
+        proc._bindings = bindings
+        seq = [KeyPress(Keys.Escape, "\x1b")] + [KeyPress(c, c) for c in seq_chars]
+        matches = proc._get_matches(seq)
+        assert matches, f"no binding for {seq_chars!r} (swapped={swapped})"
+        assert matches[-1].handler.__name__ == "_send"
+
+
+def test_alt_enter_seqs_eager_free() -> None:
+    """The CSI-u send bindings are NOT eager (multi-key prefix match)."""
+    from hosts.cli import entry as entry_mod
+
+    captured: list[tuple[tuple, bool]] = []
+
+    class _FakeBindings:
+        def add(self, *keys: Any, eager: Any = False, **_kw: Any):
+            def _decorator(fn: Any) -> Any:
+                captured.append((keys, bool(eager)))
+                return fn
+
+            return _decorator
+
+    entry_mod._add_navigate_bindings(_FakeBindings(), swapped=True)
+    for keys, eager in captured:
+        if len(keys) > 1:
+            assert not eager, f"{keys} must not be eager"
