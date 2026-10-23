@@ -51,7 +51,7 @@ The Bash installer accepts options such as `--provider ollama,openai` and
 The PowerShell equivalents are `-Provider ollama,openai` and
 `-Source local -LisaRepo ~/Code/lisa`.
 
-Or with uv directly:
+### Or install with uv
 
 1. Install via `uv`
 1. Generate a model manifest
@@ -68,7 +68,7 @@ lisa verify
 ```
 
 You will also need to create a `~/.lisa/config/sesion_context.md`;
-the installer generates this:
+*the installer generates this*:
 
 ```yaml
 ---
