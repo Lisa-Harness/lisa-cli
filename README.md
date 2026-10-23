@@ -47,8 +47,14 @@ Windows:
 irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
 ```
 
-The installer accepts the same options as a direct `uv tool install`
-(e.g. `--provider ollama,openai`, `--source local --lisa-repo ~/Code/lisa`).
+Both installers request Python 3.12, which uv downloads if needed, rather than
+using an arbitrary system Python. This keeps native dependencies on a
+CI-tested Python version with prebuilt wheels.
+
+The Bash installer accepts options such as `--provider ollama,openai` and
+`--source local --lisa-repo ~/Code/lisa`; see `bash install.sh --help`.
+The PowerShell equivalents are `-Provider ollama,openai` and
+`-Source local -LisaRepo ~/Code/lisa`.
 
 Or with pip / uv directly:
 
@@ -56,12 +62,31 @@ Or with pip / uv directly:
 # Either
 pip install lisa-cli
 # or
-uv tool install lisa-cli
+uv tool install --python 3.12 lisa-cli
 ```
 
 However,
 you will then also need to run `lisa models discover && lisa models apply`
 after configuring your environment for model access per above.
+
+### Troubleshooting: `google-re2` fails to build on macOS
+
+If the error mentions `cpython-315` or `python3.15` and a missing
+`absl/strings/string_view.h`, uv selected Python 3.15, for which
+`google-re2==1.1.20251105` has no prebuilt wheel. It then attempted a source
+build requiring additional C++ libraries. The setuptools license warning is
+not the cause.
+
+Use Python 3.12 instead; there is no need to replace your system Python.
+With an older installer, select it explicitly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | UV_PYTHON=3.12 bash
+```
+
+The current installers select Python 3.12 automatically. This addresses Python
+selection; macOS must also meet the dependency wheel's minimum OS version
+(macOS 13 for the version above).
 
 ## Usage
 

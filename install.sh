@@ -141,8 +141,8 @@ install_uv() {
 }
 
 install_lisa() {
-    # Install (or upgrade) the lisa tool. uv manages the Python interpreter,
-    # so no system Python >= 3.11 check is needed here.
+    # Use the CI-tested Python 3.12: newer system interpreters may lack
+    # native dependency wheels (notably google-re2). uv downloads it if needed.
     #
     # The framework packages (lisa-kernel, lisa-sdk, ...) are not on PyPI yet,
     # so every install passes --no-sources (ignore the repos' path-based
@@ -190,8 +190,8 @@ install_lisa() {
         WITHS=("${git_withs[@]}")
     fi
 
-    if ! uv tool install --no-sources "${cli_requirement}" "${WITHS[@]}" 2>/dev/null; then
-        uv tool install --no-sources --reinstall "${cli_requirement}" "${WITHS[@]}"
+    if ! uv tool install --python 3.12 --no-sources "${cli_requirement}" "${WITHS[@]}" 2>/dev/null; then
+        uv tool install --python 3.12 --no-sources --reinstall "${cli_requirement}" "${WITHS[@]}"
     fi
 
     # Make bare `lisa` resolvable for the rest of this script (uv installs

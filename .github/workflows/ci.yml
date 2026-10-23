@@ -8,6 +8,17 @@ on:
     branches: [main]
 
 jobs:
+  installers:
+    name: Installer Python selection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Bash installer
+        run: bash tests/install.sh
+      - name: Test PowerShell installer
+        shell: pwsh
+        run: ./tests/install.ps1
+
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
