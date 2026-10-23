@@ -274,8 +274,9 @@ resources:
       - lisa-pack-personas
       - lisa-pack-search
     # - lisa-pack-tavily
-# Web search requires a web search provider pack, e.g., lisa-pack-tavily
-# Add one above then designate it as the web_search tool below
+# Web search requires a web search provider pack, e.g., lisa-pack-tavily.
+# Add one above then designate it as the web_search tool below.
+# Then remove the hint from the bottom of the text below that.
 providers:
   capabilities:
     memory: lisa-pack-memory
