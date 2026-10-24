@@ -833,9 +833,10 @@ async def test_thinking_meter_arms_on_observed_deltas_not_manifest_flag() -> Non
 
 
 @pytest.mark.asyncio
-async def test_stream_velocity_shown_and_decays() -> None:
-    """~rate shows while chunks flow inside the window; decays to nothing
-    when the stream stalls (stale samples age out)."""
+async def test_stream_velocity_decays_and_stays_off_status_line() -> None:
+    """Velocity is positive while chunks flow inside the window and decays
+    when the stream stalls; it never renders on the status line (the
+    stream box title carries it)."""
     import time
 
     transport, _ = _make_tty_transport(streaming_mode="hybrid")
@@ -856,7 +857,8 @@ async def test_stream_velocity_shown_and_decays() -> None:
     velocity = transport._stream_velocity()
     assert velocity > 0
     body = transport._compose_status_body(100).plain
-    assert "~" in body and "/s" in body
+    assert "thinking" in body
+    assert "/s" not in body
     # Stalled: no new samples for > window → estimate decays to 0.
     transport._velocity_samples = [
         (now - 30.0, 0),

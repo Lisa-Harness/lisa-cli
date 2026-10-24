@@ -1279,13 +1279,12 @@ class PromptTransport:
         return parts
 
     def _append_meter_parts(self, parts: list[Text]) -> None:
-        """Append the thinking meter + velocity segments when armed.
+        """Append the thinking meter segment when armed.
 
         The thinking meter arms on observed reasoning deltas — not the
         manifest flag (glm-5.3-family bills reasoning without flagging
         the model) — so the figure appears the moment reasoning actually
-        arrives. Velocity rides after the meter; a stalled stream decays
-        it away.
+        arrives. The stream velocity lives only in the stream box title.
         """
         if not (self._active_reasoning_model or self._reasoning_seen):
             return
@@ -1293,9 +1292,6 @@ class PromptTransport:
         if not total:
             return
         parts.append(Text(f"thinking {_format_tokens(total)}", style=STYLE_STAGE))
-        velocity = self._stream_velocity()
-        if velocity > 0:
-            parts.append(Text(f"~{_format_velocity(velocity)}", style=STYLE_STAGE))
 
     def _no_data_age_s(self) -> float:
         """Seconds since the last delta of the in-flight generation, or -1.
