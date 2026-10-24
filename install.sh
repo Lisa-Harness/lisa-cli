@@ -402,11 +402,6 @@ post_install_guidance() {
     printf "  Verify your setup:\n"
     printf "    lisa verify\n"
     printf "\n"
-
-    printf "  Consider adding a couple of aliases to your ~/.bashrc or ~/.zshrc:\n"
-    printf "    alias l='lisa prompt --verbose'\n"
-    printf "    alias la='lisa approve'\n"
-    printf "    alias ll='lisa last'\n"
 }
 
 # --- Main --------------------------------------------------------------------

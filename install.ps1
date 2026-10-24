@@ -570,10 +570,6 @@ function Write-PostInstallGuidance {
     Write-Host "  Verify your setup:"
     Write-Host "    lisa verify"
     Write-Host ""
-    Write-Host "  Consider adding a couple of aliases to your `$PROFILE file:"
-    Write-Host "    Set-Alias l 'lisa prompt --verbose'"
-    Write-Host "    Set-Alias la 'lisa approve'"
-    Write-Host "    Set-Alias ll 'lisa last'"
 }
 
 # ---------------------------------------------------------------------------
