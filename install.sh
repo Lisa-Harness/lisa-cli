@@ -169,7 +169,7 @@ install_lisa() {
         [[ -n "$LISA_REPO" ]] || error_exit "--source local requires --lisa-repo (or \$LISA_GIT_REPO)"
         [[ -d "$LISA_REPO" ]] || error_exit "framework repo not found: $LISA_REPO"
         if [[ -z "$CLI_REPO" ]]; then
-            CLI_REPO="$(dirname "$LISA_REPO")/lisa-hosts/cli"
+            CLI_REPO="$(dirname "$LISA_REPO")/lisa-cli"
         fi
         [[ -d "$CLI_REPO" ]] || error_exit "CLI repo not found: $CLI_REPO (pass --cli-repo)"
 

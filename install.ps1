@@ -29,7 +29,7 @@
 .PARAMETER LisaRepo
     Local checkout of the framework repo (lisa) for -Source local. Also
     settable via the LISA_GIT_REPO environment variable. The CLI repo
-    defaults to ..\lisa-hosts\cli relative to it (override with
+    defaults to ..\lisa-cli relative to it (override with
     LISA_CLI_REPO).
 
 .PARAMETER Provider
@@ -302,7 +302,7 @@ function Install-LisaTool {
         if (-not $LisaRepo) { throw "-Source local requires -LisaRepo (or `$env:LISA_GIT_REPO)" }
         if (-not (Test-Path $LisaRepo)) { throw "framework repo not found: $LisaRepo" }
         if (-not $CliRepo) {
-            $CliRepo = Join-Path (Split-Path $LisaRepo -Parent) "lisa-hosts\cli"
+            $CliRepo = Join-Path (Split-Path $LisaRepo -Parent) "lisa-cli"
         }
         if (-not (Test-Path $CliRepo)) { throw "CLI repo not found: $CliRepo (pass -CliRepo)" }
 
