@@ -42,14 +42,13 @@ Windows:
 irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
 ```
 
-Both installers request Python 3.12, which uv downloads if needed, rather than
-using an arbitrary system Python. This keeps native dependencies on a
-CI-tested Python version with prebuilt wheels.
+Both installers accept options, in Bash and PowerShell spellings:
 
-The Bash installer accepts options such as `--provider ollama,openai` and
-`--source local --lisa-repo ~/Code/lisa`; see `bash install.sh --help`.
-The PowerShell equivalents are `-Provider ollama,openai` and
-`-Source local -LisaRepo ~/Code/lisa`.
+| Option       | Bash                                     | PowerShell                            |
+| ------------ | ---------------------------------------- | ------------------------------------- |
+| Help         | `--help`                                 | `-?`                                  |
+| Providers    | `--provider ollama,openai`               | `-Provider ollama,openai`             |
+| Local source | `--source local --lisa-repo ~/Code/lisa` | `-Source local -LisaRepo ~/Code/lisa` |
 
 ### Or install with uv
 
@@ -67,8 +66,10 @@ lisa models apply
 lisa verify
 ```
 
-You will also need to create a `~/.lisa/config/sesion_context.md`;
-*the installer generates this*:
+### Session context
+
+The installer will write this to `~/.lisa/config/sesion_context.md` automatically.
+So you will need to create it yourself if you installed with `uv`.
 
 ```yaml
 ---
