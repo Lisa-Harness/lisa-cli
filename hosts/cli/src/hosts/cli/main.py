@@ -1908,6 +1908,10 @@ async def _run_pack_update_all(runtime: HostRuntime) -> tuple[bool, str]:
 
 _UPDATE_TOOL_NAME = "lisa-cli"
 
+#: uv cannot replace a running console-script trampoline on Windows; the
+#: command reports the argv for the operator to run after exiting instead.
+_UPDATE_IN_PLACE_BLOCKED = platform.system() == "Windows"
+
 
 @app.command(
     "update",
@@ -1946,7 +1950,20 @@ def _update_command(
         )
         raise typer.Exit(code=2)
 
+    tool_dir = _installed_tool_dir()
+    if tool_dir is None:
+        console.print(
+            "[yellow]This interpreter is not a uv tool install (no uv-receipt.toml in "
+            f"{sys.prefix}), so there is nothing for `uv tool upgrade` to update.[/yellow]"
+        )
+        raise typer.Exit(code=2)
+
     uv_bin = shutil.which("uv")
+    # Point uv at the tool dir this process is actually running from. Without
+    # it uv consults only UV_TOOL_DIR/default, so an install made with a custom
+    # tool dir would miss the real one and advise `uv tool install lisa-cli` —
+    # the receipt-clobbering path this command exists to avoid.
+    env = {**os.environ, "UV_TOOL_DIR": str(tool_dir.parent)}
     argv = [
         uv_bin or "uv",
         "tool",
@@ -1958,7 +1975,7 @@ def _update_command(
 
     # On Windows the console script is a .exe trampoline inside the tool
     # venv, which cannot be replaced while this process still has it open.
-    blocked = uv_bin is None or (os.name == "nt" and not dry_run)
+    blocked = uv_bin is None or (_UPDATE_IN_PLACE_BLOCKED and not dry_run)
     if dry_run or blocked:
         if dry_run:
             console.print(f"Run: [bold]{printable}[/bold]")
@@ -1972,7 +1989,7 @@ def _update_command(
         raise typer.Exit(code=0 if dry_run else 1)
 
     console.print(f"Running [bold]{printable}[/bold]")
-    completed = subprocess.run(argv, check=False)  # inherits stdio so uv streams progress
+    completed = subprocess.run(argv, check=False, env=env)  # inherits stdio so uv streams progress
     if completed.returncode != 0:
         console.print(f"[red]uv tool upgrade failed (exit {completed.returncode}).[/red]")
         raise typer.Exit(code=completed.returncode)
@@ -1981,19 +1998,43 @@ def _update_command(
     _warn_stale_packs_venv(default_packs_venv())
 
 
-def _warn_stale_packs_venv(packs_venv: Path) -> None:
-    """Remind the operator that the packs venv follows on its own schedule.
+def _installed_tool_dir() -> Path | None:
+    """Return the uv tool directory this process is running from.
 
-    The runtime seeds the packs venv with ``uv pip install`` (no
-    ``--upgrade``), so packs keep the framework versions they were installed
-    with until ``lisa pack update`` re-resolves them. Reporting it here is
-    cheaper and safer than silently re-seeding every pack after an upgrade.
+    A ``uv tool`` venv carries the receipt at its root, so ``sys.prefix``
+    identifies the install unambiguously — including installs made with a
+    custom ``UV_TOOL_DIR``, which uv would otherwise not find. The receipt's
+    parent is the value ``UV_TOOL_DIR`` expects (it is the directory holding
+    one subdirectory per tool).
+
+    This is a positive check: a plain virtualenv or pipx install has no
+    receipt and returns ``None``.
+    """
+    prefix = Path(sys.prefix)
+    if not (prefix / "uv-receipt.toml").is_file():
+        return None
+    return prefix
+
+
+def _warn_stale_packs_venv(packs_venv: Path) -> None:
+    """Point the operator at the one follow-up packs may need.
+
+    The packs venv is a second install with its own framework copies. Packs
+    import the CLI's framework packages (the tool venv's site-packages
+    precedes the packs venv on ``sys.path``), so an upgrade does not break
+    them — but a pack whose *dependencies* moved can still need a re-resolve,
+    and ``uv pip install`` never upgrades an already-satisfied requirement.
+    ``lisa pack update --all`` re-installs each pack from its recorded source,
+    which re-resolves its dependency set. Surfacing the command is cheaper
+    than silently re-seeding every pack after an upgrade.
     """
     if not packs_venv.is_dir():
         return
     console.print(
-        f"[yellow]Packs venv at {packs_venv} still has the pre-upgrade framework "
-        "packages. Run `lisa pack update --all` to refresh installed packs.[/yellow]"
+        f"[yellow]Packs live in a separate venv ({packs_venv}). Packs keep working "
+        "against the upgraded framework, but their own dependencies are only "
+        "re-resolved by `lisa pack update --all` — run it if a pack misbehaves "
+        "after an update.[/yellow]"
     )
 
 

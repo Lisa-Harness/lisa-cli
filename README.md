@@ -68,31 +68,75 @@ lisa verify
 
 ### Updating
 
-`lisa update` upgrades the installed CLI in place:
+There are two independent things to update, and they live in different
+places: the **CLI** (a `uv tool` venv) and the **packs** you installed into
+the runtime (`~/.lisa/venv`). `lisa update` handles the first; `lisa pack
+update --all` handles the second.
 
 ```bash
-lisa update            # uv tool upgrade lisa-cli
-lisa update --force    # also reinstall when the version is unchanged
-lisa update --dry-run  # print the uv command without running it
+lisa update                    # upgrade the CLI itself
+lisa pack update --all         # re-install installed packs from their sources
 ```
 
-It is a pass-through to `uv tool upgrade`, which replays the install
-receipt (`~/.local/share/uv/tools/lisa-cli/uv-receipt.toml`). That receipt
-records how lisa was installed — the `[prompt]` extra, any `--with`
+`lisa update` is a pass-through to `uv tool upgrade`, which replays the
+install receipt (`~/.local/share/uv/tools/lisa-cli/uv-receipt.toml`). That
+receipt records how lisa was installed — the `[prompt]` extra, any `--with`
 framework requirements, and `no-sources` — so use `lisa update` rather than
 `uv tool install --upgrade lisa-cli`, which resolves from the index and
 rewrites the receipt.
 
-Two things it deliberately does not do:
+It locates the install from the running interpreter rather than assuming the
+default tool directory, so installs made with a custom `UV_TOOL_DIR` upgrade
+correctly, and an interpreter uv does not own (a plain virtualenv, pipx) is
+refused instead of guessed at. Flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--force` | Add `--reinstall`, so a local or git install whose version did not bump still picks up new code. |
+| `--dry-run` | Print the uv command without running it. |
+
+Two situations it deliberately hands back to you:
 
 - From a repo checkout there is no tool to upgrade; it prints
   `git pull && uv sync` instead.
 - On Windows the running `lisa.exe` cannot be replaced in place, so it
   prints the uv command for you to run after exiting.
 
-Packs live in a separate venv and keep their framework versions across a CLI
-upgrade. `lisa update` reminds you to run `lisa pack update --all` when that
-venv exists.
+#### Why packs need their own update
+
+Packs are not installed beside the CLI. They go into a separate venv
+(`~/.lisa/venv`, shared across profiles) that the runtime seeds with the
+framework packages packs depend on. The two installs overlap, so it is worth
+being precise about what an upgrade does and does not touch.
+
+**What the CLI upgrade already covers.** At startup the packs venv's
+site-packages is appended to `sys.path`, but the CLI's own tool venv comes
+first, so packs import *the upgraded* `kernel`, `sdk`, and bundled packs. A
+CLI upgrade therefore does not leave packs running against an old framework.
+
+**What it does not cover.** Each pack's *own* dependency set lives only in
+the packs venv, and the seed path installs the framework with plain
+`uv pip install` — which resolves what is missing and never upgrades a
+requirement that is already satisfied. So a pack that pinned (or resolved) an
+older third-party dependency keeps it after a CLI upgrade. That only bites
+when the pack needs a version it did not ask for before.
+
+`lisa pack update --all` re-installs every runtime-installed pack from its
+recorded source (`installed-packs.json`), which re-resolves its dependencies
+against the current framework. Bundled packs and entries seeded with a
+placeholder source are skipped — they have nothing to re-fetch.
+
+The practical sequence:
+
+```bash
+lisa update              # CLI: always safe, takes effect next launch
+lisa pack update --all   # packs: run if a pack misbehaves after upgrading
+```
+
+The second is not mandatory after every CLI upgrade; `lisa update` prints a
+reminder naming it when the packs venv exists, so the command is discoverable
+at exactly the moment you would want it. Both are one-shot commands that
+exit; new code takes effect on the next `lisa` launch.
 
 ### Session context
 
@@ -362,6 +406,10 @@ lisa policy rule list | add allow --when '<CEL>' | remove allow:1
 lisa approve <id> [--remember <prefix>] | deny <id>
 ```
 
+`lisa update` upgrades the CLI and `lisa pack update --all` re-installs packs
+from their recorded sources; the two are separate installs — see
+[Updating](#updating).
+
 Pack-registered host commands resolve as **dynamically generated
 subcommands** (real `--help`, real shell completion, same runtime options)
 — the recovery pack's `/stalls`, `/retry`, `/resume` are simply:
@@ -560,7 +608,8 @@ categories; the names live in one place (`sdk.layout`):
 ├── run/       per-session execution state, keyed by session hash (rm-safe):
 │              <key>/ jobs/ · scratch/ · profile/ · sandbox-facts.json ·
 │              per-session logs (e.g. bash-<key>.log)
-├── venv/      packs venv (shared with profiles)
+├── venv/      packs venv (shared with profiles) — a second install, refreshed
+│              by `lisa pack update --all` rather than by `lisa update`
 └── .env
 ```
 
