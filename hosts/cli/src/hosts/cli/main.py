@@ -3,8 +3,8 @@
 This is the terminal-transport entry point for the Lisa framework. It
 wraps the transport-neutral :mod:`host` runtime with Typer commands
 and Rich rendering. Every command is a one-shot process: turns run via
-``lisa prompt`` and lifecycle/inspection commands (verify, models, policy,
-pack, mcp, last, intake) run once and exit.
+``lisa prompt`` and lifecycle/inspection commands (verify, update, models,
+policy, pack, mcp, last, intake) run once and exit.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import logging
 import os
 import platform
 import shlex
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -1898,6 +1900,101 @@ async def _run_pack_update_all(runtime: HostRuntime) -> tuple[bool, str]:
     from runtime.commands import run_pack_update_all
 
     return await run_pack_update_all(runtime)
+
+
+# ---------------------------------------------------------------------------
+# update command
+# ---------------------------------------------------------------------------
+
+_UPDATE_TOOL_NAME = "lisa-cli"
+
+
+@app.command(
+    "update",
+    help="Upgrade the installed lisa CLI in place (uv tool upgrade lisa-cli).",
+)
+def _update_command(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Reinstall even when the recorded version is unchanged "
+            "(picks up new code from a local or git checkout without a version bump)."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the uv command instead of running it.",
+    ),
+) -> None:
+    """Upgrade the tool install that provides this ``lisa`` executable.
+
+    ``uv tool upgrade`` is the only correct update path: it replays the
+    install receipt (``<tool-dir>/lisa-cli/uv-receipt.toml``), which is where
+    the installer records the ``--with`` framework requirements, the
+    ``[prompt]`` extra, and ``no-sources``. ``uv tool install --upgrade
+    lisa-cli`` would rewrite that receipt from a bare index spec and drop
+    all of it, so this command never does that.
+    """
+    from runtime.paths import default_packs_venv, is_tool_install
+
+    if not is_tool_install():
+        console.print(
+            "[yellow]lisa is running from a repo checkout, so there is no uv tool to "
+            "upgrade. Update with:[/yellow] git pull && uv sync"
+        )
+        raise typer.Exit(code=2)
+
+    uv_bin = shutil.which("uv")
+    argv = [
+        uv_bin or "uv",
+        "tool",
+        "upgrade",
+        *(["--reinstall"] if force else []),
+        _UPDATE_TOOL_NAME,
+    ]
+    printable = shlex.join(argv)
+
+    # On Windows the console script is a .exe trampoline inside the tool
+    # venv, which cannot be replaced while this process still has it open.
+    blocked = uv_bin is None or (os.name == "nt" and not dry_run)
+    if dry_run or blocked:
+        if dry_run:
+            console.print(f"Run: [bold]{printable}[/bold]")
+        else:
+            reason = (
+                "uv is not on PATH; run it yourself"
+                if uv_bin is None
+                else "Windows locks the running lisa.exe"
+            )
+            console.print(f"[yellow]{reason}.[/yellow] Run: [bold]{printable}[/bold]")
+        raise typer.Exit(code=0 if dry_run else 1)
+
+    console.print(f"Running [bold]{printable}[/bold]")
+    completed = subprocess.run(argv, check=False)  # inherits stdio so uv streams progress
+    if completed.returncode != 0:
+        console.print(f"[red]uv tool upgrade failed (exit {completed.returncode}).[/red]")
+        raise typer.Exit(code=completed.returncode)
+
+    console.print("Updated. Restart lisa to use the new version.")
+    _warn_stale_packs_venv(default_packs_venv())
+
+
+def _warn_stale_packs_venv(packs_venv: Path) -> None:
+    """Remind the operator that the packs venv follows on its own schedule.
+
+    The runtime seeds the packs venv with ``uv pip install`` (no
+    ``--upgrade``), so packs keep the framework versions they were installed
+    with until ``lisa pack update`` re-resolves them. Reporting it here is
+    cheaper and safer than silently re-seeding every pack after an upgrade.
+    """
+    if not packs_venv.is_dir():
+        return
+    console.print(
+        f"[yellow]Packs venv at {packs_venv} still has the pre-upgrade framework "
+        "packages. Run `lisa pack update --all` to refresh installed packs.[/yellow]"
+    )
 
 
 # ---------------------------------------------------------------------------
