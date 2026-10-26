@@ -66,6 +66,34 @@ lisa models apply
 lisa verify
 ```
 
+### Updating
+
+`lisa update` upgrades the installed CLI in place:
+
+```bash
+lisa update            # uv tool upgrade lisa-cli
+lisa update --force    # also reinstall when the version is unchanged
+lisa update --dry-run  # print the uv command without running it
+```
+
+It is a pass-through to `uv tool upgrade`, which replays the install
+receipt (`~/.local/share/uv/tools/lisa-cli/uv-receipt.toml`). That receipt
+records how lisa was installed — the `[prompt]` extra, any `--with`
+framework requirements, and `no-sources` — so use `lisa update` rather than
+`uv tool install --upgrade lisa-cli`, which resolves from the index and
+rewrites the receipt.
+
+Two things it deliberately does not do:
+
+- From a repo checkout there is no tool to upgrade; it prints
+  `git pull && uv sync` instead.
+- On Windows the running `lisa.exe` cannot be replaced in place, so it
+  prints the uv command for you to run after exiting.
+
+Packs live in a separate venv and keep their framework versions across a CLI
+upgrade. `lisa update` reminds you to run `lisa pack update --all` when that
+venv exists.
+
 ### Session context
 
 The installer will write this to `~/.lisa/config/sesion_context.md` automatically.
@@ -109,6 +137,7 @@ The user should be reminded to remove this text once they have installed a web s
 lisa                                # show usage
 lisa --help                         # also works after subcommands, e.g., prompt --help
 lisa verify                         # runs the diagnostic check including model availability
+lisa update                         # upgrade the installed CLI (uv tool upgrade)
 lisa prompt                         # run a turn with input via the turn editor
 lisa prompt "Hi"                    # run a turn with the CLI args as the input
 fortune | lisa prompt               # run a turn with stdin as the input
@@ -248,6 +277,69 @@ entry — so a result can be replayed with `lisa last N` or inspected with
 with that number too: a `Response · turn N` rule on a tty, a `[ turn N ]`
 header before piped/replayed output.
 
+#### Reading the token and cost figures
+
+The `tok` number is the **context walk**: the sum of every model call's
+`total_tokens` across the turn. An agentic turn makes many calls and each one
+re-sends the whole conversation, so the walk grows superlinearly and can land
+an order of magnitude above what the provider actually bills — a 68-call turn
+has been observed walking 4.9M tokens against a 354k bill. It answers "how
+much context did this turn chew through", not "what did it cost".
+
+When the turn hit a prompt cache, a second figure follows:
+`billed N` — uncached prompt plus completion, i.e. the tokens charged at full
+rate. This only appears when it differs from the walk, so a cache-free turn
+shows one number.
+
+The `$` figure has two forms:
+
+| Form | Meaning |
+| --- | --- |
+| `$0.0042` | The provider reported its own charge for every call in the turn (OpenRouter returns this as `usage.cost`). Authoritative — it already reflects the provider's real cache read/write rates. |
+| `~$0.0099` | The harness priced the turn itself from the model manifest's per-token rates. Correct arithmetic, list-price only. |
+
+A turn mixing providers where only some report a cost shows the `~$`
+estimate: summing a partial set of provider charges would understate the
+bill. Both figures are recorded per call in `logs/token-usage.jsonl`
+(`cost_usd` and `provider_cost_usd`) so `lisa tokens` and any installed pack
+can reconcile harness arithmetic against the provider's meter.
+
+#### Proxy-reported savings
+
+A proxy in the path — compression, cache steering, anything that rewrites a
+request — can report what it saved, and the footer shows the turn's total as
+a trailing `saved N` segment:
+
+```
+⚡ 12s · turn 41 · 9 tools · 3 models · 160.35k tok · billed 3.35k · ~$0.0056 · saved 70k
+```
+
+The proxy declares its own vocabulary in a pack manifest; the harness never
+hard-codes one. Under the proxy entry's `status` block:
+
+```yaml
+status:
+  telemetry:
+    counter_unit: tokens          # unit the counters are denominated in
+    savings_field: tokens_saved   # which counter is this turn's saving
+    headers:                      # response header -> field name
+      x-acme-tokens-before: tokens_before
+      x-acme-tokens-saved: tokens_saved
+```
+
+Every declared header is lifted off each response under the field name the
+pack chose, summed across the turn, and recorded in
+`logs/token-usage.jsonl` under `extra.proxy_telemetry`. The footer labels only
+counters it recognises (`savings_field`, defaulting to `tokens_saved`); an
+unrecognised counter is still recorded for `lisa tokens` and any pack reading
+the log, so extending the vocabulary is a manifest edit rather than a code
+change.
+
+Counters are omitted when the proxy does not send them, so "no saving on this
+call" is never confused with "saved zero". `savings_field` must name a
+declared header — a footer promising a figure the proxy never sends is a
+declaration error.
+
 `--streaming` controls what the box shows: `none` (spinner only), `stage`,
 `text` (the forming answer), or `hybrid` (the model's thinking, default).
 Non-tty output (pipes, redirects, CI) never renders any of it — just the
@@ -264,6 +356,7 @@ verbatim (no quoting contract):
 lisa debug [N] | last [N]                              # turn inspection
 lisa models show | discover --force | apply
 lisa pack list | install <spec> | uninstall <pkg> | update [--all]
+lisa update [--force] [--dry-run]                     # upgrade the CLI itself
 lisa policy | policy mode trust | policy bare off
 lisa policy rule list | add allow --when '<CEL>' | remove allow:1
 lisa approve <id> [--remember <prefix>] | deny <id>

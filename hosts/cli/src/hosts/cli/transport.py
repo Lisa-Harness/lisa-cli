@@ -328,12 +328,7 @@ class PromptTransport:
         # in ``start_thinking``: a pre-armed-decision run dispatches a second
         # message on the same transport and each capture replaces it.
         self._turn_number: int = -1
-        self._status_turn_tokens: int = 0
-        self._status_prompt_tokens: int = 0
-        self._status_completion_tokens: int = 0
-        self._status_cached_tokens: int = 0
-        self._status_billed_tokens: int = 0
-        self._status_reasoning_chars: int = 0
+        self._init_status_counters()
         self._iteration_durations: list[float] = []
         self._model_call_count: int = 0
         self._handoff_count: int = 0
@@ -380,6 +375,37 @@ class PromptTransport:
         self._phase_label: str = "starting runtime"
         # ── Stream velocity (observable, not manifest-trusted) ──────
         self._init_velocity_state()
+
+    def _init_status_counters(self) -> None:
+        """Zero the per-turn token/cost counters shared by the footer.
+
+        ``start_thinking`` re-runs this for each turn; constructing the
+        transport runs it once for the pre-turn state.
+
+        ``_status_turn_tokens`` is the *walk* (every call's ``total_tokens``),
+        ``_status_billed_tokens`` the uncached basis, and the two cost fields
+        carry the kernel's canonical estimate and the provider's own reported
+        charge. The provider figure is authoritative when non-zero; when the
+        kernel supplied neither cost field the footer falls back to pricing
+        ``model_prices`` itself, so an older runtime still shows a number.
+        """
+        self._status_turn_tokens: int = 0
+        self._status_prompt_tokens: int = 0
+        self._status_completion_tokens: int = 0
+        self._status_cached_tokens: int = 0
+        self._status_billed_tokens: int = 0
+        self._status_cost_usd: float = 0.0
+        self._status_provider_cost_usd: float = 0.0
+        # Model calls that reported a provider charge. A turn mixing
+        # providers (some reporting cost, some silent) has a partial total,
+        # which must not masquerade as the full bill.
+        self._status_provider_cost_calls: int = 0
+        # Per-turn sums of the counters the serving proxy declared on its
+        # response headers (e.g. compression ``tokens_saved``), keyed by the
+        # pack's own field names. Empty when no proxy is in the path — the
+        # footer then renders no proxy segment at all.
+        self._status_proxy_telemetry: dict[str, int] = {}
+        self._status_reasoning_chars: int = 0
 
     def _reset_model_status(self) -> None:
         self._status_current_model: str = ""
@@ -463,6 +489,10 @@ class PromptTransport:
         self._status_completion_tokens = 0
         self._status_cached_tokens = 0
         self._status_billed_tokens = 0
+        self._status_cost_usd = 0.0
+        self._status_provider_cost_usd = 0.0
+        self._status_provider_cost_calls = 0
+        self._status_proxy_telemetry = {}
         self._status_reasoning_chars = 0
         self._fork_children = {}
         self._fork_total = 0
@@ -813,28 +843,7 @@ class PromptTransport:
             if d_raw not in (None, "", 0):
                 with contextlib.suppress(TypeError, ValueError):
                     self._iteration_durations.append(float(d_raw))
-            total_raw = data.get("_state.total_tokens") or data.get("total_tokens")
-            if total_raw not in (None, "", 0):
-                self._status_turn_tokens += int(total_raw)
-            # Split counts feed the footer's cost estimate (manifest prices
-            # are per prompt/completion token). Cache-hit counts let the
-            # estimate price cached prompts at the manifest's cache-read rate.
-            with contextlib.suppress(TypeError, ValueError):
-                self._status_prompt_tokens += int(data.get("prompt_tokens") or 0)
-            with contextlib.suppress(TypeError, ValueError):
-                self._status_completion_tokens += int(data.get("completion_tokens") or 0)
-            cached_now = 0
-            with contextlib.suppress(TypeError, ValueError):
-                cached_now = int(data.get("cached_tokens") or 0)
-            self._status_cached_tokens += cached_now
-            with contextlib.suppress(TypeError, ValueError):
-                prompt_now = int(data.get("prompt_tokens") or 0)
-            # Billed basis (2026-10-12 perf review): the walk figure counts
-            # every cache hit at full size; the operator-facing "what did
-            # this turn actually cost" is uncached prompt + completion.
-            self._status_billed_tokens += max(0, prompt_now - cached_now) + int(
-                data.get("completion_tokens") or 0
-            )
+            self._accumulate_call_usage(data)
             return
         if label == "model_call_failed":
             self._print_event_line(
@@ -1444,19 +1453,125 @@ class PromptTransport:
         if self._status_turn_tokens:
             footer.append(" · ", style=STYLE_TEXT_MUTED)
             footer.append(f"{_format_tokens(self._status_turn_tokens)} tok", style="green3")
-            # Cache-split figure: when the turn walked context with cache
-            # hits, the walk is not the billed basis. Show what the turn
-            # actually consumed next to the walk (2026-10-12 perf review).
-            if self._status_cached_tokens > 0 and self._status_billed_tokens:
+            # Billed segment: the walk above counts every cache hit at full
+            # size, which on a cache-heavy turn reads up to 30x the tokens the
+            # provider actually bills. Always show the billed basis beside it
+            # when the two differ — that is the number to sanity-check spend
+            # against. When the turn had no cache hits the two are identical
+            # and the segment would be noise.
+            if 0 < self._status_billed_tokens < self._status_turn_tokens:
                 footer.append(
                     f" · billed {_format_tokens(self._status_billed_tokens)}",
                     style="cyan",
                 )
-        cost = self._estimate_turn_cost()
+        cost, authoritative = self._resolve_turn_cost()
         if cost:
             footer.append(" · ", style=STYLE_TEXT_MUTED)
-            footer.append(f"${cost:g}", style="cyan")
+            # ``$`` marks a provider-reported charge (the real meter); the
+            # ``~`` prefix marks the harness's own estimate from manifest
+            # rates, so the two are never mistaken for each other.
+            prefix = "$" if authoritative else "~$"
+            footer.append(f"{prefix}{cost:g}", style="cyan")
+        self._append_proxy_savings(footer)
         self.console.print(footer)
+
+    def _append_proxy_savings(self, footer: Text) -> None:
+        """Append the serving proxy's reported savings, when it declared any.
+
+        A proxy in the path (compression, cache steering) reports what it
+        saved per call on response headers; the kernel sums them and the
+        footer shows the turn's total. The counter is whatever the proxy
+        declared, so nothing is rendered unless a known name is present —
+        an unrecognised counter still reaches ``lisa tokens`` and any pack
+        reading the telemetry log, but the one-line footer only labels the
+        fields it can describe without guessing at units.
+        """
+
+        saved = self._status_proxy_telemetry.get("tokens_saved")
+        if not saved:
+            return
+        footer.append(" · ", style=STYLE_TEXT_MUTED)
+        footer.append(f"saved {_format_tokens(saved)}", style="dark_sea_green4")
+
+    def _accumulate_call_usage(self, data: dict[str, Any]) -> None:
+        """Fold one completed model call's usage into the turn totals.
+
+        Three figures accumulate independently, because they answer different
+        questions and must not be conflated:
+
+        * ``_status_turn_tokens`` — the *walk*: sum of every call's
+          ``total_tokens``. Grows quadratically across an agentic turn
+          because each iteration re-sends the whole conversation. Useful for
+          "how much context did this turn chew through", misleading as a bill.
+        * ``_status_billed_tokens`` — uncached prompt + completion, i.e. the
+          tokens the provider charges at full rate.
+        * ``_status_cost_usd`` / ``_status_provider_cost_usd`` — the kernel's
+          canonical estimate and the provider's own reported charge.
+        """
+
+        total_raw = data.get("_state.total_tokens") or data.get("total_tokens")
+        if total_raw not in (None, "", 0):
+            with contextlib.suppress(TypeError, ValueError):
+                self._status_turn_tokens += int(total_raw)
+        prompt_now = 0
+        with contextlib.suppress(TypeError, ValueError):
+            prompt_now = int(data.get("prompt_tokens") or 0)
+            self._status_prompt_tokens += prompt_now
+        completion_now = 0
+        with contextlib.suppress(TypeError, ValueError):
+            completion_now = int(data.get("completion_tokens") or 0)
+            self._status_completion_tokens += completion_now
+        cached_now = 0
+        with contextlib.suppress(TypeError, ValueError):
+            cached_now = int(data.get("cached_tokens") or 0)
+            self._status_cached_tokens += cached_now
+        self._status_billed_tokens += max(0, prompt_now - cached_now) + completion_now
+        with contextlib.suppress(TypeError, ValueError):
+            self._status_cost_usd += float(data.get("cost_usd") or 0.0)
+        provider_now = 0.0
+        with contextlib.suppress(TypeError, ValueError):
+            provider_now = float(data.get("provider_cost_usd") or 0.0)
+        if provider_now > 0.0:
+            self._status_provider_cost_usd += provider_now
+            self._status_provider_cost_calls += 1
+        # Proxy counters are summed without interpreting them: the key set is
+        # whatever the serving proxy declared, and the footer renders only the
+        # ones it knows how to label.
+        telemetry = data.get("proxy_telemetry")
+        if isinstance(telemetry, dict):
+            for key, raw in telemetry.items():
+                with contextlib.suppress(TypeError, ValueError):
+                    self._status_proxy_telemetry[str(key)] = self._status_proxy_telemetry.get(
+                        str(key), 0
+                    ) + max(0, int(raw))
+
+    def _resolve_turn_cost(self) -> tuple[float, bool]:
+        """Return ``(usd, authoritative)`` for the turn's cost segment.
+
+        Three sources, most trustworthy first:
+
+        1. ``_status_provider_cost_usd`` — the provider's own reported
+           charge (OpenRouter ``usage.cost``). Authoritative: it already
+           reflects the provider's real cache read/write rates and any
+           surcharges, so nothing here can be more accurate.
+        2. ``_status_cost_usd`` — the kernel's canonical estimate from the
+           manifest's per-token rates. Correct but list-price only.
+        3. ``_estimate_turn_cost()`` — this transport pricing the counts it
+           accumulated itself. Kept for runtimes whose stage payload predates
+           the cost fields, so an older kernel still yields a figure.
+
+        A provider charge wins only when *every* call in the turn reported
+        one; a partial sum would understate the bill, so mixed turns fall
+        back to the complete canonical estimate.
+        """
+
+        calls = self._model_call_count
+        provider_total = self._status_provider_cost_usd
+        if provider_total > 0.0 and calls > 0 and self._status_provider_cost_calls == calls:
+            return round(provider_total, 4), True
+        if self._status_cost_usd > 0.0:
+            return round(self._status_cost_usd, 4), False
+        return self._estimate_turn_cost(), False
 
     def _estimate_turn_cost(self) -> float:
         """Estimate the turn's USD cost from the manifest per-token prices.

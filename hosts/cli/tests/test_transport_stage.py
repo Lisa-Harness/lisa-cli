@@ -250,3 +250,198 @@ async def test_on_error_flushes_staged_answer_then_panel() -> None:
     buffer.truncate(0)
     await transport.on_error("again", None)
     assert "half an answer" not in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_footer_billed_segment_renders_when_kernel_ships_cache_counters() -> None:
+    """The billed basis renders from the kernel-supplied cache counters.
+
+    Regression: the footer gated ``billed`` on ``cached_tokens``, but the
+    kernel's ``model_call_complete`` payload never carried it, so on real
+    runs the segment was dead code and the walk (up to 30x the billable
+    figure) was the only number an operator ever saw.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "model_call", {"model_id": "glm-5.3-flash:cloud", "provider": "ollama", "mode_id": "ops"}
+    )
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 100000,
+            "completion_tokens": 3000,
+            "total_tokens": 103000,
+            "cached_tokens": 99750,
+            "cache_creation_tokens": 0,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "103k tok" in footer
+    assert "billed 3.25k" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_prefers_provider_reported_cost_and_marks_it() -> None:
+    """A provider-reported charge renders as ``$x`` (authoritative).
+
+    OpenRouter returns the real post-cache-discount charge, so the footer
+    shows it as-is and marks the figure as measured rather than estimated.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage("model_call", {"model_id": "m", "provider": "openrouter"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cost_usd": 0.0099,
+            "provider_cost_usd": 0.0042,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "$0.0042" in footer
+    assert "~$" not in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_marks_estimated_cost_when_provider_reports_none() -> None:
+    """Without a provider charge the canonical estimate renders as ``~$``."""
+    transport, buffer = _make_transport()
+    await transport.on_stage("model_call", {"model_id": "m", "provider": "openai"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cost_usd": 0.0099,
+            "provider_cost_usd": 0.0,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "~$0.0099" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_ignores_partial_provider_cost_covering_some_calls() -> None:
+    """A turn mixing reporting and silent calls falls back to the estimate.
+
+    Summing only the reported subset would understate the bill, so the
+    provider total is trusted only when every call in the turn reported one.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage("model_call", {"model_id": "a", "provider": "openrouter"})
+    await transport.on_stage(
+        "model_call_complete",
+        {"total_tokens": 100, "cost_usd": 0.01, "provider_cost_usd": 0.01},
+    )
+    await transport.on_stage("model_call", {"model_id": "b", "provider": "ollama"})
+    await transport.on_stage(
+        "model_call_complete",
+        {"total_tokens": 100, "cost_usd": 0.02, "provider_cost_usd": 0.0},
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "~$0.03" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_falls_back_to_local_estimate_on_older_runtime_payload() -> None:
+    """A payload with no cost fields still prices via ``model_prices``.
+
+    Keeps the footer working against a kernel that predates the cost fields
+    instead of silently dropping the segment.
+    """
+    transport, buffer = _make_transport()
+    transport.model_prices = {"m": (0.000002, 0.000012)}
+    transport.model_cache_prices = {"m": (0.0000002, 0.0)}
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+            "cached_tokens": 600,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "~$0.002" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_renders_proxy_savings_across_calls() -> None:
+    """A serving proxy's declared savings sum across the turn and render.
+
+    The counter is whatever the proxy declared in its manifest — the harness
+    never assumes a vocabulary, so a pack can add one without a code change.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage("model_call", {"model_id": "m", "provider": "openrouter"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "cost_usd": 0.001,
+            "proxy_telemetry": {"tokens_saved": 40_000},
+        },
+    )
+    await transport.on_stage("model_call", {"model_id": "m", "provider": "openrouter"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "cost_usd": 0.001,
+            "proxy_telemetry": {"tokens_saved": 30_000},
+        },
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "saved 70k" in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_omits_savings_segment_without_a_proxy() -> None:
+    """No proxy telemetry = no savings segment (never a fabricated zero)."""
+    transport, buffer = _make_transport()
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete", {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "saved" not in footer
+
+
+@pytest.mark.asyncio
+async def test_footer_keeps_unrecognized_proxy_counters_out_of_the_line() -> None:
+    """A counter the footer cannot label is recorded but not rendered.
+
+    Recording it keeps the value available to ``lisa tokens`` and any installed
+    pack; rendering an unlabelled number would be noise.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "proxy_telemetry": {"compression_events": 12},
+        },
+    )
+    await transport.on_response("done")
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
+    assert "saved" not in footer
+    # Still accumulated for the durable views.
+    assert transport._status_proxy_telemetry == {"compression_events": 12}  # pylint: disable=protected-access
