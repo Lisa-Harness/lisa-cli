@@ -45,7 +45,12 @@ async def test_tool_completion_prints_one_line_with_display_label() -> None:
     transport, buffer = _make_transport()
     await transport.on_stage(
         "tool_dispatch",
-        {"tool": "bash_run", "tool_kind": "pack_tool", "arguments": {"command": "ls"}, "display": "ls -la /etc"},
+        {
+            "tool": "bash_run",
+            "tool_kind": "pack_tool",
+            "arguments": {"command": "ls"},
+            "display": "ls -la /etc",
+        },
     )
     await transport.on_stage(
         "tool_dispatch_complete", {"tool": "bash_run", "ok": True, "duration_ms": 120}
@@ -207,6 +212,152 @@ async def test_turn_number_absent_yields_no_turn_segments() -> None:
     out = buffer.getvalue()
     assert "turn" not in out
     assert "Response · llama3.2" in out
+
+
+# ── proxy routing chip ─────────────────────────────────────────────
+
+
+def _proxy_chip_text(transport: PromptTransport) -> str:
+    part = transport._proxy_chip_part()
+    return part.plain if part is not None else ""
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_renders_when_routed_through_proxy() -> None:
+    """A proxied provider's model_call stamps the ⤳ chip with the proxy id."""
+    transport, _ = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "glm-5.3:cloud",
+            "provider": "ollama",
+            "mode_id": "ops",
+            "proxy_route": {
+                "via": "proxy",
+                "proxy_id": "headroom.headroom",
+                "base_url": "http://127.0.0.1:18787/v1",
+            },
+        },
+    )
+
+    assert transport._status_proxy_via == "proxy"
+    assert transport._status_proxy_id == "headroom.headroom"
+    assert _proxy_chip_text(transport) == "⤳ headroom"
+
+    leading = transport._status_leading_parts()
+    assert any(part.plain == "⤳ headroom" for part in leading)
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_preserves_distinct_proxy_id_parts() -> None:
+    transport, _ = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "m",
+            "provider": "ollama",
+            "proxy_route": {"via": "proxy", "proxy_id": "alpha.beta"},
+        },
+    )
+
+    assert _proxy_chip_text(transport) == "⤳ alpha.beta"
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_absent_when_direct() -> None:
+    """A direct (unproxied) provider renders no chip."""
+    transport, _ = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "m",
+            "provider": "ollama",
+            "mode_id": "ops",
+            "proxy_route": {"via": "direct"},
+        },
+    )
+
+    assert transport._status_proxy_via == "direct"
+    assert transport._status_proxy_id == ""
+    assert _proxy_chip_text(transport) == ""
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_warns_when_compiled_proxy_is_bypassed() -> None:
+    transport, _ = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "m",
+            "provider": "ollama",
+            "proxy_route": {"via": "direct", "bypassed_proxy_id": "compression"},
+        },
+    )
+    assert _proxy_chip_text(transport) == "compression ↓ direct"
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_cleared_when_payload_lacks_route() -> None:
+    """An unstamped payload clears a stale chip (older runtime, later turn)."""
+    transport, _ = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "m",
+            "provider": "ollama",
+            "mode_id": "ops",
+            "proxy_route": {
+                "via": "proxy",
+                "proxy_id": "headroom.headroom",
+                "base_url": "http://127.0.0.1:18787/v1",
+            },
+        },
+    )
+    assert _proxy_chip_text(transport) == "⤳ headroom"
+
+    await transport.on_stage(
+        "model_call", {"model_id": "m", "provider": "ollama", "mode_id": "ops"}
+    )
+
+    assert _proxy_chip_text(transport) == ""
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_ignores_unknown_via_value() -> None:
+    """A malformed ``via`` renders no chip instead of inventing one."""
+    transport, _ = _make_transport()
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "m",
+            "provider": "ollama",
+            "mode_id": "ops",
+            "proxy_route": {"via": "wormhole"},
+        },
+    )
+
+    assert transport._status_proxy_via == ""
+    assert _proxy_chip_text(transport) == ""
+
+
+@pytest.mark.asyncio
+async def test_proxy_chip_truncates_long_proxy_ids() -> None:
+    """Long proxy ids truncate so the chip cannot crowd out the meter."""
+    transport, _ = _make_transport()
+    long_id = "very-long-pack-name." + "x" * 40
+    await transport.on_stage(
+        "model_call",
+        {
+            "model_id": "m",
+            "provider": "ollama",
+            "mode_id": "ops",
+            "proxy_route": {"via": "proxy", "proxy_id": long_id},
+        },
+    )
+
+    text = _proxy_chip_text(transport)
+    assert text.startswith("⤳ ")
+    assert len(text) <= 2 + 24 + 1  # glyph + space + truncated id + ellipsis
 
 
 @pytest.mark.asyncio
@@ -430,9 +581,7 @@ async def test_footer_cost_estimate_from_model_prices() -> None:
 async def test_footer_omits_cost_without_prices() -> None:
     """No injected prices -> no cost segment (never block the footer)."""
     transport, buffer = _make_transport()
-    await transport.on_stage(
-        "model_call_complete", {"duration_ms": 340, "total_tokens": 4100}
-    )
+    await transport.on_stage("model_call_complete", {"duration_ms": 340, "total_tokens": 4100})
     await transport.on_response("the answer")
     assert "$" not in buffer.getvalue()
 
@@ -901,9 +1050,7 @@ async def test_box_title_shows_velocity_or_size() -> None:
     options = transport.console.options
     options.width = options.max_width = 90
     rendered = transport.console.render_lines(box, options, pad=False)
-    plain = "\n".join(
-        "".join(seg.text for seg in line) for line in rendered
-    )
+    plain = "\n".join("".join(seg.text for seg in line) for line in rendered)
     assert "thinking ·" in plain
     # Velocity qualify → rate in the title.
     now = time.perf_counter()
@@ -911,9 +1058,7 @@ async def test_box_title_shows_velocity_or_size() -> None:
     rendered = transport.console.render_lines(
         transport._stream_box_renderable(), options, pad=False
     )
-    plain = "\n".join(
-        "".join(seg.text for seg in line) for line in rendered
-    )
+    plain = "\n".join("".join(seg.text for seg in line) for line in rendered)
     assert "c/s" in plain
 
 
@@ -1032,9 +1177,7 @@ async def test_footer_estimate_blends_cache_read_rate() -> None:
         },
     )
     await transport.on_response("done")
-    footer = next(
-        ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡")
-    )
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
     assert "$0.002" in footer
 
 
@@ -1054,7 +1197,5 @@ async def test_footer_estimate_falls_back_to_uncached_rate() -> None:
         },
     )
     await transport.on_response("done")
-    footer = next(
-        ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡")
-    )
+    footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
     assert "$0.0032" in footer

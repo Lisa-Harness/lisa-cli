@@ -320,8 +320,7 @@ class PromptTransport:
         # ── Turn counters ───────────────────────────────────────────
         self._turn_started_perf: float = 0.0
         self._current_mode: str = ""
-        self._status_current_model: str = ""
-        self._status_model_provider: str = ""
+        self._reset_model_status()
         # Global thread turn number of the turn being rendered, stamped by
         # the host on the ``model_call`` stage payload (``turn_index``).
         # Rendered on the Response rule and the ⚡ footer; -1 = unknown. A
@@ -381,6 +380,12 @@ class PromptTransport:
         self._phase_label: str = "starting runtime"
         # ── Stream velocity (observable, not manifest-trusted) ──────
         self._init_velocity_state()
+
+    def _reset_model_status(self) -> None:
+        self._status_current_model: str = ""
+        self._status_model_provider: str = ""
+        self._status_proxy_id: str = ""
+        self._status_proxy_via: str = ""
 
     def _init_velocity_state(self) -> None:
         """Initialize the velocity-sampling state (one statement block).
@@ -462,8 +467,7 @@ class PromptTransport:
         self._fork_children = {}
         self._fork_total = 0
         self._current_mode = ""
-        self._status_current_model = ""
-        self._status_model_provider = ""
+        self._reset_model_status()
         self._active_label = ""
         self._phase_label = "starting runtime"
         self._last_tool_data = None
@@ -755,6 +759,24 @@ class PromptTransport:
         if isinstance(turn_raw, int) and turn_raw >= 0:
             self._turn_number = turn_raw
 
+    def _capture_proxy_route(self, data: dict[str, Any]) -> None:
+        """Capture the provider's proxy routing from a stage payload.
+
+        ``proxy_route.via`` is ``"proxy"`` (requests flow through the named
+        proxy pack, e.g. headroom) or ``"direct"``. A payload without the
+        key clears the chip: transports must not keep showing a stale hop
+        when the runtime stops stamping routing info.
+        """
+        route = data.get("proxy_route")
+        if not isinstance(route, dict):
+            self._status_proxy_id = ""
+            self._status_proxy_via = ""
+            return
+        via = str(route.get("via") or "")
+        self._status_proxy_via = via if via in ("proxy", "direct") else ""
+        proxy_id = route.get("proxy_id") if via == "proxy" else route.get("bypassed_proxy_id")
+        self._status_proxy_id = str(proxy_id or "")
+
     def _handle_model_stage(self, label: str, data: dict[str, Any]) -> None:
         """Route model_call* stage events.
 
@@ -770,6 +792,7 @@ class PromptTransport:
                 provider = data.get("provider")
                 self._status_current_model = str(model_id)
                 self._status_model_provider = str(provider) if provider not in (None, "") else ""
+            self._capture_proxy_route(data)
             self._model_call_count += 1
             self._active_reasoning_model = bool(data.get("reasoning_model"))
             # A new model call resets the stall clock: pre-call silence is
@@ -1263,7 +1286,7 @@ class PromptTransport:
         return body
 
     def _status_leading_parts(self) -> list[Text]:
-        """Leading status segments: turn, mode, model, in-flight label."""
+        """Leading status segments: turn, mode, model, proxy hop, in-flight label."""
         parts: list[Text] = []
         if self._turn_number >= 0:
             parts.append(Text(f"turn {self._turn_number}", style=STYLE_ROW_MODEL))
@@ -1274,9 +1297,34 @@ class PromptTransport:
             if self._status_model_provider:
                 model = f"{self._status_model_provider}:{model}"
             parts.append(Text(model, style=STYLE_STAGE))
+        chip = self._proxy_chip_part()
+        if chip is not None:
+            parts.append(chip)
         if self._active_label:
             parts.append(Text(_truncate(self._active_label, 48), style=STYLE_STAGE))
         return parts
+
+    def _proxy_chip_part(self) -> Text | None:
+        """Proxy-pack routing chip, or ``None`` when the host stamped nothing.
+
+        ``⤳ <proxy_id>`` when the provider routes through a ready proxy
+        (e.g. headroom); nothing when unstamped or direct with no proxy
+        declared. The chip keeps the model segment honest about where
+        requests actually flow.
+        """
+        if not self._status_proxy_via:
+            return None
+        if self._status_proxy_via == "proxy" and self._status_proxy_id:
+            proxy_id = self._status_proxy_id
+            prefix, separator, suffix = proxy_id.partition(".")
+            if separator and prefix == suffix:
+                proxy_id = prefix
+            return Text(f"⤳ {_truncate(proxy_id, 24)}", style=STYLE_STAGE)
+        if self._status_proxy_via == "direct" and self._status_proxy_id:
+            return Text(
+                f"{_truncate(self._status_proxy_id, 24)} ↓ direct", style=STYLE_ROW_TRANSITION
+            )
+        return None
 
     def _append_meter_parts(self, parts: list[Text]) -> None:
         """Append the thinking meter segment when armed.
