@@ -1233,7 +1233,7 @@ def _models_command(
             await runtime.start()
             return await handle_models_command(runtime, stripped, stripped)
         finally:
-            await runtime.aclose()
+            await _aclose_runtime_bounded(runtime)
 
     response_text = asyncio.run(_run_models_command())
     console.print(Panel(Markdown(response_text), title="Models", border_style="cyan"))
@@ -2064,7 +2064,7 @@ async def _run_host_command_turn(runtime: HostRuntime, command: str) -> str:
         await runtime.start()
         result = await handle_message(runtime, command, NullTransport())
     finally:
-        await runtime.aclose()
+        await _aclose_runtime_bounded(runtime)
     return getattr(result, "text", "") or str(result)
 
 
@@ -2128,7 +2128,7 @@ async def _decide_approval_turn(
             transport=NullTransport(),
         )
     finally:
-        await runtime.aclose()
+        await _aclose_runtime_bounded(runtime)
     return getattr(result, "text", "") or str(result)
 
 
@@ -2672,14 +2672,22 @@ async def _run_prompt_with_teardown(
                 # stop — there is no turn to run.
                 decision_text = getattr(result, "text", "") or str(result)
                 transport.stop_activity()
-                await runtime.aclose()
+                await _aclose_runtime_bounded(runtime)
                 await transport.on_response(decision_text)
                 return transport
         if message:
             await handle_message(runtime, message, transport)
     finally:
         transport.stop_activity()
-        await runtime.aclose()
+        # Bounded teardown: the prompt command previously awaited bare
+        # ``runtime.aclose()`` — when the MCP pool's sequential anyio
+        # task-group teardown stalls (the 2026-09-21 headroom incident
+        # recurred on 2026-10-26 ~16:11: the turn had already completed
+        # and persisted, yet the CLI sat idle in epoll for the rest of
+        # the prompt run because the unbounded close never returned).
+        # The bounded helper falls back to terminating every tracked
+        # MCP/proxy subprocess after the grace window.
+        await _aclose_runtime_bounded(runtime)
     return transport
 
 
