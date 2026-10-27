@@ -377,7 +377,7 @@ post_install_guidance() {
     printf "    lisa prompt \"Let's get started!\"\n"
     printf "\n"
     printf "  The starter session auto-installs a few packs from GitHub\n"
-    printf "  (markdown, personas, search, serper) on first use.\n"
+    printf "  (markdown, personas) on first use.\n"
     printf "\n"
 
     local is_ollama=false

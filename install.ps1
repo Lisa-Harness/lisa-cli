@@ -550,7 +550,7 @@ function Write-PostInstallGuidance {
     Write-Host "    lisa prompt `"Let's get started, Lisa!`""
     Write-Host ""
     Write-Host "  The starter session auto-installs a few packs from GitHub"
-    Write-Host "  (markdown, personas, search, serper) on first use."
+    Write-Host "  (markdown, personas) on first use."
     Write-Host ""
 
     if ($Provider -contains "ollama") {
