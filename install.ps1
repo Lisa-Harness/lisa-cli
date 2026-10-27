@@ -427,7 +427,6 @@ resources:
     required:
       - lisa-pack-markdown
       - lisa-pack-personas
-      - lisa-pack-search
     # - lisa-pack-tavily
 # Web search requires a web search provider pack, e.g., lisa-pack-tavily
 # Add one above then designate it as the web_search tool below
