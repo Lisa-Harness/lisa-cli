@@ -191,7 +191,7 @@ install_lisa() {
     fi
 
     if ! uv tool install --python 3.12 --no-sources "${cli_requirement}" "${WITHS[@]}" 2>/dev/null; then
-        uv tool install --python 3.12 --no-sources --reinstall "${cli_requirement}" "${WITHS[@]}"
+        uv tool install --python 3.12 --no-cache --no-sources --force --reinstall "${cli_requirement}" "${WITHS[@]}"
     fi
 
     # Make bare `lisa` resolvable for the rest of this script (uv installs

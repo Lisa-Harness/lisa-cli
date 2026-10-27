@@ -321,7 +321,7 @@ function Install-LisaTool {
     Write-Verbose "Installing lisa (uv tool, source: $Source)"
     $exitCode = Invoke-Native -FilePath "uv" -ArgumentList (@("tool", "install", "--python", "3.12", "--no-sources", $cliRequirement) + $withArgs)
     if ($exitCode -ne 0) {
-        $exitCode = Invoke-Native -FilePath "uv" -ArgumentList (@("tool", "install", "--python", "3.12", "--no-sources", "--reinstall", $cliRequirement) + $withArgs)
+        $exitCode = Invoke-Native -FilePath "uv" -ArgumentList (@("tool", "install", "--python", "3.12", "--no-cache", "--no-sources", "--force", "--reinstall", $cliRequirement) + $withArgs)
         if ($exitCode -ne 0) { throw "uv tool install failed (exit $exitCode)" }
     }
 
