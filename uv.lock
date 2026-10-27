@@ -785,7 +785,7 @@ wheels = [
 
 [[package]]
 name = "lisa-cli"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "hosts/cli" }
 dependencies = [
     { name = "httpx" },
@@ -845,7 +845,7 @@ provides-extras = ["dev", "prompt"]
 
 [[package]]
 name = "lisa-cli-root"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "lisa-cli" },

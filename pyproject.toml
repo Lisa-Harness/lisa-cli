@@ -1,6 +1,6 @@
 [project]
 name = "lisa-cli-root"
-version = "0.2.0"
+version = "0.3.0"
 description = "Workspace for the Lisa Harness CLI"
 requires-python = ">=3.11"
 dependencies = [
