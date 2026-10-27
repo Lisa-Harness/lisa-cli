@@ -421,8 +421,6 @@ lisa resume
 
 A leading `/` (a runtime slash command) is a friendly usage error pointing
 at the named subcommand — `lisa /settings` suggests `lisa settings`.
-The `lisa run '<slash>'` escape hatch is **deprecated** (hidden) and will
-be removed after one release.
 
 ### Approvals
 
