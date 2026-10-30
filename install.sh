@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lisa Framework installer for Linux/macOS
+# Lisa Harness installer for Linux/macOS
 #
 # Installs the `lisa` CLI as a uv tool, creates ~/.lisa/.env for the selected
 # model providers, seeds a starter session context (~/.lisa/config/
@@ -315,7 +315,7 @@ bootstrap_models() {
     if [[ ! -f "$proposal" ]]; then
         printf "  No models discovered yet (no provider reachable or configured).\n"
         printf "  After installing Ollama models or filling in your API keys, run:\n"
-        printf "    lisa models discover && lisa models apply\n"
+        printf "    lisa models discover --force && lisa models apply\n"
         printf "  (lisa verify will flag the missing manifest until then — expected.)\n"
         return 0
     fi
@@ -368,7 +368,7 @@ post_install_guidance() {
                 printf "       %s: uncomment and set %s\n" "$label" "${joined#, }"
             fi
         done
-        printf "    2. Run: lisa models discover && lisa models apply\n"
+        printf "    2. Run: lisa models discover --force && lisa models apply\n"
         printf "       (to refresh your model manifest)\n"
         printf "\n"
     fi
@@ -394,7 +394,7 @@ post_install_guidance() {
         printf "    ollama pull glm-5.3:cloud\n"
         printf "\n"
         printf "  Then refresh the manifest:\n"
-        printf "    lisa models discover && lisa models apply\n"
+        printf "    lisa models discover --force && lisa models apply\n"
         printf "\n"
     fi
 
@@ -407,7 +407,7 @@ post_install_guidance() {
 
 main() {
     printf "\n"
-    printf "  Lisa Framework Installer\n"
+    printf "  Lisa Harness Installer\n"
     printf "  ------------------------\n"
     printf "\n"
 
