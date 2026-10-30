@@ -11,6 +11,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --provider ollama,openai
 #   curl -fsSL ... | bash -s -- --provider anthropic --no-verify
+#   curl -fsSL ... | bash -s -- --clean          # purge then reinstall
+#   curl -fsSL ... | bash -s -- --clean --reset  # purge state too
 #
 # Until the packages are published on PyPI, the installer resolves them
 # straight from git (default) or from local checkouts of both repos:
@@ -36,6 +38,12 @@ IFS=',' read -ra PROVIDERS <<< "${LISA_PROVIDER:-ollama}"
 
 SKIP_DIAGNOSTICS=false
 
+# --clean: remove what the install owns outside uv's receipts (packs venv,
+# pack lock) and let uv remove the CLI tool itself. --reset: drop the seeded
+# model manifest and session context so the install re-seeds them.
+DO_CLEAN=false
+DO_RESET=false
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --source)         SOURCE="$2";         shift 2 ;;
@@ -43,6 +51,8 @@ while [[ $# -gt 0 ]]; do
         --cli-repo)       CLI_REPO="$2";       shift 2 ;;
         --provider)       IFS=',' read -ra PROVIDERS <<< "$2"; shift 2 ;;
         --no-verify)      SKIP_DIAGNOSTICS=true; shift ;;
+        --clean)          DO_CLEAN=true;         shift ;;
+        --reset)          DO_RESET=true;         shift ;;
         --help|-h)
             cat <<HELP
 Usage: install.sh [OPTIONS]
@@ -60,6 +70,13 @@ Options:
   --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,
                           anthropic,google,openrouter,aws (default: \$LISA_PROVIDER or ollama)
   --no-verify             Do not run lisa verify after install
+  --clean                 Remove the packs venv and state/installed-packs.json,
+                          uninstall the existing lisa tool, then reinstall.
+                          Deletes packs you installed into the runtime.
+  --reset                 Delete the seeded model manifest (config/models.yaml,
+                          state/models.proposed.yaml) and
+                          config/session_context.md so this run re-creates
+                          them. Combine with --clean for a full teardown.
   --help, -h              Show this help
 
 Examples:
@@ -68,6 +85,8 @@ Examples:
   install.sh --source local --lisa-repo ~/Code/lisa
   install.sh --provider ollama,openai
   install.sh --provider anthropic --no-verify
+  install.sh --clean                           # purge pack state, reinstall
+  install.sh --clean --reset                   # also re-seed models + session
 HELP
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -197,6 +216,83 @@ install_lisa() {
     # Make bare `lisa` resolvable for the rest of this script (uv installs
     # executables into ~/.local/bin, which may not be on PATH yet).
     export PATH="$HOME/.local/bin:$PATH"
+}
+
+packs_venv_path() {
+    # Mirrors runtime.paths.packs_venv_for: an explicit LISA_PACKS_VENV wins,
+    # then <data dir>/venv — except for a profile dir (<base>/profiles/<name>),
+    # which resolves to the base data dir's venv because packs are shared.
+    local base="${LISA_HOME%/}"
+    if [[ -n "${LISA_PACKS_VENV:-}" ]]; then
+        printf '%s\n' "${LISA_PACKS_VENV/#\~/$HOME}"
+        return 0
+    fi
+    if [[ "$(basename "$(dirname "$base")")" == "profiles" ]]; then
+        base="$(dirname "$(dirname "$base")")"
+    fi
+    printf '%s\n' "$base/venv"
+}
+
+remove_path() {
+    # Report and delete one path; a no-op when it is already gone.
+    local target="$1"
+    if [[ -e "$target" || -L "$target" ]]; then
+        rm -rf -- "$target"
+        printf "  Removed %s\n" "$target"
+        return 0
+    fi
+    return 1
+}
+
+clean_install_state() {
+    # Remove everything the install owns outside uv's receipts. uv has no
+    # "delete this venv" command for the packs venv — the runtime creates it
+    # with `uv pip install`, so it is not a uv tool — hence the direct delete.
+    # The CLI tool venv is uv's business: `uv tool uninstall` removes it.
+    local lock="$LISA_HOME/state/installed-packs.json"
+    local venv
+    venv="$(packs_venv_path)"
+
+    printf "  Removing packs venv: %s\n" "$venv"
+    remove_path "$venv" || printf "  No packs venv at %s\n" "$venv"
+    # Advisory lock the runtime keeps beside the packs venv.
+    remove_path "$(dirname "$venv")/.packs-venv.lock" || true
+
+    # The json lock plus the sidecar `.lock` the runtime writes beside it.
+    printf "  Removing pack lock: %s\n" "$lock"
+    remove_path "$lock" || printf "  No pack lock at %s\n" "$lock"
+    remove_path "$lock.lock" || true
+
+    printf "  Uninstalling lisa tool (uv)...\n"
+    local uv_status=0
+    if have_cmd uv; then
+        uv tool uninstall lisa-cli >/dev/null 2>&1 || uv_status=$?
+    else
+        uv_status=127
+    fi
+    case "$uv_status" in
+        0)   printf "  Removed the lisa tool install\n" ;;
+        2)   printf "  No lisa tool install to remove\n" ;;
+        127) printf "  uv is unavailable; skipping the lisa tool uninstall\n" ;;
+        *)   printf "  WARN: uv tool uninstall failed (exit %s); the old tool venv remains\n" "$uv_status" ;;
+    esac
+}
+
+reset_seeded_state() {
+    # Drop what the installer seeds so this run writes it again: the model
+    # manifest (active + proposal) and the starter session context.
+    local -a targets=(
+        "$LISA_HOME/config/models.yaml"
+        "$LISA_HOME/state/models.proposed.yaml"
+        "$LISA_HOME/config/session_context.md"
+    )
+    local target removed=false
+    for target in "${targets[@]}"; do
+        remove_path "$target" && removed=true
+    done
+    if ! $removed; then
+        printf "  Nothing to reset in %s\n" "$LISA_HOME"
+    fi
 }
 
 generate_env_file() {
@@ -414,34 +510,57 @@ main() {
     if ! have_cmd git; then
         error_exit "git is required for the ${SOURCE} install source but was not found on PATH"
     fi
-    step 1 6 "Checking uv..."
+
+    local total=6 s=0
+    if $DO_CLEAN; then total=$((total + 1)); fi
+    if $DO_RESET; then total=$((total + 1)); fi
+
+    s=$((s + 1))
+    step "$s" "$total" "Checking uv..."
     install_uv
     local uv_version
     uv_version=$(uv --version 2>/dev/null | cut -d' ' -f2 || echo "installed")
     printf "  OK: uv %s\n" "$uv_version"
 
-    step 2 6 "Installing lisa CLI (uv tool, source: $SOURCE)..."
+    # Runs after uv exists: the tool uninstall step shells out to it.
+    if $DO_CLEAN; then
+        s=$((s + 1))
+        step "$s" "$total" "Cleaning prior install state..."
+        clean_install_state
+    fi
+    if $DO_RESET; then
+        s=$((s + 1))
+        step "$s" "$total" "Resetting seeded state..."
+        reset_seeded_state
+    fi
+
+    s=$((s + 1))
+    step "$s" "$total" "Installing lisa CLI (uv tool, source: $SOURCE)..."
     install_lisa
     local lisa_version
     lisa_version=$(lisa --version 2>/dev/null | tail -1 || echo "installed")
     printf "  OK: %s\n" "$lisa_version"
 
-    step 3 6 "Configuring providers in $LISA_HOME..."
+    s=$((s + 1))
+    step "$s" "$total" "Configuring providers in $LISA_HOME..."
     generate_env_file
 
-    step 4 6 "Seeding starter session context..."
+    s=$((s + 1))
+    step "$s" "$total" "Seeding starter session context..."
     generate_session_context
 
-    step 5 6 "Bootstrapping model manifest (discover + apply)..."
+    s=$((s + 1))
+    step "$s" "$total" "Bootstrapping model manifest (discover + apply)..."
     bootstrap_models
 
+    s=$((s + 1))
     if ! $SKIP_DIAGNOSTICS; then
-        step 6 6 "Running diagnostics..."
+        step "$s" "$total" "Running diagnostics..."
         printf "\n"
         lisa verify || true
         printf "\n"
     else
-        step 6 6 "Done."
+        step "$s" "$total" "Done."
     fi
 
     post_install_guidance

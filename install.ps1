@@ -21,6 +21,11 @@
 
         .\install.ps1 -Source local -LisaRepo C:\Code\lisa
 
+    -Clean removes what the install owns outside uv's receipts (the packs
+    venv and the pack lock) and lets uv remove the CLI tool itself; -Reset
+    drops the seeded model manifest and session context so they are written
+    again. Both then continue with a normal install.
+
 .PARAMETER Source
     Install source: "git" (default) resolves the packages from GitHub;
     "local" uses local checkouts (requires -LisaRepo). Also settable via the
@@ -40,6 +45,24 @@
 
 .PARAMETER SkipDiagnostics
     Skip running lisa verify after installation.
+
+.PARAMETER Clean
+    Remove the install's own state before installing: the packs venv,
+    state\installed-packs.json, and the lisa uv tool (via
+    `uv tool uninstall`). Deletes packs you installed into the runtime.
+
+.PARAMETER Reset
+    Delete the seeded model manifest (config\models.yaml,
+    state\models.proposed.yaml) and config\session_context.md so this run
+    writes them again. Combine with -Clean for a full teardown.
+
+.EXAMPLE
+    # Purge pack state and reinstall
+    .\install.ps1 -Clean
+
+.EXAMPLE
+    # Full teardown: purge pack state and re-seed models + session
+    .\install.ps1 -Clean -Reset
 
 .EXAMPLE
     # Git source (default), Ollama only
@@ -94,12 +117,18 @@ param(
     ),
 
     [Parameter()]
-    [switch]$SkipDiagnostics
+    [switch]$SkipDiagnostics,
+
+    [Parameter()]
+    [switch]$Clean,
+
+    [Parameter()]
+    [switch]$Reset
 )
 
 # PSScriptAnalyzer doesn't like how we use our params as globals; this calms
 # it (same no-op-read trick as astral.sh/uv's install.ps1).
-$null = $Source, $LisaRepo, $CliRepo, $Provider, $SkipDiagnostics
+$null = $Source, $LisaRepo, $CliRepo, $Provider, $SkipDiagnostics, $Clean, $Reset
 
 # -- Script state ------------------------------------------------------------
 
@@ -330,6 +359,136 @@ function Install-LisaTool {
     $localBin = Join-Path $HOME ".local\bin"
     if ((Test-Path $localBin) -and ($env:PATH -notlike "*$localBin*")) {
         $env:PATH = "$localBin;$env:PATH"
+    }
+}
+
+function Get-PacksVenvPath {
+    <#
+    .SYNOPSIS
+        Resolve the packs venv the way runtime.paths.packs_venv_for does:
+        LISA_PACKS_VENV wins, then <data dir>\venv - except for a profile dir
+        (<base>\profiles\<name>), which resolves to the base data dir's venv
+        because packs are shared across profiles.
+    #>
+    param()
+    Set-StrictMode -Version Latest
+
+    $override = [Environment]::GetEnvironmentVariable("LISA_PACKS_VENV")
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        # Match os.path.expanduser: a leading ~ means $HOME.
+        if ($override -eq "~" -or $override.StartsWith("~\") -or $override.StartsWith("~/")) {
+            return (Join-Path $HOME $override.TrimStart("~", "\", "/"))
+        }
+        return $override
+    }
+
+    $base = $script:LisaHome.TrimEnd("\", "/")
+    $parent = Split-Path $base -Parent
+    if ((Split-Path $parent -Leaf) -eq "profiles") {
+        $base = Split-Path $parent -Parent
+    }
+    return (Join-Path $base "venv")
+}
+
+function Remove-LisaPath {
+    <#
+    .SYNOPSIS
+        Delete one path, reporting it. A missing path is a no-op that returns
+        $false so callers can report "nothing here".
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Installer UX is deliberately host-colored output.')]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    Set-StrictMode -Version Latest
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Path) {
+        Write-Warning "Could not fully remove $Path (in use?). Remove it manually."
+    }
+    else {
+        Write-Host "  Removed $Path" -ForegroundColor Green
+    }
+    return $true
+}
+
+function Clear-LisaInstallState {
+    <#
+    .SYNOPSIS
+        Remove what the install owns outside uv's receipts: the packs venv and
+        the pack provenance lock. The CLI tool venv belongs to uv, so it is
+        removed with `uv tool uninstall` rather than by deleting files.
+    #>
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Installer UX is deliberately host-colored output.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Clears one install state as a single unit.')]
+    param()
+    Set-StrictMode -Version Latest
+
+    $packsVenv = Get-PacksVenvPath
+    Write-Host "  Removing packs venv: $packsVenv"
+    if (-not (Remove-LisaPath -Path $packsVenv)) {
+        Write-Host "  No packs venv at $packsVenv"
+    }
+    # Advisory lock the runtime keeps beside the packs venv.
+    $null = Remove-LisaPath -Path (Join-Path (Split-Path $packsVenv -Parent) ".packs-venv.lock")
+
+    # The json lock plus the sidecar .lock the runtime writes beside it.
+    $packLock = Join-Path $script:LisaHome "state\installed-packs.json"
+    Write-Host "  Removing pack lock: $packLock"
+    if (-not (Remove-LisaPath -Path $packLock)) {
+        Write-Host "  No pack lock at $packLock"
+    }
+    $null = Remove-LisaPath -Path "$packLock.lock"
+
+    Write-Host "  Uninstalling lisa tool (uv)..."
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        # Seed the automatic variable so StrictMode can read it even when `uv`
+        # resolves to a function (tests) rather than a native executable.
+        $global:LASTEXITCODE = 0
+        $null = & uv tool uninstall lisa-cli 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Removed the lisa tool install" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  No lisa tool install to remove"
+        }
+    }
+    else {
+        Write-Host "  uv is unavailable; skipping tool uninstall"
+    }
+}
+
+function Reset-LisaSeededState {
+    <#
+    .SYNOPSIS
+        Drop what the installer seeds - the model manifest (active + proposal)
+        and the starter session context - so this run writes them again.
+    #>
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Installer UX is deliberately host-colored output.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Resets one seeded state as a single unit.')]
+    param()
+    Set-StrictMode -Version Latest
+
+    $targets = @(
+        (Join-Path $script:LisaHome "config\models.yaml"),
+        (Join-Path $script:LisaHome "state\models.proposed.yaml"),
+        (Join-Path $script:LisaHome "config\session_context.md")
+    )
+    $removed = $false
+    foreach ($target in $targets) {
+        if (Remove-LisaPath -Path $target) { $removed = $true }
+    }
+    if (-not $removed) {
+        Write-Host "  Nothing to reset in $script:LisaHome"
     }
 }
 
@@ -595,12 +754,31 @@ function Install-LisaHarness {
 
     Test-InstallEnvironment
 
-    Write-Step -Step 1 -Total 5 -Message "Checking uv..."
+    $total = 6
+    if ($Clean) { $total++ }
+    if ($Reset) { $total++ }
+    $stepNo = 0
+
+    $stepNo++
+    Write-Step -Step $stepNo -Total $total -Message "Checking uv..."
     Install-UvIfMissing
     $uvVersion = (uv --version 2>$null) -replace '^uv\s+', ''
     Write-Host "  OK: uv $uvVersion" -ForegroundColor Green
 
-    Write-Step -Step 2 -Total 5 -Message "Installing lisa CLI (uv tool, source: $Source)..."
+    # Runs after uv exists: the tool uninstall step shells out to it.
+    if ($Clean) {
+        $stepNo++
+        Write-Step -Step $stepNo -Total $total -Message "Cleaning prior install state..."
+        Clear-LisaInstallState
+    }
+    if ($Reset) {
+        $stepNo++
+        Write-Step -Step $stepNo -Total $total -Message "Resetting seeded state..."
+        Reset-LisaSeededState
+    }
+
+    $stepNo++
+    Write-Step -Step $stepNo -Total $total -Message "Installing lisa CLI (uv tool, source: $Source)..."
     Install-LisaTool
     $lisaCmd = Get-Command lisa -ErrorAction SilentlyContinue
     if (-not $lisaCmd) {
@@ -609,23 +787,27 @@ function Install-LisaHarness {
     $lisaVersion = (& lisa --version 2>$null | Select-Object -Last 1)
     Write-Host "  OK: $lisaVersion" -ForegroundColor Green
 
-    Write-Step -Step 3 -Total 6 -Message "Configuring providers in $($script:LisaHome)..."
+    $stepNo++
+    Write-Step -Step $stepNo -Total $total -Message "Configuring providers in $($script:LisaHome)..."
     New-LisaEnvFile
 
-    Write-Step -Step 4 -Total 6 -Message "Seeding starter session context..."
+    $stepNo++
+    Write-Step -Step $stepNo -Total $total -Message "Seeding starter session context..."
     New-LisaSessionContext
 
-    Write-Step -Step 5 -Total 6 -Message "Bootstrapping model manifest (discover + apply)..."
+    $stepNo++
+    Write-Step -Step $stepNo -Total $total -Message "Bootstrapping model manifest (discover + apply)..."
     Update-LisaModelManifest
 
+    $stepNo++
     if (-not $SkipDiagnostics) {
-        Write-Step -Step 6 -Total 6 -Message "Running diagnostics..."
+        Write-Step -Step $stepNo -Total $total -Message "Running diagnostics..."
         Write-Host ""
         $null = Invoke-Native -FilePath "lisa" -ArgumentList @("verify")
         Write-Host ""
     }
     else {
-        Write-Step -Step 6 -Total 6 -Message "Done."
+        Write-Step -Step $stepNo -Total $total -Message "Done."
     }
 
     Write-PostInstallGuidance

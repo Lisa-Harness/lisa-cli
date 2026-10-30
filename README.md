@@ -49,6 +49,19 @@ Both installers accept options, in Bash and PowerShell spellings:
 | Help         | `--help`                                 | `-?`                                  |
 | Providers    | `--provider ollama,openai`               | `-Provider ollama,openai`             |
 | Local source | `--source local --lisa-repo ~/Code/lisa` | `-Source local -LisaRepo ~/Code/lisa` |
+| Clean        | `--clean`                                | `-Clean`                              |
+| Reset        | `--reset`                                | `-Reset`                              |
+
+`--clean` removes the state the installer owns outside uv's receipts — the
+packs venv (`~/.lisa/venv`) and `state/installed-packs.json` — and uninstalls
+the existing `lisa` tool with `uv tool uninstall`, then installs again. It is
+a clean reinstall: any packs you installed into the runtime are gone and come
+back only as the starter session re-requests them.
+
+`--reset` deletes the seeded model manifest (`config/models.yaml` and
+`state/models.proposed.yaml`) and `config/session_context.md`, so the install
+re-runs model discovery and rewrites the starter session. Use it alone to
+regenerate configuration, or with `--clean` for a full teardown.
 
 ### Or install with uv
 
