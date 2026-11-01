@@ -92,11 +92,6 @@
 .LINK
     https://github.com/Lisa-Harness/lisa-cli
 #>
-
-# A null MyCommand.Path means this code is being evaluated in the caller's
-# session (irm | iex) - there is no script file on disk.
-$script:ExecutedFromIex = ($null -eq $MyInvocation.MyCommand.Path)
-
 [CmdletBinding()]
 param(
     [Parameter()]
@@ -137,6 +132,10 @@ param(
     [Parameter()]
     [switch]$Reset
 )
+
+# A null MyCommand.Path means this code is being evaluated in the caller's
+# session (irm | iex) - there is no script file on disk.
+$script:ExecutedFromIex = ($null -eq $MyInvocation.MyCommand.Path)
 
 # PSScriptAnalyzer doesn't like how we use our params as globals; this calms
 # it (same no-op-read trick as astral.sh/uv's install.ps1).
