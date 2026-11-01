@@ -16,6 +16,9 @@ venv/
 .mypy_cache/
 .import_linter_cache/
 
+# Tests
+.coverage
+
 # IDE
 .vscode/
 .idea/
