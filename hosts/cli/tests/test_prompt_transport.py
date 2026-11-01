@@ -1082,7 +1082,7 @@ async def test_stall_segment_hidden_while_streaming(_transport_clock: float) -> 
 
 @pytest.mark.asyncio
 async def test_stall_segment_after_threshold(_transport_clock: float) -> None:
-    """A quiet stream past the threshold renders `no data Ns` in gold."""
+    """A quiet stream past the threshold renders `stalled Ns` in gold with pulsing indicator."""
     transport, _ = _make_tty_transport(streaming_mode="hybrid")
     transport.start_turn("hi")
     await transport.on_stage("model_call", {"model_id": "glm-5.3:cloud"})
@@ -1090,10 +1090,10 @@ async def test_stall_segment_after_threshold(_transport_clock: float) -> None:
     transport._last_delta_perf = _transport_clock - 20.0  # pylint: disable=protected-access
     transport._status_reasoning_chars = 800  # pylint: disable=protected-access
     body = transport._compose_status_body(100)
-    assert "no data 20s" in body.plain
-    assert body.plain.count("no data 20s") == 1
+    assert "stalled 20s" in body.plain
+    assert body.plain.count("stalled 20s") == 1
     # Below the alert age the segment stays gold, not red.
-    stall_spans = [s for s in body.spans if "no data" in body.plain[s.start : s.end]]
+    stall_spans = [s for s in body.spans if "stalled" in body.plain[s.start : s.end]]
     assert stall_spans and stall_spans[0].style == "gold3"
 
 
@@ -1107,9 +1107,9 @@ async def test_stall_segment_escalates_to_red_at_alert(_transport_clock: float) 
     transport._last_delta_perf = _transport_clock - 90.0  # pylint: disable=protected-access
     transport._status_reasoning_chars = 800  # pylint: disable=protected-access
     body = transport._compose_status_body(100)
-    assert "no data 90s" in body.plain
+    assert "stalled 90s" in body.plain
     # The escalated segment carries the error style (gold below the alert age).
-    stall_spans = [s for s in body.spans if "no data" in body.plain[s.start : s.end]]
+    stall_spans = [s for s in body.spans if "stalled" in body.plain[s.start : s.end]]
     assert stall_spans and stall_spans[0].style == "indian_red"
 
 

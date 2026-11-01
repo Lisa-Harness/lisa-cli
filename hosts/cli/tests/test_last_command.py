@@ -203,13 +203,22 @@ def test_last_tty_rule_carries_turn_number(
     from runtime.thread import append_thread_entry
 
     runtime = _make_runtime(tmp_path)
+    # Add 7 entries first so the 8th entry gets global turn 7
+    for i in range(7):
+        append_thread_entry(
+            thread_path=runtime.paths.thread_path,
+            user_slug=runtime.config.user_slug,
+            mode_id="default",
+            query=f"question {i}",
+            response_text=f"answer {i}",
+        )
+    # Now add the entry we want to replay at turn 7
     append_thread_entry(
         thread_path=runtime.paths.thread_path,
         user_slug=runtime.config.user_slug,
         mode_id="default",
         query="hello",
         response_text="tty answer",
-        turn=7,
     )
     code, output = _invoke_last(monkeypatch, tmp_path, [], force_terminal=True)
 

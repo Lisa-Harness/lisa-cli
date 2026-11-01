@@ -337,6 +337,9 @@ class PromptTransport:
         self._tool_error_count: int = 0
         self._fork_children: dict[int, dict[str, Any]] = {}
         self._fork_total: int = 0
+        # Tool call hierarchy: stack of (tool_name, tool_kind, parent_index)
+        # for rendering nested tool calls with indentation
+        self._tool_call_stack: list[tuple[str, str, int]] = []
         # Per-model per-token prices (USD) injected by the command path:
         # ``{model_id: (prompt_price, completion_price)}``. Empty = the
         # footer omits the cost estimate (manifest unreadable/unknown model).
@@ -496,6 +499,7 @@ class PromptTransport:
         self._status_reasoning_chars = 0
         self._fork_children = {}
         self._fork_total = 0
+        self._tool_call_stack = []
         self._current_mode = ""
         self._reset_model_status()
         self._active_label = ""
@@ -774,7 +778,10 @@ class PromptTransport:
         if exc is not None:
             body = f"{type(exc).__name__}: {exc}\n\n{message}"
         logger.error("transport error: %s", body)
-        self.console.print(Panel(body, title="Error", border_style=STYLE_BORDER_ERROR))
+        # Escape Rich markup in the error body to avoid MarkupError
+        # when the message contains paths like /home/adam/Code/lisa
+        from rich.markup import escape
+        self.console.print(Panel(escape(body), title="Error", border_style=STYLE_BORDER_ERROR))
 
     # ── Internals ───────────────────────────────────────────────────
 
@@ -861,7 +868,15 @@ class PromptTransport:
         """
         if label == "tool_dispatch":
             self._tool_call_count += 1
-            self._active_label = self._render_tool_dispatch(data).plain
+            # Track tool call hierarchy for nested visualization
+            parent_idx = len(self._tool_call_stack) - 1 if self._tool_call_stack else -1
+            tool_name = str(data.get("tool") or "")
+            tool_kind = str(data.get("tool_kind") or "")
+            self._tool_call_stack.append((tool_name, tool_kind, parent_idx))
+            # Update activity label with hierarchy depth indicator
+            depth = len(self._tool_call_stack) - 1
+            depth_indicator = "  " * depth + "└─ " if depth > 0 else ""
+            self._active_label = f"{depth_indicator}{self._render_tool_dispatch(data).plain}"
             self._last_tool_data = data
             self._last_tool_streaming = bool(data.get("stream_output"))
             self._last_tool_output_lines = 0
@@ -900,6 +915,9 @@ class PromptTransport:
             self._tool_ok_count += 1
         elif status == "error":
             self._tool_error_count += 1
+        # Pop from tool call stack for hierarchy tracking
+        if self._tool_call_stack:
+            self._tool_call_stack.pop()
         # The in-flight tool-output box closes with the row: a succeeded tool
         # discards its window (the ``⎿ N lines`` summary reports the shape),
         # a failed one flushes the tail to scrollback so the operator still
@@ -1341,8 +1359,7 @@ class PromptTransport:
         The thinking meter arms on observed reasoning deltas — not the
         manifest flag (glm-5.3-family bills reasoning without flagging
         the model) — so the figure appears the moment reasoning actually
-        arrives. The stream velocity lives in the stream box title AND
-        the status line when streaming.
+        arrives. The stream velocity lives only in the stream box title.
         """
         if not (self._active_reasoning_model or self._reasoning_seen):
             return
@@ -1350,11 +1367,6 @@ class PromptTransport:
         if not total:
             return
         parts.append(Text(f"thinking {_format_tokens(total)}", style=STYLE_STAGE))
-
-        # Add stream velocity to status line when actively streaming
-        velocity = self._stream_velocity()
-        if velocity > 0:
-            parts.append(Text(f"~{_format_velocity(velocity)}", style=STYLE_ROW_TRANSITION))
 
     def _no_data_age_s(self) -> float:
         """Seconds since the last delta of the in-flight generation, or -1.
@@ -1380,7 +1392,9 @@ class PromptTransport:
         if age < _STALL_AFTER_S:
             return
         style = STYLE_ROW_ERROR if age >= _STALL_ALERT_S else STYLE_ROW_TRANSITION
-        parts.append(Text(f"no data {age:.0f}s", style=style))
+        # Visual stall indicator: pulsing block + age
+        stall_glyph = "▮" if int(age) % 2 == 0 else "▯"
+        parts.append(Text(f"{stall_glyph} stalled {age:.0f}s", style=style))
 
     def _activity_spinner(self) -> str:
         """Pick the spinner for the current phase.
@@ -1679,6 +1693,11 @@ class PromptTransport:
                 out.append(f" {target}", style=STYLE_ROW_TRANSITION)
         else:
             out.append(glyph, style=STYLE_ROW_TOOL)
+            # Add hierarchy indentation for nested tool calls
+            depth = len(self._tool_call_stack) - 1
+            if depth > 0:
+                indent = "  " * depth + "└─ "
+                out.append(indent, style=STYLE_TEXT_MUTED)
             out.append(f" {tool}", style=STYLE_TOOL_NAME)
             arg = self._primary_arg_preview(data)
             if arg:
