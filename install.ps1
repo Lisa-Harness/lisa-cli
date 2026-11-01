@@ -9,6 +9,10 @@
     manifest via `lisa models discover` + `lisa models apply`. After this
     script, `lisa` works from any directory - no checkout, no `uv run`.
 
+    The installer auto-detects execution mode:
+      - Piped (irm ... | iex): defaults to -Source git
+      - File (.\install.ps1): defaults to -Source local with -LisaRepo ..\lisa -CliRepo .
+
     Parameters work when the downloaded file is run directly. For piped
     execution (`irm ... | iex`), use the env-var equivalents (LISA_SOURCE,
     LISA_PROVIDER, ...) or pass arguments through the iex string:
@@ -17,8 +21,9 @@
         iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Provider anthropic"
 
     Until the packages are published on PyPI, the installer resolves them
-    straight from git (default) or from local checkouts of both repos:
+    straight from git (default for piped) or from local checkouts (default for file):
 
+        .\install.ps1                                    # local source (default for file)
         .\install.ps1 -Source local -LisaRepo C:\Code\lisa
 
     -Clean removes what the install owns outside uv's receipts (the packs
@@ -27,15 +32,15 @@
     again. Both then continue with a normal install.
 
 .PARAMETER Source
-    Install source: "git" (default) resolves the packages from GitHub;
-    "local" uses local checkouts (requires -LisaRepo). Also settable via the
-    LISA_SOURCE environment variable.
+    Install source: "git" (default for piped) resolves the packages from GitHub;
+    "local" (default for file) uses local checkouts (requires -LisaRepo).
+    Also settable via the LISA_SOURCE environment variable.
 
 .PARAMETER LisaRepo
-    Local checkout of the framework repo (lisa) for -Source local. Also
-    settable via the LISA_GIT_REPO environment variable. The CLI repo
-    defaults to ..\lisa-cli relative to it (override with
-    LISA_CLI_REPO).
+    Local checkout of the framework repo (lisa) for -Source local.
+    Default (file mode): ..\lisa. Also settable via the LISA_GIT_REPO
+    environment variable. The CLI repo defaults to . relative to it (override
+    with LISA_CLI_REPO).
 
 .PARAMETER Provider
     One or more model providers to enable at install time.
@@ -65,16 +70,16 @@
     .\install.ps1 -Clean -Reset
 
 .EXAMPLE
-    # Git source (default), Ollama only
+    # Piped (irm | iex): git source (default), Ollama only
+    irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
+
+.EXAMPLE
+    # File (.\install.ps1): local source (default), Ollama only
     .\install.ps1
 
 .EXAMPLE
-    # Local checkouts of both repos
+    # Local checkouts of both repos (explicit)
     .\install.ps1 -Source local -LisaRepo C:\Code\lisa
-
-.EXAMPLE
-    # PyPI install (default), Ollama only
-    .\install.ps1
 
 .EXAMPLE
     # Install with Azure OpenAI + Anthropic
@@ -88,24 +93,31 @@
     https://github.com/Lisa-Harness/lisa-cli
 #>
 
+# A null MyCommand.Path means this code is being evaluated in the caller's
+# session (irm | iex) - there is no script file on disk.
+$script:ExecutedFromIex = ($null -eq $MyInvocation.MyCommand.Path)
+
 [CmdletBinding()]
 param(
     [Parameter()]
     [ValidateSet("git", "local")]
     [string]$Source = $(
         if ([Environment]::GetEnvironmentVariable("LISA_SOURCE")) { [Environment]::GetEnvironmentVariable("LISA_SOURCE") }
-        else { "git" }
+        elseif ($script:ExecutedFromIex) { "git" }  # piped: default to git
+        else { "local" }  # file: default to local
     ),
 
     [Parameter()]
     [string]$LisaRepo = $(
         if ([Environment]::GetEnvironmentVariable("LISA_GIT_REPO")) { [Environment]::GetEnvironmentVariable("LISA_GIT_REPO") }
+        elseif (-not $script:ExecutedFromIex -and $Source -eq "local") { "..\lisa" }  # file + local: default to ..\lisa
         else { "" }
     ),
 
     [Parameter()]
     [string]$CliRepo = $(
         if ([Environment]::GetEnvironmentVariable("LISA_CLI_REPO")) { [Environment]::GetEnvironmentVariable("LISA_CLI_REPO") }
+        elseif (-not $script:ExecutedFromIex -and $Source -eq "local") { "." }  # file + local: default to .
         else { "" }
     ),
 

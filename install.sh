@@ -14,9 +14,14 @@
 #   curl -fsSL ... | bash -s -- --clean          # purge then reinstall
 #   curl -fsSL ... | bash -s -- --clean --reset  # purge state too
 #
+# The installer auto-detects execution mode:
+#   - Piped (curl ... | bash): defaults to --source git
+#   - File (./install.sh): defaults to --source local with --lisa-repo ../lisa --cli-repo .
+#
 # Until the packages are published on PyPI, the installer resolves them
-# straight from git (default) or from local checkouts of both repos:
-#   curl -fsSL ... | bash -s --                          # git source (default)
+# straight from git (default for piped) or from local checkouts (default for file):
+#   curl -fsSL ... | bash -s --                          # git source (default for piped)
+#   ./install.sh                                         # local source (default for file)
 #   ./install.sh --source local --lisa-repo /home/me/Code/lisa
 #
 # Requires: git (for git-mode installs) and network access to
@@ -24,14 +29,33 @@
 
 set -euo pipefail
 
+# --- Detect execution mode (piped vs file) -----------------------------------
+# When piped (curl ... | bash): $0 is "bash"/"-bash", BASH_SOURCE may not match $0, stdin is not a tty
+# When file (./install.sh): $0 is the script path, BASH_SOURCE[0] == $0, stdin is a tty
+if [[ "${BASH_SOURCE[0]:-}" != "${0}" ]] || [[ ! -t 0 ]] || [[ "$0" == "bash" ]] || [[ "$0" == "-bash" ]]; then
+    EXECUTED_FROM_PIPE=true
+else
+    EXECUTED_FROM_PIPE=false
+fi
+
 # --- Parameter parsing -------------------------------------------------------
 
 # Install source: "git" (resolve packages from GitHub) or "local" (use local
-# checkouts). Empty => git. Local mode needs --lisa-repo (or LISA_GIT_REPO)
-# for the framework repo; the CLI repo defaults to ../cli next to it.
-SOURCE="${LISA_SOURCE:-git}"
+# checkouts). Default: git when piped, local when run as file.
+# Local mode defaults: lisa-repo=../lisa, cli-repo=.
+if $EXECUTED_FROM_PIPE; then
+    SOURCE="${LISA_SOURCE:-git}"
+else
+    SOURCE="${LISA_SOURCE:-local}"
+fi
 LISA_REPO="${LISA_GIT_REPO:-}"
 CLI_REPO="${LISA_CLI_REPO:-}"
+
+# Set local defaults when running as file (not piped) and no explicit values given
+if ! $EXECUTED_FROM_PIPE && [[ "$SOURCE" == "local" ]]; then
+    [[ -n "$LISA_REPO" ]] || LISA_REPO="../lisa"
+    [[ -n "$CLI_REPO" ]] || CLI_REPO="."
+fi
 
 # Default provider: ollama. Accepts comma-separated list.
 IFS=',' read -ra PROVIDERS <<< "${LISA_PROVIDER:-ollama}"
@@ -60,13 +84,20 @@ Usage: install.sh [OPTIONS]
 Install the Lisa CLI as a uv tool and configure model providers. After this
 script, \`lisa\` works from anywhere — no repo checkout, no \`uv run\`.
 
+The installer auto-detects execution mode:
+  - Piped (curl ... | bash): defaults to --source git
+  - File (./install.sh): defaults to --source local with --lisa-repo ../lisa --cli-repo .
+
 Options:
-  --source MODE           Install source: "git" (default) or "local".
+  --source MODE           Install source: "git" or "local".
+                          Default: git (piped), local (file).
                           Also settable via \$LISA_SOURCE.
   --lisa-repo DIR         Local checkout of the framework repo (lisa) for
-                          --source local. Also settable via \$LISA_GIT_REPO.
+                          --source local. Default (file mode): ../lisa.
+                          Also settable via \$LISA_GIT_REPO.
   --cli-repo DIR          Local checkout of the CLI repo (defaults to
                           DIR/../cli relative to --lisa-repo).
+                          Default (file mode): .
   --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,
                           anthropic,google,openrouter,aws (default: \$LISA_PROVIDER or ollama)
   --no-verify             Do not run lisa verify after install
@@ -80,13 +111,13 @@ Options:
   --help, -h              Show this help
 
 Examples:
-  install.sh                                   # git source (default)
-  install.sh --source git                      # same, explicit
-  install.sh --source local --lisa-repo ~/Code/lisa
-  install.sh --provider ollama,openai
-  install.sh --provider anthropic --no-verify
-  install.sh --clean                           # purge pack state, reinstall
-  install.sh --clean --reset                   # also re-seed models + session
+  curl -fsSL ... | bash -s --                          # git source (default for piped)
+  ./install.sh                                         # local source (default for file)
+  ./install.sh --source local --lisa-repo ~/Code/lisa
+  ./install.sh --provider ollama,openai
+  ./install.sh --provider anthropic --no-verify
+  ./install.sh --clean                           # purge pack state, reinstall
+  ./install.sh --clean --reset                   # also re-seed models + session
 HELP
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;

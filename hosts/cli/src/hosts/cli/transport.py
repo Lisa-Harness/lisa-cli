@@ -1341,7 +1341,8 @@ class PromptTransport:
         The thinking meter arms on observed reasoning deltas — not the
         manifest flag (glm-5.3-family bills reasoning without flagging
         the model) — so the figure appears the moment reasoning actually
-        arrives. The stream velocity lives only in the stream box title.
+        arrives. The stream velocity lives in the stream box title AND
+        the status line when streaming.
         """
         if not (self._active_reasoning_model or self._reasoning_seen):
             return
@@ -1349,6 +1350,11 @@ class PromptTransport:
         if not total:
             return
         parts.append(Text(f"thinking {_format_tokens(total)}", style=STYLE_STAGE))
+
+        # Add stream velocity to status line when actively streaming
+        velocity = self._stream_velocity()
+        if velocity > 0:
+            parts.append(Text(f"~{_format_velocity(velocity)}", style=STYLE_ROW_TRANSITION))
 
     def _no_data_age_s(self) -> float:
         """Seconds since the last delta of the in-flight generation, or -1.
