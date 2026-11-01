@@ -79,9 +79,7 @@ def _invoke_prompt(
     stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(sys, "stdin", stdin_obj)
     with patch.object(cli_main, "console", new=Console(quiet=True)):
-        result: int | None = cli_main.app(
-            args=["prompt", *argv], standalone_mode=False
-        )
+        result: int | None = cli_main.app(args=["prompt", *argv], standalone_mode=False)
     return result
 
 
@@ -137,9 +135,7 @@ def test_policy_without_subcommand_shows_current_policy(
     assert len(captured["actions"]) == 1
 
 
-def test_policy_mode_dispatches_typed_core(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_policy_mode_dispatches_typed_core(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """`lisa policy mode trust` calls set_policy_mode with the typed value."""
     from runtime.policy import PolicyMode
 
@@ -276,18 +272,12 @@ def test_top_level_deny_dispatches_typed_decision_without_turn(
     assert captured["decisions"] == [("abc123def456", False, "")]
 
 
-def test_prompt_prose_is_not_intercepted(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_prompt_prose_is_not_intercepted(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
-    _invoke_prompt(
-        monkeypatch, tmp_path, ["deny the claim in the report"], captured=captured
-    )
+    _invoke_prompt(monkeypatch, tmp_path, ["deny the claim in the report"], captured=captured)
     assert captured["messages"] == ["deny the claim in the report"]
     captured = {}
-    _invoke_prompt(
-        monkeypatch, tmp_path, ["approve my leave request"], captured=captured
-    )
+    _invoke_prompt(monkeypatch, tmp_path, ["approve my leave request"], captured=captured)
     assert captured["messages"] == ["approve my leave request"]
     captured = {}
     _invoke_prompt(monkeypatch, tmp_path, ["approve abc123def456"], captured=captured)
@@ -388,9 +378,7 @@ def test_prearm_approve_and_deny_mutually_exclusive(
     assert _exit_code(result) == 2
 
 
-def test_prearm_remember_requires_approve(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_prearm_remember_requires_approve(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     result = _invoke_prompt(
         monkeypatch,
         tmp_path,

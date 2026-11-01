@@ -56,7 +56,7 @@ def test_render_approval_panel_includes_command_and_hints() -> None:
     assert "run a shell command" in text
     assert "ls -la" in text
     assert "approve" in text and "deny" in text
-    assert 'lisa approve abc123def456' in text
+    assert "lisa approve abc123def456" in text
     assert "execute action requires approval" in text
     assert "expires in 1m 30s" in text
     # Containment badge is shown and styled as contained.
@@ -175,4 +175,3 @@ async def test_start_thinking_disarms_pending_approval() -> None:
     transport.pending_approval = _payload()
     transport.start_thinking()
     assert transport.pending_approval is None
-

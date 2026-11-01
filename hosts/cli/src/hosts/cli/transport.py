@@ -737,7 +737,7 @@ class PromptTransport:
         fails fast on stderr instead of printing a panel the operator can
         never answer.
         """
-        from hosts.cli.render import render_approval_panel  # noqa: PLC0415
+        from hosts.cli.render import render_approval_panel
 
         self.pending_approval = approval
         self.approval_unresolved = True
@@ -781,6 +781,7 @@ class PromptTransport:
         # Escape Rich markup in the error body to avoid MarkupError
         # when the message contains paths like /home/adam/Code/lisa
         from rich.markup import escape
+
         self.console.print(Panel(escape(body), title="Error", border_style=STYLE_BORDER_ERROR))
 
     # ── Internals ───────────────────────────────────────────────────
@@ -1017,7 +1018,7 @@ class PromptTransport:
         if not isinstance(arguments, dict) or not arguments:
             return
         try:
-            import json  # noqa: PLC0415
+            import json
 
             rendered = json.dumps(arguments, indent=2, sort_keys=True, default=str)
         except (TypeError, ValueError):

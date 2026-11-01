@@ -26,9 +26,7 @@ def test_explicit_data_dir_wins_over_profile(monkeypatch: pytest.MonkeyPatch) ->
     assert cli_main._resolve_profiled_data_dir("/tmp/explicit", "survey") == "/tmp/explicit"
 
 
-def test_profile_resolves_to_profiles_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_profile_resolves_to_profiles_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """--profile <name> → <base>/profiles/<name> via runtime.config."""
     from hosts.cli import main as cli_main
 
@@ -144,7 +142,7 @@ def test_intake_command_resolves_profiled_data_dir(
     mod.run_intake = _fake_intake
     monkeypatch.setitem(sys.modules, "runtime.intake", mod)
     with (
-            patch("runtime.config.default_data_dir", return_value=base),
+        patch("runtime.config.default_data_dir", return_value=base),
         patch.object(cli_main, "console", Console(quiet=True)),
     ):
         cli_main._intake_command(

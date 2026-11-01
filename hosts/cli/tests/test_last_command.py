@@ -196,9 +196,7 @@ def test_last_diagnostics_bare_without_turn_header(
     assert "[ turn " not in output
 
 
-def test_last_tty_rule_carries_turn_number(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_last_tty_rule_carries_turn_number(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Interactive replay renders ``Response · turn N`` like the prompt output."""
     from runtime.thread import append_thread_entry
 

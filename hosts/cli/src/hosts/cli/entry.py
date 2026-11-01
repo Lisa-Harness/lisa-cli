@@ -186,7 +186,7 @@ def settings_file_path(data_dir: str | Path, profile: str) -> Path:
     """
     from runtime.config import profile_data_dir  # lazy: import cost
 
-    base = str(data_dir).strip() if str(data_dir).strip() else ""
+    base = str(data_dir).strip() or ""
     if not base and profile.strip():
         base = str(profile_data_dir(profile.strip()))
     if not base:
@@ -289,7 +289,7 @@ def prompt_history_path(data_dir: str | Path, profile: str) -> Path:
     the profile dir; empty hands the decision to the framework's default
     (``LISA_DATA_DIR`` > ``~/.lisa``).
     """
-    base = str(data_dir).strip() if str(data_dir).strip() else ""
+    base = str(data_dir).strip() or ""
     if not base and profile.strip():
         from runtime.config import profile_data_dir  # lazy: import cost
 

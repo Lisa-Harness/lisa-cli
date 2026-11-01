@@ -9,16 +9,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.10.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "types-PyYAML>=6.0",
+    "vulture>=2.11",
+    "import-linter>=2.0",
 ]
-# Forward to the lisa-cli member extra: the CI matrix installs --extra
-# prompt so the TUI prompt tests can exercise real prompt_toolkit bindings.
-prompt = ["lisa-cli[prompt]"]
-markdown = ["lisa-pack-markdown"]
-personas = ["lisa-pack-personas"]
+mutation = [
+    "mutmut>=3,<4 ; sys_platform == 'linux'",
+]
 
 [tool.uv]
 package = false
@@ -39,15 +41,106 @@ lisa-pack-recovery = { path = "../lisa/sdk/packs/recovery", editable = true }
 lisa-pack-markdown = { path = "../lisa-packs/markdown", editable = true }
 lisa-pack-personas = { path = "../lisa-packs/personas", editable = true }
 
+[tool.mutmut]
+source_paths = ["scripts"]
+only_mutate = ["scripts/check_changed_coverage.py"]
+also_copy = ["hosts/cli/tests"]
+pytest_add_cli_args_test_selection = ["hosts/cli/tests/test_changed_coverage.py"]
+pytest_add_cli_args = ["-x", "-q"]
+cache_invalidation_files = ["hosts/cli/tests/test_changed_coverage.py"]
+on_dependency_change = "rerun"
+
+[tool.pytest.ini_options]
+pythonpath = ["hosts/cli/src"]
+testpaths = ["hosts/cli/tests"]
+markers = [
+    "live: hits real external signal or provider APIs and prints a tester-visible summary",
+    "integration: multi-module in-process test; may require local services",
+    "eval: deterministic agent regression evals (no model calls, no I/O)",
+]
+
+[tool.coverage.run]
+# Branch coverage: partial branches (e.g. an `if` whose else never runs) count
+# as uncovered, which catches the ``if not x: return`` guards line coverage hides.
+branch = true
+relative_files = true
+source = ["hosts/cli/src"]
+# Omit test code from measurement entirely so reports and fail_under reflect the
+# shipped source, not the suites exercising it (pytest's pythonpath imports test
+# modules as top-level packages, so omit-by-pattern is required — [paths] alone
+# would still record them).
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/conftest.py",
+    "scripts/*",
+]
+source_pkgs = [
+    "hosts.cli",
+]
+
+[tool.coverage.paths]
+# Map installed-package paths (pytest pythonpath roots) and local src/ layout to
+# one logical tree so a run from any interpreter reports the same files.
+source = [
+    "hosts/cli/src",
+    "*/hosts/cli/src",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Source-only gate (test code omitted in [tool.coverage.run]). Floors are set ~2
+# points under the measured branch-coverage baseline so they catch real regressions
+# without flapping on platform noise; ratchet them up over time.
+fail_under = 85
+exclude_also = [
+    # Test code is not part of the shipped surface; measuring it inflates totals.
+    ".*/tests/.*",
+    ".*/test_[^/]*\\.py$",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["vulture_allowlist.py"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "PL", "C90", "RET", "RUF"]
-ignore = ["PLR0913"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "PL",
+    "C90",
+    "RET",
+    "RUF",
+    "W",
+    "YTT",
+    "C4",
+    "PERF",
+    "PIE",
+    "FURB",
+    "G",
+]
+# PLR0913 (too-many-arguments): the CLI's command signatures intentionally
+# take many parameters — a params-object indirection would hide the
+# protocol contract.
+# PLC0415 (import-outside-top-level): function-local imports are a
+# deliberate codebase pattern — cycle-breaking between co-dependent
+# modules, startup-latency control, and test patch seams. Sites that
+# exist only for cycle reasons carry an inline `noqa: PLC0415` with a
+# rationale comment; the pattern itself is allowed.
+# RUF001/RUF002/RUF003 (ambiguous-unicode): the house style uses
+# typographic characters (×, –, —, box-drawing rules) in docstrings,
+# comments, and user-facing prose deliberately.
+ignore = ["PLR0913", "PLC0415", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
+# Test files use function-local imports (lazy dep loading) and literal
+# values in assertions — both are intentional and noisy under PLC0415/PLR2004.
 "**/tests/**" = ["PLC0415", "PLR2004"]
 # Startup ordering and lazy imports keep CLI help fast; Typer owns command signatures.
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
@@ -59,5 +152,99 @@ ignore = ["PLR0913"]
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
+[tool.ruff.lint.pylint]
+max-returns = 6
+max-branches = 12
+max-statements = 50
+max-locals = 15
+
 [tool.ruff.format]
 line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+files = [
+    "hosts/cli/src/hosts/cli",
+]
+mypy_path = [
+    "$MYPY_CONFIG_FILE_DIR/typings",
+    "$MYPY_CONFIG_FILE_DIR/hosts/cli/src",
+]
+explicit_package_bases = true
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+exclude = ["vulture_allowlist.py", '(^|/)(tests|test_[^/]*\.py$)']
+
+[tool.vulture]
+paths = [
+    "hosts/cli/src/hosts/cli",
+    "vulture_allowlist.py",
+]
+min_confidence = 80
+exclude = [
+    "**/tests/",
+    "**/test_*.py",
+    "**/conftest.py",
+    "**/*egg-info*/",
+    "**/__pycache__/",
+    ".venv/",
+]
+ignore_names = [
+    "main",
+    "*SignalCollector",
+    "*Collector",
+    "*ProcessingLoop",
+    "*Detector",
+    "*Registry",
+    "*Store",
+    "*Broker",
+    "*Catalog",
+    "*Spec",
+    "*Config",
+    "*Policy",
+    "*Manifest",
+    "*Error",
+    "*Exception",
+    "*Context",
+    "*Fragments",
+    "*Sections",
+    "*Evidence",
+    "*Summary",
+    "*Anomalies",
+]
+ignore_decorators = [
+    "@property",
+]
+
+# ---------------------------------------------------------------------------
+# import-linter — enforces the architectural boundaries.
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_packages = [
+    "hosts.cli",
+]
+
+# The CLI defines contracts; integrations depend on it, never the reverse.
+[[tool.importlinter.contracts]]
+name = "CLI imports no integration packages"
+type = "forbidden"
+source_modules = ["hosts.cli"]
+forbidden_modules = [
+    "lisa_harness_runtime",
+    "lisa_harness_sdk",
+    "lisa_harness_mcp_servers",
+]
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.15",
+    "mypy>=2.4.1",
+    "pytest-cov>=7.1.0",
+    "vulture>=2.16",
+]

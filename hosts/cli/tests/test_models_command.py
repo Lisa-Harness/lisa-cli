@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from runtime.runtime import HostRuntime
 from rich.console import Console
+from runtime.runtime import HostRuntime
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ def _invoke_models(
                     thread_dir="",
                     no_thread=False,
                     session_context="",
-                            timezone="",
+                    timezone="",
                     state_snapshot="",
                     streaming="none",
                     host_log="",
@@ -98,7 +98,7 @@ def _invoke_models(
                 thread_dir="",
                 no_thread=False,
                 session_context="",
-                    timezone="",
+                timezone="",
                 state_snapshot="",
                 streaming="none",
                 host_log="",

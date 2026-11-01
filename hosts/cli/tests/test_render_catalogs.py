@@ -16,12 +16,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from runtime.runtime import HostRuntime
-from hosts.cli import render as render_mod
 from kernel.models import OperationDefinition, ToolDefinition
 from kernel.operations import registry as operations_registry
 from kernel.tools import registry as tools_registry
 from rich.console import Console
+from runtime.runtime import HostRuntime
+
+from hosts.cli import render as render_mod
 
 # ── Helpers ───────────────────────────────────────────────────────────
 

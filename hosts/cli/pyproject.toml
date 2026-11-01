@@ -54,22 +54,124 @@ markers = [
     "eval: deterministic agent regression evals (no model calls, no I/O)",
 ]
 
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/conftest.py",
+]
+source_pkgs = ["hosts.cli"]
+
+[tool.coverage.paths]
+source = [
+    "src",
+    "*/src",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+exclude_also = [
+    ".*/tests/.*",
+    ".*/test_[^/]*\\.py$",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["vulture_allowlist.py"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "PL", "C90", "RET", "RUF"]
-ignore = ["PLR0913"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "PL",
+    "C90",
+    "RET",
+    "RUF",
+    "W",
+    "YTT",
+    "C4",
+    "PERF",
+    "PIE",
+    "FURB",
+    "G",
+]
+ignore = ["PLR0913", "PLC0415", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["PLC0415", "PLR2004"]
-# Startup ordering and lazy imports keep CLI help fast; Typer owns command signatures.
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
 "**/hosts/cli/render.py" = ["PLC0415"]
-# Interactive entry is imported only on the no-args path; the PT prompt
-# glyph is intentional (matches the transport's palette).
 "**/hosts/cli/entry.py" = ["PLC0415", "RUF001"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-returns = 6
+max-branches = 12
+max-statements = 50
+max-locals = 15
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/hosts/cli"]
+mypy_path = ["$MYPY_CONFIG_FILE_DIR/src"]
+explicit_package_bases = true
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+exclude = ["vulture_allowlist.py", '(^|/)(tests|test_[^/]*\.py$)']
+
+[tool.vulture]
+paths = ["src/hosts/cli", "vulture_allowlist.py"]
+min_confidence = 80
+exclude = [
+    "**/tests/",
+    "**/test_*.py",
+    "**/conftest.py",
+    "**/*egg-info*/",
+    "**/__pycache__/",
+    ".venv/",
+]
+ignore_names = [
+    "main",
+    "*SignalCollector",
+    "*Collector",
+    "*ProcessingLoop",
+    "*Detector",
+    "*Registry",
+    "*Store",
+    "*Broker",
+    "*Catalog",
+    "*Spec",
+    "*Config",
+    "*Policy",
+    "*Manifest",
+    "*Error",
+    "*Exception",
+    "*Context",
+    "*Fragments",
+    "*Sections",
+    "*Evidence",
+    "*Summary",
+    "*Anomalies",
+]
+ignore_decorators = ["@property"]

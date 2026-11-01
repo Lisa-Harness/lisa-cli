@@ -301,7 +301,7 @@ def _make_pack_command(name: str) -> Any:
             bare_prefix = prefix.lstrip("/")
             if bare_prefix and tokens[0].startswith(bare_prefix) and len(bare_prefix) > len(best):
                 best = bare_prefix
-        command = "/" + (best if best else name)
+        command = "/" + (best or name)
         for token in args:
             command += " " + token
         _run_host_command(

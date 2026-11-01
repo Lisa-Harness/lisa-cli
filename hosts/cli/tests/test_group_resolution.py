@@ -80,9 +80,7 @@ def test_known_subcommand_never_routed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
-def test_falsy_env_values_disable_routing(
-    val: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_falsy_env_values_disable_routing(val: str, monkeypatch: pytest.MonkeyPatch) -> None:
     if val:
         monkeypatch.setenv(cli_main._PROMPT_UNKNOWN_ENV, val)
     result = runner.invoke(cli_main.app, ["continue"])

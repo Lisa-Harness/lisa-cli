@@ -112,6 +112,7 @@ Two situations it deliberately hands back to you:
 
 - From a repo checkout there is no tool to upgrade; it prints
   `git pull && uv sync` instead.
+
 - On Windows the running `lisa.exe` cannot be replaced in place, so it
   prints the uv command for you to run after exiting.
 
@@ -252,11 +253,14 @@ customize it, use these overrides. Precedence per fragment:
 
 1. `LISA_PROMPT_PS1` — verbatim whole-line replace; empty value
    suppresses hints entirely (highest precedence, env).
+
 2. Per-fragment env backstops: `LISA_PROMPT_HINT_SEND`, `_NEWLINE`,
    `_ABORT`, `_BANNER` (empty value suppresses that fragment).
+
 3. `<data-dir>/config/prompt_hints.yaml` — optional, hand-created file
    with `send`, `newline`, `abort`, or `banner` keys (installers do not
    create it).
+
 4. Built-in facts per key layout (what actually sends/adds a line).
 
 The settings cannot contradict behavior: the layout facts (Enter sends
@@ -366,7 +370,7 @@ A proxy in the path — compression, cache steering, anything that rewrites a
 request — can report what it saved, and the footer shows the turn's total as
 a trailing `saved N` segment:
 
-```
+```text
 ⚡ 12s · turn 41 · 9 tools · 3 models · 160.35k tok · billed 3.35k · ~$0.0056 · saved 70k
 ```
 

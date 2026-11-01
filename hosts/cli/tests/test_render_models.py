@@ -11,9 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.console import Console
+from runtime.testing import build_test_runtime
 
 from hosts.cli.render import render_models
-from runtime.testing import build_test_runtime
 
 
 def test_render_models_shows_context_cost_capabilities(tmp_path: Path) -> None:
