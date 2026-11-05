@@ -98,20 +98,21 @@ param(
     [ValidateSet("git", "local")]
     [string]$Source = $(
         if ([Environment]::GetEnvironmentVariable("LISA_SOURCE")) { [Environment]::GetEnvironmentVariable("LISA_SOURCE") }
-        else { "git" }
+        elseif ($script:ExecutedFromIex) { "git" }  # piped: default to git
+        else { "local" }  # file: default to local
     ),
 
     [Parameter()]
     [string]$LisaRepo = $(
         if ([Environment]::GetEnvironmentVariable("LISA_GIT_REPO")) { [Environment]::GetEnvironmentVariable("LISA_GIT_REPO") }
-        elseif ($Source -eq "local") { "..\lisa" }  # file + local: default to ..\lisa
+        elseif (-not $script:ExecutedFromIex -and $Source -eq "local") { "..\lisa" }  # file + local: default to ..\lisa
         else { "" }
     ),
 
     [Parameter()]
     [string]$CliRepo = $(
         if ([Environment]::GetEnvironmentVariable("LISA_CLI_REPO")) { [Environment]::GetEnvironmentVariable("LISA_CLI_REPO") }
-        elseif ($Source -eq "local") { "." }  # file + local: default to .
+        elseif (-not $script:ExecutedFromIex -and $Source -eq "local") { "." }  # file + local: default to .
         else { "" }
     ),
 
@@ -137,6 +138,10 @@ param(
 $null = $Source, $LisaRepo, $CliRepo, $Provider, $SkipDiagnostics, $Clean, $Reset
 
 # -- Script state ------------------------------------------------------------
+
+# A null MyCommand.Path means this code is being evaluated in the caller's
+# session (irm | iex) - there is no script file on disk.
+$script:ExecutedFromIex = ($null -eq $MyInvocation.MyCommand.Path)
 
 function Write-Step {
     <#
@@ -180,9 +185,11 @@ function Test-InstallEnvironment {
         # Windows PowerShell 5.1 only: a locally-run .ps1 must pass execution
         # policy. Under irm | iex no file executes, so skip the gate (Scoop's
         # contract). TLS availability is checked unconditionally below.
+        if (-not $script:ExecutedFromIex) {
         $policy = Get-ExecutionPolicy
         if ($policy -notin @("Unrestricted", "RemoteSigned", "Bypass")) {
             throw "Execution policy '$policy' blocks local scripts. Run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"
+            }
         }
     }
 
