@@ -1,9 +1,10 @@
 """Tests for the CLI ``--profile`` option and ``_resolve_profiled_data_dir``.
 
 ``--profile <name>`` (and ``LISA_PROFILE``) resolve the data dir to
-``~/.lisa/profiles/<name>`` before the runtime is built, sharing the base
-packs venv. ``--data-dir`` still wins. The tests stub the runtime builder
-so no HostRuntime is actually constructed.
+``<profiles-root>/<name>`` before the runtime is built, sharing the base
+packs venv. The profiles root defaults to ``<data-dir>/profiles`` and is
+relocatable with ``LISA_PROFILES_DIR``. ``--data-dir`` still wins. The
+tests stub the runtime builder so no HostRuntime is actually constructed.
 """
 
 from __future__ import annotations
@@ -32,10 +33,25 @@ def test_profile_resolves_to_profiles_root(monkeypatch: pytest.MonkeyPatch, tmp_
 
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.delenv("LISA_PROFILE", raising=False)
+    monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
     base = tmp_path / ".lisa"
     with patch("runtime.config.default_data_dir", return_value=base):
         got = cli_main._resolve_profiled_data_dir("", "taxes")
     assert Path(got) == (base / "profiles" / "taxes").resolve()
+
+
+def test_profile_resolves_under_relocated_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """LISA_PROFILES_DIR moves the root: --profile → <root>/<name>."""
+    from hosts.cli import main as cli_main
+
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.delenv("LISA_PROFILE", raising=False)
+    root = tmp_path / "Lisa.Profiles"
+    monkeypatch.setenv("LISA_PROFILES_DIR", str(root))
+    got = cli_main._resolve_profiled_data_dir("", "taxes")
+    assert Path(got) == (root / "taxes").resolve()
 
 
 def test_no_args_no_profile_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,6 +154,7 @@ def test_intake_command_resolves_profiled_data_dir(
 
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.delenv("LISA_PROFILE", raising=False)
+    monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
     mod = types.ModuleType("runtime.intake")
     mod.run_intake = _fake_intake
     monkeypatch.setitem(sys.modules, "runtime.intake", mod)

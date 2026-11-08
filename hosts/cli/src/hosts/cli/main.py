@@ -489,8 +489,9 @@ ProfileOption = Annotated[
     typer.Option(
         "--profile",
         help=(
-            "Named data-dir profile: resolves to ~/.lisa/profiles/<name> "
-            "(overrides LISA_PROFILE; --data-dir still wins). Shares the "
+            "Named data-dir profile: resolves to <profiles-root>/<name> "
+            "(default ~/.lisa/profiles; relocatable via LISA_PROFILES_DIR). "
+            "Overrides LISA_PROFILE; --data-dir still wins. Shares the "
             "base packs venv, isolates threads/memory/models/policy."
         ),
     ),
@@ -711,7 +712,7 @@ def _initialize_runtime(
     wiring -> MCP config compilation) lives in the shared bootstrap so
     the CLI and web hosts cannot drift.
 
-    ``profile`` resolves to ``~/.lisa/profiles/<name>`` here (CLI arg >
+    ``profile`` resolves to ``<profiles-root>/<name>`` here (CLI arg >
     ``LISA_PROFILE``; an explicit ``data_dir`` still wins) because
     ``--data-dir`` and ``--profile`` are both CLI-level data-dir inputs —
     the framework's ``HostConfig.from_env`` only knows the env var.

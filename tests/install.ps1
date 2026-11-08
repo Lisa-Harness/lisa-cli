@@ -116,10 +116,21 @@ try {
         (Get-PacksVenvPath) -eq (Join-Path $dataDir "venv")
     ) "Profile must share the base packs venv"
 
+    # A profile under a relocated profiles root (LISA_PROFILES_DIR) still
+    # shares the base data dir's packs venv.
+    $relocatedRoot = Join-Path (Join-Path $sandbox "OneDrive") "Lisa.Profiles"
+    $script:LisaHome = Join-Path $relocatedRoot "work"
+    [Environment]::SetEnvironmentVariable("LISA_PROFILES_DIR", $relocatedRoot)
+    Assert-True (
+        (Get-PacksVenvPath) -eq (Join-Path $dataDir "venv")
+    ) "Relocated profile must share the base packs venv"
+    [Environment]::SetEnvironmentVariable("LISA_PROFILES_DIR", $null)
+
     Write-Output "PowerShell clean/reset tests passed"
 }
 finally {
     [Environment]::SetEnvironmentVariable("LISA_DATA_DIR", $savedDataDir)
     [Environment]::SetEnvironmentVariable("LISA_PACKS_VENV", $savedPacksVenv)
+    [Environment]::SetEnvironmentVariable("LISA_PROFILES_DIR", $null)
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 }

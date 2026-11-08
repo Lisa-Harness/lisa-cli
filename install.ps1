@@ -374,8 +374,9 @@ function Get-PacksVenvPath {
     .SYNOPSIS
         Resolve the packs venv the way runtime.paths.packs_venv_for does:
         LISA_PACKS_VENV wins, then <data dir>\venv - except for a profile dir
-        (<base>\profiles\<name>), which resolves to the base data dir's venv
-        because packs are shared across profiles.
+        (<root>\<name>), which resolves to the base data dir's venv because
+        packs are shared across profiles. A relocated profiles root
+        (LISA_PROFILES_DIR) still shares the base data dir's venv.
     #>
     param()
     Set-StrictMode -Version Latest
@@ -391,7 +392,24 @@ function Get-PacksVenvPath {
 
     $base = $script:LisaHome.TrimEnd("\", "/")
     $parent = Split-Path $base -Parent
-    if ((Split-Path $parent -Leaf) -eq "profiles") {
+    $profilesRoot = [Environment]::GetEnvironmentVariable("LISA_PROFILES_DIR")
+    if (-not [string]::IsNullOrWhiteSpace($profilesRoot)) {
+        # Match os.path.expanduser: a leading ~ means $HOME.
+        if ($profilesRoot -eq "~" -or $profilesRoot.StartsWith("~\") -or $profilesRoot.StartsWith("~/")) {
+            $profilesRoot = Join-Path $HOME $profilesRoot.TrimStart("~", "\", "/")
+        }
+        $profilesRoot = $profilesRoot.TrimEnd("\", "/")
+        if ($parent -eq $profilesRoot) {
+            # The profile lives in a relocated root, so the shared venv
+            # stays in the base data dir.
+            $dataDir = [Environment]::GetEnvironmentVariable("LISA_DATA_DIR")
+            if ([string]::IsNullOrWhiteSpace($dataDir)) {
+                $dataDir = Join-Path $HOME ".lisa"
+            }
+            $base = $dataDir.TrimEnd("\", "/")
+        }
+    }
+    elseif ((Split-Path $parent -Leaf) -eq "profiles") {
         $base = Split-Path $parent -Parent
     }
     return (Join-Path $base "venv")

@@ -600,6 +600,32 @@ profile carries.
 (The profile name must be a single path-safe segment — letters, digits,
 `-`, `_`, `.`.)
 
+#### Relocating the profiles root (`LISA_PROFILES_DIR`)
+
+The profiles root defaults to `<data-dir>/profiles`. Point
+`LISA_PROFILES_DIR` at another folder to keep profiles somewhere else —
+for example on OneDrive — while keeping the same `<root>/<name>` layout:
+
+```bash
+# POSIX
+export LISA_PROFILES_DIR="$HOME/OneDrive/Lisa.Profiles"
+
+# Windows (PowerShell)
+$env:LISA_PROFILES_DIR = Join-Path $HOME "OneDrive\Lisa.Profiles"
+```
+
+```text
+~/OneDrive/Lisa.Profiles/        # relocated profiles root
+└── ansible/                     # LISA_PROFILE=ansible
+    ├── config/  state/  data/  cache/  logs/  run/
+    └── (no venv/ — still resolves to the base data dir's venv)
+```
+
+A relocated root does **not** move the packs venv: profiles keep sharing
+`~/.lisa/venv` (or `LISA_DATA_DIR`'s venv), so a synced folder never holds
+machine-local environment state. The base data dir is unchanged — only the
+profile directories move.
+
 ### Data directory layout
 
 The data dir (base or profile) groups everything into lifecycle
@@ -620,7 +646,7 @@ categories; the names live in one place (`sdk.layout`):
 ├── logs/      host.jsonl · token-usage.jsonl · mcp/<server_id>.jsonl
 │              · pack logs (e.g. bash-<session>.log, bwrap-<session>.log)
 ├── run/       per-session execution state, keyed by session hash (rm-safe):
-│              <key>/ jobs/ · scratch/ · profile/ · sandbox-facts.json ·
+│              <key>/ jobs/ · scratch/ · shell/ · sandbox-facts.json ·
 │              per-session logs (e.g. bash-<key>.log)
 ├── venv/      packs venv (shared with profiles) — a second install, refreshed
 │              by `lisa pack update --all` rather than by `lisa update`

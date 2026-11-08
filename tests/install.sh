@@ -118,4 +118,11 @@ unset LISA_PACKS_VENV
 [[ "$(LISA_HOME="$LISA_HOME/profiles/work" packs_venv_path)" == "$LISA_HOME/venv" ]] ||
     error_exit "Profile must share the base packs venv"
 
+# A profile under a relocated profiles root (LISA_PROFILES_DIR) still shares
+# the base data dir's packs venv, not a venv beside the relocated root.
+base_home="$LISA_HOME"
+relocated_root="$sandbox/OneDrive/Lisa.Profiles"
+[[ "$(LISA_HOME="$relocated_root/work" LISA_DATA_DIR="$base_home" LISA_PROFILES_DIR="$relocated_root" packs_venv_path)" == "$base_home/venv" ]] ||
+    error_exit "Relocated profile must share the base packs venv"
+
 printf 'Bash installer tests passed\n'

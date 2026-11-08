@@ -251,14 +251,22 @@ install_lisa() {
 
 packs_venv_path() {
     # Mirrors runtime.paths.packs_venv_for: an explicit LISA_PACKS_VENV wins,
-    # then <data dir>/venv — except for a profile dir (<base>/profiles/<name>),
+    # then <data dir>/venv — except for a profile dir (<root>/<name>),
     # which resolves to the base data dir's venv because packs are shared.
+    # A relocated profiles root (LISA_PROFILES_DIR) still shares the base
+    # data dir's venv, so the check is against that root.
     local base="${LISA_HOME%/}"
     if [[ -n "${LISA_PACKS_VENV:-}" ]]; then
         printf '%s\n' "${LISA_PACKS_VENV/#\~/$HOME}"
         return 0
     fi
-    if [[ "$(basename "$(dirname "$base")")" == "profiles" ]]; then
+    local profiles_root="${LISA_PROFILES_DIR:-}"
+    if [[ -n "$profiles_root" ]]; then
+        profiles_root="${profiles_root/#\~/$HOME}"
+        if [[ "$(dirname "$base")" == "${profiles_root%/}" ]]; then
+            base="${LISA_DATA_DIR:-$HOME/.lisa}"
+        fi
+    elif [[ "$(basename "$(dirname "$base")")" == "profiles" ]]; then
         base="$(dirname "$(dirname "$base")")"
     fi
     printf '%s\n' "$base/venv"
