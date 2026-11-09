@@ -423,8 +423,10 @@ def _containment_badge(containment: str) -> tuple[str, str]:
     return "✗ NOT SANDBOXED", STYLE_CONTAINMENT_NONE
 
 
-def _format_approval_expiry(seconds: object) -> str:
+def _format_approval_expiry(seconds: int | float | str | None) -> str:
     """Format a host-supplied approval TTL for compact panel display."""
+    if seconds is None:
+        return ""
     try:
         remaining = max(0, int(seconds))
     except (TypeError, ValueError):
@@ -466,7 +468,10 @@ def render_approval_panel(
     reasons = str(payload.get("containment_reasons") or "").strip()
     policy_reason = str(payload.get("policy_reason") or "").strip()
     policy_tier = str(payload.get("policy_tier") or "").strip()
-    expiry = _format_approval_expiry(payload.get("expires_in_seconds"))
+    raw_expiry = payload.get("expires_in_seconds")
+    expiry = _format_approval_expiry(
+        raw_expiry if isinstance(raw_expiry, (int, float, str)) else None
+    )
 
     body = Text()
     if _looks_like_diff(preview or ""):

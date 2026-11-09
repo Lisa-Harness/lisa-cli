@@ -143,13 +143,19 @@ class _IOLocator(ast.NodeVisitor):
         func = node.func
         if not isinstance(func, ast.Name) or func.id != "open":
             return
-        if not node.args:
-            return
-        mode_arg = node.args[0]
+        # The mode is the second positional argument or the ``mode`` keyword;
+        # the checker classifies reads/writes by the mode's first character.
+        mode_arg: ast.expr | None = None
+        if len(node.args) > 1:
+            mode_arg = node.args[1]
+        for keyword in node.keywords:
+            if keyword.arg == "mode":
+                mode_arg = keyword.value
+                break
         if not isinstance(mode_arg, ast.Constant) or not isinstance(mode_arg.value, str):
             return
         mode = mode_arg.value
-        if mode[0:1] in _WRITE_OPEN_MODES:
+        if mode[:1] in _WRITE_OPEN_MODES:
             self.violations.append((node.lineno, ast.unparse(node)))
 
     def visit_Call(self, node: ast.Call) -> None:

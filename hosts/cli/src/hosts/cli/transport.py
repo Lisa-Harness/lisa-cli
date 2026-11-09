@@ -1679,30 +1679,9 @@ class PromptTransport:
 
         out = Text()
         if kind == "transition":
-            target = ""
-            if data.get("handoff_to"):
-                target = f"→ {data['handoff_to']}"
-            elif data.get("transition") == "fork":
-                n = data.get("fork_children") or 0
-                target = f"fork ({n} children)"
-            elif data.get("transitioned_to"):
-                target = f"→ {data['transitioned_to']}"
-            out.append("stage: tool_dispatch ", style=STYLE_TEXT_MUTED)
-            out.append(glyph, style=STYLE_ROW_TRANSITION)
-            out.append(f" {tool}", style=STYLE_TOOL_NAME)
-            if target:
-                out.append(f" {target}", style=STYLE_ROW_TRANSITION)
+            self._render_transition_dispatch(out, data, glyph=glyph, tool=tool, complete=complete)
         else:
-            out.append(glyph, style=STYLE_ROW_TOOL)
-            # Add hierarchy indentation for nested tool calls
-            depth = len(self._tool_call_stack) - 1
-            if depth > 0:
-                indent = "  " * depth + "└─ "
-                out.append(indent, style=STYLE_TEXT_MUTED)
-            out.append(f" {tool}", style=STYLE_TOOL_NAME)
-            arg = self._primary_arg_preview(data)
-            if arg:
-                out.append(f" {arg}", style=STYLE_ARG_PREVIEW)
+            self._render_plain_dispatch(out, data, glyph=glyph, tool=tool)
 
         if status_glyph:
             status_style = STYLE_ROW_ERROR if status_glyph == "✗" else STYLE_ROW_SUCCESS
@@ -1715,6 +1694,52 @@ class PromptTransport:
                 out.append(" ", style=STYLE_TEXT_MUTED)
                 out.append(summary, style=STYLE_TEXT_MUTED)
         return out
+
+    def _render_transition_dispatch(
+        self,
+        out: Text,
+        data: dict[str, Any],
+        *,
+        glyph: str,
+        tool: str,
+        complete: dict[str, Any] | None = None,
+    ) -> None:
+        """Render the transition-stage dispatch line (handoff/fork marker).
+
+        The transition target rides the *completion* event (the kernel
+        knows where it routed only when the transition landed), so read
+        it from ``complete`` falling back to the dispatch payload — the
+        same pattern the duration read uses.
+        """
+        data = {**data, **(complete or {})}
+        target = ""
+        if data.get("handoff_to"):
+            target = f"→ {data['handoff_to']}"
+        elif data.get("transition") == "fork":
+            n = data.get("fork_children") or 0
+            target = f"fork ({n} children)"
+        elif data.get("transitioned_to"):
+            target = f"→ {data['transitioned_to']}"
+        out.append("stage: tool_dispatch ", style=STYLE_TEXT_MUTED)
+        out.append(glyph, style=STYLE_ROW_TRANSITION)
+        out.append(f" {tool}", style=STYLE_TOOL_NAME)
+        if target:
+            out.append(f" {target}", style=STYLE_ROW_TRANSITION)
+
+    def _render_plain_dispatch(
+        self, out: Text, data: dict[str, Any], *, glyph: str, tool: str
+    ) -> None:
+        """Render the plain dispatch line with tool-hierarchy indentation."""
+        out.append(glyph, style=STYLE_ROW_TOOL)
+        # Add hierarchy indentation for nested tool calls
+        depth = len(self._tool_call_stack) - 1
+        if depth > 0:
+            indent = "  " * depth + "└─ "
+            out.append(indent, style=STYLE_TEXT_MUTED)
+        out.append(f" {tool}", style=STYLE_TOOL_NAME)
+        arg = self._primary_arg_preview(data)
+        if arg:
+            out.append(f" {arg}", style=STYLE_ARG_PREVIEW)
 
     def _append_aligned_status(self, row: Text, tail: str, style: str, *, suffix: str = "") -> None:
         """Append ``tail`` right-aligned in a fixed status column (tty only).

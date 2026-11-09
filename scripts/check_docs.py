@@ -251,27 +251,8 @@ def _resolve_link(link: str, current_file: Path, repo_root: Path) -> tuple[Path 
     return target, anchor
 
 
-def _check_file(
-    rel_path: str, repo_root: Path, all_docs: dict[str, dict[str, int]]
-) -> list[Finding]:
-    """Check a single documentation file."""
-    findings: list[Finding] = []
-    path = repo_root / rel_path
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        findings.append(Finding(rel_path, 0, "read-error", f"cannot read file: {exc}"))
-        return findings
-
-    lines = content.splitlines(keepends=True)
-
-    # 1. Final newline
-    if not content.endswith("\n"):
-        findings.append(Finding(rel_path, len(lines), "final-newline", "missing final newline"))
-    elif content.endswith("\n\n"):
-        findings.append(Finding(rel_path, len(lines), "final-newline", "trailing blank lines"))
-
-    # 2. Trailing whitespace / tabs
+def _check_whitespace(rel_path: str, findings: list[Finding], lines: list[str]) -> None:
+    """Check trailing whitespace and tab indentation on each line."""
     for index, line in enumerate(lines):
         if line.rstrip("\n") != line.rstrip():
             findings.append(
@@ -280,7 +261,9 @@ def _check_file(
         if "\t" in line:
             findings.append(Finding(rel_path, index + 1, "tab-indentation", "tab indentation"))
 
-    # 3. Code fences
+
+def _check_fences(rel_path: str, findings: list[Finding], lines: list[str]) -> None:
+    """Check that fenced code blocks open with a language and are closed."""
     open_at: int | None = None
     open_marker = ""
     for index, line in enumerate(lines):
@@ -300,27 +283,50 @@ def _check_file(
     if open_at is not None:
         findings.append(Finding(rel_path, open_at + 1, "fence-unclosed", "unclosed fenced block"))
 
-    # 4. Heading / list spacing (on code-stripped lines)
-    stripped = _strip_code(lines)
-    for index, line in enumerate(stripped):
+
+def _check_heading_spacing(rel_path: str, findings: list[Finding], lines: list[str]) -> None:
+    """Check that headings and lists have a blank line above them."""
+    previous = ""  # The previous non-blank line, or "" at the start of the file.
+    separated = True  # Whether a blank line follows ``previous``.
+    for index, line in enumerate(lines):
+        if not line.strip():
+            separated = True
+            continue
         if _HEADING_RE.match(line):
-            if index > 0 and stripped[index - 1].strip():
+            if not separated:
                 findings.append(
                     Finding(
                         rel_path, index + 1, "heading-spacing", "heading needs blank line above"
                     )
                 )
-        elif _LIST_RE.match(line) and (
-            index > 0 and stripped[index - 1].strip() and not _LIST_RE.match(stripped[index - 1])
-        ):
-            findings.append(
-                Finding(rel_path, index + 1, "list-spacing", "list needs blank line above")
+        elif _LIST_RE.match(line) and not separated:
+            # A list item directly after prose needs a blank line — but an
+            # indented continuation line is not prose: it wraps the previous
+            # item, so the next item following it is fine.
+            follows_prose = (
+                _LIST_RE.match(previous) is None
+                and _HEADING_RE.match(previous) is None
+                and previous[:1] not in (" ", "\t")
             )
+            if follows_prose:
+                findings.append(
+                    Finding(rel_path, index + 1, "list-spacing", "list needs blank line above")
+                )
+        previous = line
+        separated = False
 
-    # 5. Links
-    for index, line in enumerate(stripped):
+
+def _check_links(
+    rel_path: str,
+    findings: list[Finding],
+    lines: list[str],
+    repo_root: Path,
+    all_docs: dict[str, dict[str, int]],
+) -> None:
+    """Check relative links resolve to real files and anchors exist."""
+    for index, line in enumerate(lines):
         for match in _LINK_RE.finditer(line):
-            target, anchor = _resolve_link(match.group(1), path, repo_root)
+            target, anchor = _resolve_link(match.group(1), repo_root / rel_path, repo_root)
             if target is None:
                 continue
             if not target.is_file():
@@ -343,6 +349,35 @@ def _check_file(
                         f"anchor not found in target: #{anchor}",
                     )
                 )
+
+
+def _check_file(
+    rel_path: str, repo_root: Path, all_docs: dict[str, dict[str, int]]
+) -> list[Finding]:
+    """Check a single documentation file."""
+    findings: list[Finding] = []
+    path = repo_root / rel_path
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        findings.append(Finding(rel_path, 0, "read-error", f"cannot read file: {exc}"))
+        return findings
+
+    lines = content.splitlines(keepends=True)
+
+    # 1. Final newline
+    if not content.endswith("\n"):
+        findings.append(Finding(rel_path, len(lines), "final-newline", "missing final newline"))
+    elif content.endswith("\n\n"):
+        findings.append(Finding(rel_path, len(lines), "final-newline", "trailing blank lines"))
+
+    _check_whitespace(rel_path, findings, lines)
+    _check_fences(rel_path, findings, lines)
+
+    # 4./5. Heading/list spacing and links (on code-stripped lines)
+    stripped = _strip_code(lines)
+    _check_heading_spacing(rel_path, findings, stripped)
+    _check_links(rel_path, findings, stripped, repo_root, all_docs)
 
     return findings
 

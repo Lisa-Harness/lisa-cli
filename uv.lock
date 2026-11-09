@@ -1330,6 +1330,9 @@ dev = [
 mutation = [
     { name = "mutmut", marker = "sys_platform == 'linux'" },
 ]
+prompt = [
+    { name = "lisa-cli", extra = ["prompt"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1343,6 +1346,7 @@ dev = [
 requires-dist = [
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "lisa-cli", editable = "hosts/cli" },
+    { name = "lisa-cli", extras = ["prompt"], marker = "extra == 'prompt'", editable = "hosts/cli" },
     { name = "mutmut", marker = "sys_platform == 'linux' and extra == 'mutation'", specifier = ">=3,<4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -1352,7 +1356,7 @@ requires-dist = [
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.11" },
 ]
-provides-extras = ["dev", "mutation"]
+provides-extras = ["dev", "mutation", "prompt"]
 
 [package.metadata.requires-dev]
 dev = [

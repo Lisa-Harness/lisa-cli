@@ -19,7 +19,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple, cast
 
 import typer
 from kernel.models import McpServerHealth
@@ -187,7 +187,7 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # by ``_cli_callback``) recorded here for the prompt command to OR in when
 # lazy routing lands there (``lisa -r "fix it"``). One CLI process runs the
 # group callback at most once, before any command body.
-_GROUP_HOIST: dict[str, bool] = {}
+_GROUP_HOIST: dict[str, bool | None] = {}
 
 # Env var enabling lazy routing: an unrecognized first positional is
 # resolved by the custom group (``_LisaGroup.resolve_command``) to the
@@ -778,7 +778,11 @@ def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Err
 # ---------------------------------------------------------------------------
 
 
-@app.callback()
+# invoke_without_command lets the eager --version flag short-circuit on a bare
+# `lisa --version` (Click otherwise raises "Missing command" before the
+# callback runs). With no subcommand and no --version the callback mirrors the
+# group's no-args help + exit 2.
+@app.callback(invoke_without_command=True)
 def _cli_callback(
     ctx: typer.Context,
     version: bool = _VERSION_OPTION,
@@ -822,6 +826,9 @@ def _cli_callback(
     if version:
         console.print(f"lisa v{_get_version()}")
         raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        console.print(ctx.get_help())
+        raise typer.Exit(code=2)
 
 
 # ---------------------------------------------------------------------------
@@ -2110,8 +2117,10 @@ def _collect_interactive_or_error(
     if sys.stdin.isatty() and sys.stdout.isatty():
         from hosts.cli import entry as entry_mod
 
-        reader = _prompt_reader or entry_mod.read_prompt_message_tui
-        if reader is entry_mod.read_prompt_message_tui:
+        if _prompt_reader is not None:
+            # Custom reader seam (tests): the plain-reader contract.
+            terminal_message = _prompt_reader(console)
+        else:
             # Flag state -> reader layout (True=shipped, False=chat-box):
             #   absent (None)      -> env decides (swapped_keys=None)
             #   --no-swap-keys     -> shipped (swapped_keys=True)
@@ -2123,16 +2132,13 @@ def _collect_interactive_or_error(
                 resolved = True
             else:
                 resolved = False
-            terminal_message = reader(
+            terminal_message = entry_mod.read_prompt_message_tui(
                 console,
                 history_path=entry_mod.prompt_history_path(data_dir, profile),
                 swapped_keys=resolved,
                 data_dir=data_dir,
                 profile=profile,
             )
-        else:
-            # Custom reader seam (tests): the plain-reader contract.
-            terminal_message = reader(console)
         if terminal_message is None:
             raise typer.Exit(code=_ABORT_EXIT) from None
         if terminal_message.strip():
@@ -2227,7 +2233,9 @@ async def _resolve_pending_request_id(runtime: HostRuntime) -> str:
         logger.debug("prompt: pending-approval resolution failed: %s", exc)
         return ""
     if len(pending) == 1:
-        request_id = pending[0].invocation.request_id
+        # The service reaches the CLI as Any (duck-typed seam), so reassert
+        # the declared kernel field type for the return contract.
+        request_id = cast("str", pending[0].invocation.request_id)
         logger.info("prompt: resolved bare decision to pending %s", request_id[:8])
         return request_id
     return ""

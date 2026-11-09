@@ -155,9 +155,7 @@ def _invoke_rejected_models(
         def print(self, *args, **kwargs):
             # Rich print renders markup; capture the plain text of the
             # first positional arg (a str here, not a Rich renderable).
-            for a in args:
-                if isinstance(a, str):
-                    printed.append(a)
+            printed.extend(a for a in args if isinstance(a, str))
 
     handler_calls: list[str] = []
 

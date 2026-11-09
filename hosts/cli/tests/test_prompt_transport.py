@@ -1199,3 +1199,95 @@ async def test_footer_estimate_falls_back_to_uncached_rate() -> None:
     await transport.on_response("done")
     footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
     assert "$0.0032" in footer
+
+
+@pytest.mark.asyncio
+async def test_transition_dispatch_rows_show_target() -> None:
+    """Transition dispatch rows render the stage marker and the target.
+
+    The kernel emits ``tool_kind="transition"`` for handoff/fork/unknown
+    transitions; the handoff target (``handoff_to``) or fork children
+    (``fork_children``) rides the payload. These drive
+    ``_render_transition_dispatch`` directly through the completion events.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "tool_dispatch", {"tool": "transition_stage", "tool_kind": "transition"}
+    )
+    await transport.on_stage(
+        "tool_dispatch_complete",
+        {
+            "tool": "transition_stage",
+            "tool_kind": "transition",
+            "ok": True,
+            "transition": "handoff",
+            "handoff_to": "fix",
+            "duration_ms": 30,
+        },
+    )
+    out = buffer.getvalue()
+    assert "stage: tool_dispatch ↦ transition_stage → fix ✓ 30ms" in out
+
+
+@pytest.mark.asyncio
+async def test_fork_transition_dispatch_shows_children() -> None:
+    """A transitioned fork row shows the fork marker with its child count."""
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "tool_dispatch_complete",
+        {
+            "tool": "transition_stage",
+            "tool_kind": "transition",
+            "ok": True,
+            "transition": "fork",
+            "fork_children": 3,
+        },
+    )
+    out = buffer.getvalue()
+    assert "stage: tool_dispatch ↦ transition_stage fork (3 children)" in out
+
+
+@pytest.mark.asyncio
+async def test_transitioned_to_dispatch_shows_target() -> None:
+    """An unknown-target transition row names where it transitioned to."""
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "tool_dispatch_complete",
+        {
+            "tool": "transition_stage",
+            "tool_kind": "transition",
+            "ok": False,
+            "transition": "unknown",
+            "transitioned_to": "extra",
+        },
+    )
+    assert "stage: tool_dispatch ↦ transition_stage → extra ✗" in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_nested_tool_dispatch_indents_hierarchy() -> None:
+    """Nested dispatch rows exercise the call-depth hierarchy marker.
+
+    The nested ``inner`` row renders while ``outer`` is still open, so the
+    dispatch render walks the ``_tool_call_stack`` (depth 1 = ``└─ ``).
+    Completions pop the stack before rendering, so completed rows themselves
+    stay flat — the hierarchy shows in the in-flight activity label.
+    """
+    transport, buffer = _make_transport()
+    await transport.on_stage(
+        "tool_dispatch",
+        {"tool": "outer", "tool_kind": "pack_tool", "arguments": {"command": "a"}},
+    )
+    await transport.on_stage(
+        "tool_dispatch",
+        {"tool": "inner", "tool_kind": "pack_tool", "arguments": {"path": "/tmp/b"}},
+    )
+    await transport.on_stage(
+        "tool_dispatch_complete", {"tool": "inner", "ok": True, "duration_ms": 2}
+    )
+    await transport.on_stage(
+        "tool_dispatch_complete", {"tool": "outer", "ok": True, "duration_ms": 9}
+    )
+    out = buffer.getvalue()
+    assert "→ tool inner /tmp/b" in out
+    assert "→ outer ✓ 9ms" in out

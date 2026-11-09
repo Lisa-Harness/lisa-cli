@@ -33,7 +33,11 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev
+        # Resolves all framework deps from PyPI — no sibling checkout required.
+        # This validates the "clone just cli and run" path. The prompt extra
+        # also provides prompt_toolkit so the strict mypy run sees a typed
+        # dependency instead of import-not-found stub misses.
+        run: uv sync --no-sources --extra dev --extra prompt
 
       - name: Format check (ruff)
         run: uv run ruff format --check .
@@ -136,7 +140,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev
+        # --no-sources: resolve the lisa-harness packages from PyPI wheels
+        # (no sibling ../lisa checkout exists in CI).
+        run: uv sync --no-sources --extra dev
 
       - name: Download matrix coverage data
         uses: actions/download-artifact@v4

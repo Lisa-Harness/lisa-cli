@@ -21,6 +21,9 @@ dev = [
 mutation = [
     "mutmut>=3,<4 ; sys_platform == 'linux'",
 ]
+# Forward to the lisa-cli member extra: the CI matrix installs --extra
+# prompt so the TUI prompt tests can exercise real prompt_toolkit bindings.
+prompt = ["lisa-cli[prompt]"]
 
 [tool.uv]
 package = false
@@ -64,7 +67,11 @@ markers = [
 # as uncovered, which catches the ``if not x: return`` guards line coverage hides.
 branch = true
 relative_files = true
-source = ["hosts/cli/src"]
+# The CI gate scripts (scripts/check_*.py) are measured too: the changed-line
+# coverage gate counts changes to them, so they must be measurable (the suites
+# import them by path). They have no package floor (see scripts/check_coverage.py);
+# the global fail_under still applies to the measured total.
+source = ["hosts/cli/src", "scripts"]
 # Omit test code from measurement entirely so reports and fail_under reflect the
 # shipped source, not the suites exercising it (pytest's pythonpath imports test
 # modules as top-level packages, so omit-by-pattern is required — [paths] alone
@@ -73,7 +80,6 @@ omit = [
     "*/tests/*",
     "*/test_*.py",
     "*/conftest.py",
-    "scripts/*",
 ]
 source_pkgs = [
     "hosts.cli",
@@ -226,9 +232,14 @@ ignore_decorators = [
 # import-linter — enforces the architectural boundaries.
 # ---------------------------------------------------------------------------
 [tool.importlinter]
+# grimp only builds top-level (non-dotted) root packages. The importable
+# top-level package is "hosts" (hosts/cli/src), so build its graph and let the
+# contract reference the "hosts.cli" subpackage. The integration modules live
+# in a sibling repo, not this source tree, so include them as external modules.
 root_packages = [
-    "hosts.cli",
+    "hosts",
 ]
+include_external_packages = true
 
 # The CLI defines contracts; integrations depend on it, never the reverse.
 [[tool.importlinter.contracts]]

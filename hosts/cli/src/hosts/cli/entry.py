@@ -50,9 +50,12 @@ from __future__ import annotations
 import os
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from prompt_toolkit.key_binding import KeyBindings
 
 #: Unicode general categories that extend a grapheme cluster: combining
 #: marks, enclosing marks, format characters (variation selectors, ZWSP),
@@ -429,7 +432,7 @@ def _delete_first_grapheme(text: str) -> int:
     return i
 
 
-def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
+def _add_navigate_bindings(bindings: KeyBindings, *, swapped: bool = True) -> None:
     """Bind submit/newline and navigation keys.
 
     ``swapped`` (the default) puts newline on Enter and send on
@@ -476,7 +479,7 @@ def _add_navigate_bindings(bindings: Any, *, swapped: bool = True) -> None:
         event.current_buffer.history_forward()
 
 
-def _add_grapheme_delete_bindings(bindings: Any) -> None:
+def _add_grapheme_delete_bindings(bindings: KeyBindings) -> None:
     """Bind backspace (Ctrl-H) and forward Delete to cluster-aware cuts.
 
     prompt_toolkit deletes one codepoint, tearing multi-codepoint emoji
@@ -504,14 +507,17 @@ def _add_grapheme_delete_bindings(bindings: Any) -> None:
         buffer.cursor_position = pos
 
 
-def _tui_key_bindings(swapped: bool = True) -> Any:
+def _tui_key_bindings(swapped: bool = True) -> KeyBindings:
     """Build the owned key model for the TUI reader.
 
     ``swapped`` selects the send/newline layout (see
     :func:`_add_navigate_bindings`); this exists so the reader body
     stays under its complexity budget.
     """
-    bindings = _PT["KeyBindings"]()
+    pt = _PT
+    if pt is None:  # pragma: no cover - guarded by the caller's _PT check
+        raise RuntimeError("_tui_key_bindings requires the prompt extra")
+    bindings: KeyBindings = pt["KeyBindings"]()
     _add_navigate_bindings(bindings, swapped=swapped)
     _add_grapheme_delete_bindings(bindings)
     return bindings
