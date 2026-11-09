@@ -49,29 +49,64 @@ try:
     from runtime.config import default_data_dir as _default_data_dir
     from runtime.config import profile_data_dir as _profile_data_dir
 
-    # Honor LISA_DATA_DIR (and LISA_PROFILE) here so tool-mode installs
-    # configured with a custom data dir find their .env before any
-    # HostRuntime exists to do the full config resolution. Falls back to
-    # the platform default (~/.lisa). Mirrors HostConfig.from_env's
-    # precedence: LISA_DATA_DIR > LISA_PROFILE > default_data_dir().
-    _data_dir_override = os.getenv("LISA_DATA_DIR", "").strip()
-    if _data_dir_override:
-        _default_env_dir = Path(_data_dir_override).expanduser()
-    else:
-        _profile_override = os.getenv("LISA_PROFILE", "").strip()
+    def _env_data_dir() -> Path:
+        """Resolve the .env data dir from the env: LISA_DATA_DIR > LISA_PROFILE.
+
+        Honor LISA_DATA_DIR (and LISA_PROFILE) so tool-mode installs
+        configured with a custom data dir find their .env before any
+        HostRuntime exists to do the full config resolution. Falls back to
+        the platform default (~/.lisa). Mirrors HostConfig.from_env's
+        precedence: LISA_DATA_DIR > LISA_PROFILE > default_data_dir().
+        """
+        override = os.getenv("LISA_DATA_DIR", "").strip()
+        if override:
+            return Path(override).expanduser()
+        profile = os.getenv("LISA_PROFILE", "").strip()
+        if not profile:
+            return _default_data_dir()
         try:
-            _default_env_dir = (
-                _profile_data_dir(_profile_override) if _profile_override else _default_data_dir()
-            )
+            return _profile_data_dir(profile)
         except ValueError:
             # Invalid profile name: HostConfig.from_env raises the real
             # startup error later; the .env loader falls back to the
             # platform default so the error panel (not an import crash)
             # is what the user sees.
-            _default_env_dir = _default_data_dir()
+            return _default_data_dir()
 
-    # Module-level search order, shared with _verify_check_env (which reads
-    # this constant so monkeypatched tests and the loader stay in sync).
+    def _env_candidates() -> tuple[Path, tuple[Path, ...]]:
+        """Return (data-dir .env candidate, full low→high precedence order).
+
+        The data-dir slot resolves from the current environment
+        (:func:`_env_data_dir`). A profile (or relocated data dir) gets a
+        lower-precedence fallback to the base data dir's ~/.lisa/.env right
+        after its own candidate: profiles isolate derived state, but the
+        base .env is the operator's only config spot in tool-install mode,
+        and a profile without its own .env must not leave it unloaded. A
+        real profile .env still wins — later candidates are more
+        authoritative (``override=True`` in :func:`_load_env_candidates`).
+        With no LISA_DATA_DIR / LISA_PROFILE the base dir IS ~/.lisa and
+        the fallback collapses to the same path, so it is not listed twice.
+        """
+        env_dir = _env_data_dir()
+        base_dir = _default_data_dir()
+        candidates = (
+            Path.cwd() / ".env",
+            env_dir / ".env",
+            _FRAMEWORK_ROOT / ".env",
+            _FRAMEWORK_ROOT / "hosts" / "little_lisa" / ".env",
+        )
+        base_env = base_dir / ".env"
+        if env_dir != base_dir and env_dir / ".env" != base_env:
+            return base_env, (
+                candidates[0],
+                candidates[1],
+                base_env,
+                *candidates[2:],
+            )
+        return base_env, candidates
+
+    # Module-level search order, shared with _verify_check_env (which calls
+    # _env_candidates so monkeypatched tests and the loader stay in sync).
     # Ordered lowest-precedence first; _load_env_candidates applies them in
     # this order so later (more authoritative) entries win.
     #
@@ -90,12 +125,7 @@ try:
     # os.environ inside test processes. hosts/cli/tests/conftest.py scrubs
     # them (autouse _hermetic_env) — tests own their environment; anything
     # ambient is treated as noise, not config.
-    _ENV_SEARCH_CANDIDATES = (
-        Path.cwd() / ".env",
-        _default_env_dir / ".env",
-        _FRAMEWORK_ROOT / ".env",
-        _FRAMEWORK_ROOT / "hosts" / "little_lisa" / ".env",
-    )
+    (_BASE_ENV_CANDIDATE, _ENV_SEARCH_CANDIDATES) = _env_candidates()
 
     def _load_env_candidates(candidates: tuple[Path, ...]) -> Path | None:
         """Load every existing candidate .env; return the last one loaded.
@@ -861,12 +891,24 @@ def _verify_check_python() -> tuple[str, str]:
     return _VERIFY_FAIL, f"Python {version} (need >= 3.11)"
 
 
+def _resolve_env_candidates() -> tuple[Path, ...]:
+    """Recompute the .env search order for the *current* environment.
+
+    Thin wrapper over the import-time :func:`_env_candidates` so ``lisa
+    verify`` reports what startup will actually load even when LISA_
+    PROFILE / LISA_DATA_DIR / LISA_PROFILES_DIR changed after import or
+    under test monkeypatching. Returns the same tuple when the
+    environment is unchanged.
+    """
+    return _env_candidates()[1]
+
+
 def _verify_check_env(runtime: HostRuntime) -> tuple[str, str]:
-    # Check for .env in the same search order as the startup loader. The
-    # loader's _ENV_SEARCH_CANDIDATES is module-level so it can be
-    # monkeypatched (tests); CWD still resolves dynamically because pytest's
-    # chdir affects it.
-    for candidate in _ENV_SEARCH_CANDIDATES:
+    # Resolve dynamically (not from the module-level constant) so LISA_DATA_DIR
+    # / LISA_PROFILE set after import — and under test monkeypatching — are
+    # honored; the order mirrors the import-time construction including the
+    # profile→base .env fallback, so verify reports what startup really loads.
+    for candidate in _resolve_env_candidates():
         if candidate.exists():
             return _VERIFY_PASS, f".env found ({candidate})"
     return _VERIFY_WARN, ".env not found. Create one at ~/.lisa/.env with your model provider keys."

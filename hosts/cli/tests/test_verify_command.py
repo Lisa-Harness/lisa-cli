@@ -137,22 +137,16 @@ def test_check_python_fails_on_39() -> None:
 
 
 def test_check_env_passes_when_env_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """_ENV_SEARCH_CANDIDATES includes CWD/.env; creating it yields PASS."""
+    """CWD/.env resolves dynamically via _resolve_env_candidates; PASS."""
     from hosts.cli import main as cli_main
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("LISA_OPENAI_API_KEY=test\n", encoding="utf-8")
-    # Rebuild the module-level tuple so CWD points at tmp_path.
-    monkeypatch.setattr(
-        cli_main,
-        "_ENV_SEARCH_CANDIDATES",
-        (
-            tmp_path / ".env",
-            tmp_path / "lisa_home" / ".env",
-            tmp_path / "framework" / ".env",
-            tmp_path / "little_lisa" / ".env",
-        ),
-    )
+    # The default search points at this machine's real ~/.lisa; chdir alone
+    # must be enough for the CWD candidate to win first.
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.delenv("LISA_PROFILE", raising=False)
+    monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
     runtime = _StubRuntime(data_dir=tmp_path)
     status, detail = cli_main._verify_check_env(runtime)
     assert "PASS" in status
@@ -162,15 +156,117 @@ def test_check_env_passes_when_env_in_cwd(tmp_path: Path, monkeypatch: pytest.Mo
 def test_check_env_warns_when_no_env_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hosts.cli import main as cli_main
 
-    monkeypatch.setattr(
-        cli_main,
-        "_ENV_SEARCH_CANDIDATES",
-        (tmp_path / "a.env", tmp_path / "b.env", tmp_path / "c.env", tmp_path / "d.env"),
-    )
-    runtime = _StubRuntime(data_dir=tmp_path)
-    status, detail = cli_main._verify_check_env(runtime)
+    # Point every dynamic candidate at empty scratch dirs: CWD via chdir,
+    # the data-dir/env-dir and framework slots via _resolve_env_candidates
+    # patches (the framework .env path must not exist for WARN).
+    monkeypatch.chdir(tmp_path)
+    fake_profiles_dir = tmp_path / "profiles"
+    with (
+        patch.object(cli_main, "_default_data_dir", lambda: tmp_path / "lisa_home"),
+        patch.object(
+            cli_main,
+            "_profile_data_dir",
+            lambda profile, base_dir=None: fake_profiles_dir / profile,
+        ),
+        patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
+    ):
+        monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+        monkeypatch.delenv("LISA_PROFILE", raising=False)
+        monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
+        runtime = _StubRuntime(data_dir=tmp_path)
+        status, detail = cli_main._verify_check_env(runtime)
     assert "WARN" in status
     assert ".env not found" in detail
+
+
+def test_check_env_falls_back_to_base_env_for_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A profile without its own .env still finds ~/.lisa/.env → PASS."""
+    from hosts.cli import main as cli_main
+
+    base_dir = tmp_path / "lisa_home"
+    base_dir.mkdir()
+    (base_dir / ".env").write_text("LISA_OPENAI_API_KEY=test\n", encoding="utf-8")
+    # Route the module's dir resolvers at the scratch tree (env vars alone
+    # would still touch the real ~/.lisa; the loader ignores LISA_PROFILES_DIR
+    # because _profile_data_dir is patched to live under tmp_path).
+    monkeypatch.setenv("LISA_PROFILE", "taxes")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch.object(cli_main, "_default_data_dir", lambda: base_dir),
+        patch.object(
+            cli_main,
+            "_profile_data_dir",
+            lambda profile, base_dir=None: tmp_path / "profiles" / profile,
+        ),
+        patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
+    ):
+        runtime = _StubRuntime(data_dir=base_dir)
+        status, detail = cli_main._verify_check_env(runtime)
+    assert "PASS" in status
+    assert str(base_dir / ".env") in detail
+
+
+def test_check_env_profile_env_beats_base_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A profile's own .env wins over the base dir fallback in check order."""
+    from hosts.cli import main as cli_main
+
+    base_dir = tmp_path / "lisa_home"
+    base_dir.mkdir()
+    (base_dir / ".env").write_text("BASE=1\n", encoding="utf-8")
+    profile_dir = tmp_path / "profiles" / "taxes"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".env").write_text("PROFILE=1\n", encoding="utf-8")
+    monkeypatch.setenv("LISA_PROFILE", "taxes")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch.object(cli_main, "_default_data_dir", lambda: base_dir),
+        patch.object(
+            cli_main,
+            "_profile_data_dir",
+            lambda profile, base_dir=None: tmp_path / "profiles" / profile,
+        ),
+        patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
+    ):
+        runtime = _StubRuntime(data_dir=base_dir)
+        status, detail = cli_main._verify_check_env(runtime)
+    assert "PASS" in status
+    assert str(profile_dir / ".env") in detail
+
+
+def test_check_env_data_dir_override_skips_redundant_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LISA_DATA_DIR set: the base dir fallback stays in the order.
+
+    The override replaces the profile slot but the base dir's .env (the
+    profile fallback slot) remains, pointing at the real platform default
+    (~/.lisa) — distinct from the override dir, so it is a real fallback.
+    """
+    from hosts.cli import main as cli_main
+
+    data_dir = tmp_path / "pinned"
+    monkeypatch.setenv("LISA_DATA_DIR", str(data_dir))
+    monkeypatch.chdir(tmp_path)
+    fake_base_dir = tmp_path / "lisa_home"
+
+    with (
+        patch.object(cli_main, "_default_data_dir", lambda: fake_base_dir),
+        patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
+    ):
+        candidates = cli_main._resolve_env_candidates()
+    assert candidates == (
+        tmp_path / ".env",
+        data_dir / ".env",
+        fake_base_dir / ".env",
+        tmp_path / "framework" / ".env",
+        tmp_path / "framework" / "hosts" / "little_lisa" / ".env",
+    )
 
 
 # ── _verify_check_session_context ─────────────────────────────────────
