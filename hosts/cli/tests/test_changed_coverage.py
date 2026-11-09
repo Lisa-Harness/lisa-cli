@@ -145,18 +145,14 @@ class TestResolveBase:
         assert gate.resolve_base(git_repo, "HEAD~0") == "HEAD~0"
 
     def test_merge_base_resolution(self, git_repo: Path) -> None:
-        base = gate.resolve_base(git_repo, None)
-        # No origin, no main: resolution returns None; with a main branch the
-        # merge-base with it. Accept either documented outcome.
-        result = subprocess.run(
-            ["git", "branch", "--list", "main", "master"],
+        # Deterministic across git init.defaultbranch settings: create the
+        # main branch explicitly, then resolve_base must find its merge-base.
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=git_repo, check=True)
+        (git_repo / "pkg.py").write_text("def kept():\n    return 1\n# touch\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "second"],
             cwd=git_repo,
-            capture_output=True,
-            text=True,
-            check=False,
+            check=True,
         )
-        has_main = bool(result.stdout.strip())
-        if has_main:
-            assert base is not None
-        else:
-            assert base is None
+        assert gate.resolve_base(git_repo, None) is not None
