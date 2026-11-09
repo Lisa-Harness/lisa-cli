@@ -267,7 +267,10 @@ def test_pack_command_shows_in_help(
 ) -> None:
     result = runner.invoke(cli_main.app, ["--help"])
     assert result.exit_code == 0
-    assert "stalls" in result.output
+    # The row lives in the dedicated pack panel; assert on the styled row
+    # so the pass never rides the "stalls" ⊂ "pack installs" substring
+    # coincidence from the pack command's help line.
+    assert "│ stalls  " in result.output
 
 
 def test_pack_command_help_text_from_spec(
@@ -285,3 +288,45 @@ def test_pack_command_slash_form_points_at_bare(
     result = runner.invoke(cli_main.app, ["/stalls"])
     assert result.exit_code == 2
     assert "lisa stalls" in result.output
+
+
+# ── completion & help enumeration (list_commands) ─────────────────────
+
+
+def test_list_commands_appends_pack_names(
+    monkeypatch: pytest.MonkeyPatch, _recovery_like_pack: None
+) -> None:
+    """list_commands merges pack names so completion sees them.
+
+    Click's shell completion and Typer's rich help listing both walk
+    ``list_commands``; the merge is what makes `lisa str<TAB>` offer
+    `stalls` and put pack commands in the help panels.
+    """
+    import typer._click as tclick
+    import typer.main
+
+    group = typer.main.get_group(cli_main.app)
+    ctx = tclick.Context(group, info_name="lisa", resilient_parsing=True)
+    names = group.list_commands(ctx)
+    static = set(group.commands.keys())
+    pack_names = [n for n in names if n not in static]
+    assert "stalls" in pack_names
+    assert "retry" in pack_names
+    # Static ordering is preserved: the static prefix stays contiguous.
+    assert [n for n in names if n in static] == list(group.commands.keys())
+
+
+def test_group_completion_offers_pack_names(
+    monkeypatch: pytest.MonkeyPatch, _recovery_like_pack: None
+) -> None:
+    """The typer completion driver surfaces pack commands at top level."""
+    from typer._click.shell_completion import get_completion_class
+    from typer._completion_classes import completion_init
+    from typer.main import get_group as typer_get_group
+
+    completion_init()
+    bash_cls = get_completion_class("bash")
+    assert bash_cls is not None
+    comp = bash_cls(typer_get_group(cli_main.app), {}, "_l", "complete")
+    values = {c.value for c in comp.get_completions(args=[], incomplete="sta")}
+    assert "stalls" in values

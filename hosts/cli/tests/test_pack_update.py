@@ -14,7 +14,7 @@ from __future__ import annotations
 # pylint: disable=protected-access
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import typer
 from runtime.runtime import HostRuntime
@@ -209,11 +209,62 @@ def test_pack_update_all_failure_prints_details_and_exits_1(
     assert exit_code == 1
 
 
-def test_pack_update_unknown_action_exits_2(tmp_path: Path) -> None:
-    """An unrecognized action name exits 2 with a supported-actions hint."""
-    console, _captured, exit_code = _invoke_pack_update(tmp_path, action="upgrade", target="x")
+def test_pack_update_unknown_action_fails_closed(tmp_path: Path) -> None:
+    """A non-enum action never reaches the update path — parse-time + body guard.
+
+    Typer rejects the typo at parse time with a usage error listing the
+    valid actions (and runtime never boots); a direct body call that
+    bypasses the parser hits the fail-closed branch and exits 2 without
+    touching pack state.
+    """
+    from typer.testing import CliRunner
+
+    from hosts.cli import main as cli_main
+
+    # Direct body call: falls through list/install/uninstall to the guard.
+    runtime = _make_runtime(tmp_path)
+    console = _CapturingConsole()
+    with (
+        patch.object(cli_main, "_initialize_runtime_or_exit", return_value=runtime),
+        patch("runtime.commands.run_pack_update", new=AsyncMock(return_value=(True, "ran!"))),
+        patch("runtime.commands.run_pack_update_all", new=AsyncMock(return_value=(True, "ran!"))),
+        patch("runtime.commands.run_pack_install", new=AsyncMock(return_value=(True, "ran!"))),
+        patch.object(cli_main, "console", new=console),
+    ):
+        try:
+            cli_main._pack_command(
+                action="upgrade",  # type: ignore[arg-type]
+                target="x",
+                all_packs=False,
+                log_level="",
+                log="",
+                no_log=False,
+                data_dir=str(tmp_path),
+                thread_dir="",
+                no_thread=False,
+                session_context="",
+                timezone="",
+                state_snapshot="",
+                streaming="none",
+                host_log="",
+            )
+            exit_code = 0
+        except typer.Exit as exc:
+            exit_code = exc.exit_code
     assert exit_code == 2
     assert any("Unknown action" in line for line in console.lines)
+
+    # The parser-visible contract: the Typer CLI rejects the typo with
+    # exit 2 before any runtime construction.
+    runner = CliRunner()
+    with (
+        patch.object(cli_main, "_initialize_runtime_or_exit") as _never_boot,
+        patch.object(cli_main, "console", new=_CapturingConsole()),
+    ):
+        result = runner.invoke(cli_main.app, ["pack", "upgrade", "x"])
+    assert result.exit_code == 2
+    assert "list" in result.output and "install" in result.output
+    _never_boot.assert_not_called()
 
 
 # ── restart-flag tolerance ────────────────────────────────────────────

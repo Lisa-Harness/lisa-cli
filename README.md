@@ -298,6 +298,18 @@ fortune | lisa prompt               # run a turn with stdin as the input
 ls | lisa prompt "look ok to you?"  # run a turn with stdin and CLI args as inputs
 ```
 
+### Shell completion
+
+Tab completion covers subcommands, shared options, and the enum-style
+values (`lisa pack <TAB>`, `lisa models <TAB>`), plus pack-registered host
+commands (`stalls`, `retry`, …). Bash, zsh, fish, and PowerShell are
+supported; for the current shell:
+
+```bash
+lisa --install-completion   # install for your shell (add to rc/profile as needed)
+lisa --show-completion      # print the script, to copy or source manually
+```
+
 `lisa verify` expects a configured model manifest
 `lisa models discover` generates one; use `--force` if one already exists
 `lisa models apply` checks the syntax and router rules before applying

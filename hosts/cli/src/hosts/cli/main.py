@@ -196,7 +196,10 @@ if TYPE_CHECKING:
 
 from rich.traceback import install
 
-install(show_locals=True)
+# show_locals=False: uncaught frames here carry provider keys (verify's
+# env reads), .env values, and prompt payloads — a locals dump prints them
+# unredacted to the terminal. Keep the styled traceback, drop the values.
+install(show_locals=False, word_wrap=True)
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +355,10 @@ def _make_pack_command(name: str) -> Any:
             host_log_path=host_log,
         )
 
+    # Typer's rich help groups commands by this attribute (click commands
+    # don't carry it statically; the help loop reads it with getattr). A
+    # dedicated panel keeps the curated Commands box listy command rows only.
+    _pack_cmd.rich_help_panel = "Pack host commands"  # type: ignore[attr-defined]  # Typer help seam
     return _pack_cmd
 
 
@@ -386,6 +393,19 @@ class _LisaGroup(typer.core.TyperGroup):
             return _make_pack_command(cmd_name)
         return None
 
+    def list_commands(self, ctx: Any) -> list[str]:
+        """Static commands plus pack-host-command names (completions & help).
+
+        Click's command and value completion and Typer's rich help listing
+        both enumerate candidates here; without the merge, a pack command
+        resolves only when the shell types it exactly, so it never shows
+        up as ``lisa <TAB>`` or in the ``--help`` Commands panel.
+        """
+        names = list(super().list_commands(ctx))
+        static = set(names)
+        names.extend(pack_name for pack_name in sorted(_pack_commands()) if pack_name not in static)
+        return names
+
     def resolve_command(self, ctx: Any, args: list[str]) -> tuple[str | None, Any, list[str]]:
         cmd_name = args[0]
         cmd = self.get_command(ctx, cmd_name)
@@ -400,6 +420,14 @@ app = typer.Typer(
     cls=_LisaGroup,
     no_args_is_help=True,
     help="Run the Lisa framework terminal host.",
+    epilog=(
+        "Scripting: `lisa prompt --raw 'task'` writes the response verbatim to "
+        "stdout. Exit codes: 0 success · 2 usage/missing input · 3 unresolved "
+        "approval · 4 model asked a question · 130 Ctrl-C."
+    ),
+    # Frame locals can carry provider keys and .env values — never print
+    # them on an unhandled error (matches the rich.traceback install above).
+    pretty_exceptions_show_locals=False,
 )
 policy_app = typer.Typer(
     invoke_without_command=True,
@@ -409,6 +437,22 @@ policy_app = typer.Typer(
 policy_rule_app = typer.Typer(no_args_is_help=True, help="Manage allow, ask, and deny rules.")
 policy_app.add_typer(policy_rule_app, name="rule")
 app.add_typer(policy_app, name="policy")
+
+# Help-panel names for the group listing: the flat 18-command box is split
+# into role groups. Commands without a panel still land in "Commands".
+_PANEL_INTROSPECTION = "Introspection"
+_PANEL_LIFECYCLE = "Installation & lifecycle"
+_PANEL_APPROVALS = "Approvals"
+
+# The prompt epilog: the one-shot scripting contract, visible in --help
+# without the README. Markup-safe (typer default mode is rich markup).
+_PROMPT_EPILOG = (
+    "Scripting contract — [bold]stdout[/bold] carries only the response in "
+    "--raw mode; activity goes to stderr. [bold]Exit codes:[/bold] 0 success · "
+    "2 usage or missing input · 3 unresolved approval (id is durable; retry with "
+    "`lisa prompt --approve <id> 'continue'`) · 4 the model asked a question "
+    "(printed to stderr; re-run with the answer) · 130 operator Ctrl-C."
+)
 
 # Lisa palette accent for response separators (kept in sync with the shared
 # palette in transport.py — the same value PromptTransport uses for the
@@ -463,6 +507,14 @@ _VERSION_OPTION = typer.Option(
 # ---------------------------------------------------------------------------
 # These Annotated type aliases define each runtime option exactly once so every
 # subcommand shares identical flag names, defaults, and help text.
+
+#: Parse-time-validated pack subcommand (Typer rejects typos before any
+#: runtime boot costs, and completion offers the values).
+PackAction = Literal["list", "install", "uninstall", "update"]
+
+#: Parse-time-validated models subcommand ('reload'/'edit' are accepted but
+#: rejected in-body as no-ops for a one-shot CLI process).
+ModelsAction = Literal["show", "discover", "apply", "help", "reload", "edit"]
 
 LogLevelOption = Annotated[
     str,
@@ -793,14 +845,19 @@ def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Err
 
     The exception's first line is bolded up to its first colon so the cause
     reads at a glance. (Migrated from the retired REPL module; the prompt
-    and startup paths are its remaining consumers.)
+    and startup paths are its remaining consumers.) Exception text is
+    escaped per line: a ``[tag]`` in the message is content, not markup.
     """
+    from rich.markup import escape as _escape
+
     lines = str(exc).splitlines()
     if lines:
         head, sep, tail = lines[0].partition(":")
         if sep:
-            lines[0] = f"[bold]{head.strip()}[/bold]:{tail}"
-    body = "\n".join(lines) or exc.__class__.__name__
+            lines[0] = f"[bold]{_escape(head.strip())}[/bold]:{_escape(tail)}"
+        else:
+            lines[0] = _escape(lines[0])
+    body = "\n".join(_escape(line) for line in lines) or exc.__class__.__name__
     console.print(Panel(body, title=title, border_style="indian_red"))
 
 
@@ -1062,7 +1119,11 @@ def _verify_check_session_context(runtime: HostRuntime) -> tuple[str, str]:
     return _VERIFY_PASS, "; ".join(parts)
 
 
-@app.command("verify", help="Run verification checks of the Lisa environment.")
+@app.command(
+    "verify",
+    rich_help_panel=_PANEL_LIFECYCLE,
+    help="Run verification checks of the Lisa environment.",
+)
 def _verify_command(
     log_level: LogLevelOption = "",
     log: LogOption = "",
@@ -1185,21 +1246,26 @@ def _modes_command(
 
 @app.command(
     "models",
+    short_help="Manage the model manifest.",
     help=(
         "Manage the model manifest. ACTION defaults to 'show'. "
         "Subcommands: show, discover, apply, help. "
         "(reload and edit only refresh transient state or print guidance; "
         "they have no durable effect as a one-shot CLI invocation.)"
     ),
+    rich_help_panel=_PANEL_INTROSPECTION,
 )
 def _models_command(
-    action: str = typer.Argument(
-        "show",
-        help=(
-            "Action: show (default), discover, apply, help. "
-            "'discover' writes a proposal manifest; 'apply' promotes it to active."
+    action: Annotated[
+        ModelsAction,
+        typer.Argument(
+            ...,
+            help=(
+                "Action: show (default), discover, apply, help. "
+                "'discover' writes a proposal manifest; 'apply' promotes it to active."
+            ),
         ),
-    ),
+    ] = "show",
     force: bool = typer.Option(
         False,
         "--force",
@@ -1235,26 +1301,26 @@ def _models_command(
     if runtime is None:
         return
 
-    normalized = action.strip().lower()
-
+    # Typer parsed/validated the action (Literal) — no normalization needed.
+    #
     # 'show' uses the Rich table renderer; on failure (e.g. no active
     # manifest yet) it falls back to the core text renderer so the user
     # gets the same friendly "run discover first" guidance as the REPL.
-    if normalized in {"", "show"}:
+    if action == "show":
         try:
             render_models(runtime, console=console)
             return
         except Exception:  # pylint: disable=broad-except
-            normalized = "show"
+            action = "show"
 
     # 'reload' and 'edit' only mutate transient in-process state or print
     # guidance — both pointless for a one-shot CLI process whose runtime
     # is discarded on exit. Surface that clearly instead of pretending
     # to do work; the durable CLI workflow is discover -> (edit file) ->
     # apply. Both remain available in the persistent REPL.
-    if normalized in {"reload", "edit"}:
+    if action in {"reload", "edit"}:
         console.print(
-            "[yellow]'models " + normalized + "' has no durable effect as a one-shot "
+            "[yellow]'models " + action + "' has no durable effect as a one-shot "
             "CLI command: it only refreshes in-process state or prints guidance, and "
             "the CLI runtime is discarded on exit.[/yellow]\n"
             "Edit models.proposed.yaml by hand, then run 'lisa models apply'."
@@ -1269,10 +1335,10 @@ def _models_command(
     from rich.markdown import Markdown
     from runtime.commands import handle_models_command
 
-    if normalized == "discover" and force:
+    if action == "discover" and force:
         stripped = "/models discover --force"
     else:
-        stripped = f"/models {normalized}".strip()
+        stripped = f"/models {action}".strip()
 
     # The discover/apply/reload/show subcommands read or write model
     # manifests via the lisa-storage MCP server, which requires a live
@@ -1289,7 +1355,13 @@ def _models_command(
             await _aclose_runtime_bounded(runtime)
 
     response_text = asyncio.run(_run_models_command())
-    console.print(Panel(Markdown(response_text), title="Models", border_style="cyan"))
+    console.print(
+        Panel(
+            Markdown(response_text, code_theme="github-dark", hyperlinks=True),
+            title="Models",
+            border_style="cyan",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1369,12 @@ def _models_command(
 # ---------------------------------------------------------------------------
 
 
-@app.command("operations", help="List internal operations with IDs for allowlist authoring.")
+@app.command(
+    "operations",
+    short_help="List internal operations with IDs for allowlist authoring.",
+    help="List internal operations with IDs for allowlist authoring.",
+    rich_help_panel=_PANEL_INTROSPECTION,
+)
 def _operations_command(
     log_level: LogLevelOption = "",
     log: LogOption = "",
@@ -1338,10 +1415,12 @@ def _operations_command(
 
 @app.command(
     "tools",
+    short_help="List internal tools with IDs for allowlist authoring.",
     help=(
         "List internal tools with IDs for allowlist authoring. "
         "Use the `mcp` command to inspect MCP server tools."
     ),
+    rich_help_panel=_PANEL_INTROSPECTION,
 )
 def _tools_command(
     log_level: LogLevelOption = "",
@@ -1383,11 +1462,13 @@ def _tools_command(
 
 @app.command(
     "last",
+    short_help="Reprint a previous response verbatim (no model call).",
     help=(
         "Reprint a previous response verbatim (default: the last model turn). "
         "Pass a turn number to replay that turn's response: `lisa last 3`. "
         "Reads the durable thread — no model call."
     ),
+    rich_help_panel=_PANEL_INTROSPECTION,
 )
 def _last_command(
     turn: str = typer.Argument(
@@ -1448,7 +1529,7 @@ def _last_command(
     # turn index the prompt output already renders, so operators address
     # a replayed turn the same way wherever it surfaces.
     console.print(Rule(title=f"Response · turn {turn_index}", style=_STYLE_RESPONSE))
-    console.print(Markdown(response_text))
+    console.print(Markdown(response_text, code_theme="github-dark", hyperlinks=True))
 
 
 # ---------------------------------------------------------------------------
@@ -1468,10 +1549,20 @@ def _render_markdown_response(response_text: str, *, title: str) -> None:
         return
     from rich.markdown import Markdown  # lazy: defers startup cost
 
-    console.print(Panel(Markdown(response_text), title=title, border_style="cyan"))
+    console.print(
+        Panel(
+            Markdown(response_text, code_theme="github-dark", hyperlinks=True),
+            title=title,
+            border_style="cyan",
+        )
+    )
 
 
-@app.command("settings", help="Show the effective runtime settings (one-shot /settings).")
+@app.command(
+    "settings",
+    rich_help_panel=_PANEL_INTROSPECTION,
+    help="Show the effective runtime settings (one-shot /settings).",
+)
 def _settings_command(  # Typer exposes shared runtime options as CLI flags.
     log_level: LogLevelOption = "",
     log: LogOption = "",
@@ -1507,7 +1598,11 @@ def _settings_command(  # Typer exposes shared runtime options as CLI flags.
     )
 
 
-@app.command("tokens", help="Show session token usage and budget (one-shot /tokens).")
+@app.command(
+    "tokens",
+    rich_help_panel=_PANEL_INTROSPECTION,
+    help="Show session token usage and budget (one-shot /tokens).",
+)
 def _tokens_command(  # Typer exposes shared runtime options as CLI flags.
     log_level: LogLevelOption = "",
     log: LogOption = "",
@@ -1545,10 +1640,12 @@ def _tokens_command(  # Typer exposes shared runtime options as CLI flags.
 
 @app.command(
     "debug",
+    short_help="Show the complete, unedited model input for a previous turn.",
     help=(
         "Show the complete, unedited model input for a previous turn "
         "(default: the last turn): `lisa debug [N]`."
     ),
+    rich_help_panel=_PANEL_INTROSPECTION,
 )
 def _debug_command(  # Typer exposes shared runtime options as CLI flags.
     turn: str = typer.Argument(
@@ -1779,11 +1876,13 @@ async def _collect_mcp_tools(
 
 @app.command(
     "mcp",
+    short_help="List MCP servers; drill into one server's tools.",
     help=(
         "List MCP servers with status, transport, URL/command, tool count, "
         "and last error. Pass a server id to drill into that server's tools "
         "(name, description, required args)."
     ),
+    rich_help_panel=_PANEL_INTROSPECTION,
 )
 def _mcp_command(
     target: str = typer.Argument(
@@ -1837,7 +1936,9 @@ def _mcp_command(
         specs = mcp_tools_by_server.get(server_id, [])
         health = mcp_health.get(server_id)
         if health is None:
-            console.print(f"[yellow]No MCP server named {server_id!r} is configured.[/yellow]")
+            console.print(
+                f"[yellow]No MCP server named {escape(server_id)!r} is configured.[/yellow]"
+            )
             return
         render_mcp_server_tools(specs, health, console=console)
     else:
@@ -1849,9 +1950,17 @@ def _mcp_command(
 # ---------------------------------------------------------------------------
 
 
-@app.command("pack", help="Manage runtime pack installs (list/install/uninstall/update).")
+@app.command(
+    "pack",
+    short_help="Manage runtime pack installs.",
+    rich_help_panel=_PANEL_LIFECYCLE,
+    help="Manage runtime pack installs (list/install/uninstall/update).",
+)
 def _pack_command(
-    action: str = typer.Argument(..., help="Action: list, install, uninstall, update."),
+    action: Annotated[
+        PackAction,
+        typer.Argument(..., help="Action: list, install, uninstall, update."),
+    ] = "list",
     target: str = typer.Argument(
         "",
         help="Install spec or package name (required for install/uninstall/update <pack>).",
@@ -1887,28 +1996,29 @@ def _pack_command(
     if runtime is None:
         return
 
-    normalized = action.strip().lower()
-    if normalized == "list":
+    # Typer parsed/validated the action (Literal) — no normalization needed.
+    if action == "list":
         render_pack_list_panel(runtime, console=console)
         return
-    if normalized == "install":
+    if action == "install":
         _finish_pack_mutation(runtime, asyncio.run(_run_pack_install(runtime, target)))
         return
-    if normalized == "uninstall":
+    if action == "uninstall":
         _finish_pack_mutation(runtime, asyncio.run(_run_pack_uninstall(runtime, target)))
         return
-    if normalized == "update":
-        if all_packs:
-            _finish_pack_mutation(runtime, asyncio.run(_run_pack_update_all(runtime)))
-            return
-        if not target.strip():
-            console.print("[red]Usage: lisa pack update <pack> | lisa pack update --all.[/red]")
-            raise typer.Exit(code=2)
-        _finish_pack_mutation(runtime, asyncio.run(_run_pack_update(runtime, target.strip())))
+    # action == "update" (Literal guarantees this; the guard below fails
+    # closed for direct body callers that bypass the parser).
+    if all_packs:
+        _finish_pack_mutation(runtime, asyncio.run(_run_pack_update_all(runtime)))
         return
-
-    console.print("[red]Unknown action. Use: list, install, uninstall, update.[/red]")
-    raise typer.Exit(code=2)
+    if not isinstance(action, str) or action not in ("list", "install", "uninstall", "update"):
+        console.print("[red]Unknown action. Use: list, install, uninstall, update.[/red]")
+        raise typer.Exit(code=2)
+    if not target.strip():
+        console.print("[red]Usage: lisa pack update <pack> | lisa pack update --all.[/red]")
+        raise typer.Exit(code=2)
+    _finish_pack_mutation(runtime, asyncio.run(_run_pack_update(runtime, target.strip())))
+    raise typer.Exit(code=0)
 
 
 def _finish_pack_mutation(runtime: HostRuntime, result: tuple[bool, str]) -> None:
@@ -1919,9 +2029,11 @@ def _finish_pack_mutation(runtime: HostRuntime, result: tuple[bool, str]) -> Non
     """
     ok, details = result
     if not ok:
-        console.print(f"[red]{details}[/red]")
+        # details may embed raw uv/uv-pip output — never route it through
+        # the markup parser (a bracketed token in the log would vanish).
+        console.print(details, markup=False, style="red")
         raise typer.Exit(code=1)
-    console.print(details)
+    console.print(details, markup=False)
     raise typer.Exit(code=0)
 
 
@@ -2029,7 +2141,9 @@ def _display_or_defer_update(
 
 @app.command(
     "update",
+    short_help="Upgrade the installed lisa CLI.",
     help="Update lisa, or select a release, minor channel, or Git ref.",
+    rich_help_panel=_PANEL_LIFECYCLE,
 )
 def _update_command(
     force: bool = typer.Option(
@@ -2285,7 +2399,7 @@ def _expand_editor_message(text: str) -> str:
     expanded, failures = expand_shell_substitutions(text)
     if failures:
         shown = "; ".join(f"$({cmd})" for cmd in failures)
-        console.print(f"[red]Shell substitution failed: {shown}[/red]")
+        console.print(f"[red]Shell substitution failed: {escape(shown)}[/red]")
         raise typer.Exit(code=2)
     return expanded
 
@@ -2575,7 +2689,11 @@ def _policy_rule_add(  # Typer requires each rule matcher as a CLI option.
     _run_policy_action(_add_rule, **ctx.obj)
 
 
-@app.command("approve", help="Approve one pending action without starting a model turn.")
+@app.command(
+    "approve",
+    rich_help_panel=_PANEL_APPROVALS,
+    help="Approve one pending action without starting a model turn.",
+)
 def _approve_command(  # Match shared runtime options used by one-shot commands.
     request_id: str = typer.Argument(
         _PENDING_APPROVAL_TARGET,
@@ -2621,7 +2739,11 @@ def _approve_command(  # Match shared runtime options used by one-shot commands.
     )
 
 
-@app.command("deny", help="Deny one pending action without starting a model turn.")
+@app.command(
+    "deny",
+    rich_help_panel=_PANEL_APPROVALS,
+    help="Deny one pending action without starting a model turn.",
+)
 def _deny_command(  # Match shared runtime options used by one-shot commands.
     request_id: str = typer.Argument(
         _PENDING_APPROVAL_TARGET,
@@ -2676,7 +2798,11 @@ def _compose_prompt_message(instruction: str, payload: str) -> str:
     return payload or instruction
 
 
-@app.command("prompt", help="Run a single turn and print the response.")
+@app.command(
+    "prompt",
+    epilog=_PROMPT_EPILOG,
+    help="Run a single turn and print the response.",
+)
 def _prompt_command(
     message: Annotated[
         list[str] | None,
@@ -2741,7 +2867,7 @@ def _prompt_command(
         try:
             payload = sys.stdin.read()
         except (OSError, UnicodeDecodeError) as exc:
-            console.print(f"[red]Failed to read piped stdin: {exc}[/red]")
+            console.print(f"[red]Failed to read piped stdin: {escape(str(exc))}[/red]")
             raise typer.Exit(code=2) from exc
     # A pre-armed decision (--approve/--deny) carries no message and no
     # piped payload; it is consumed at the end of the turn.
@@ -2941,7 +3067,12 @@ def _collect_model_cache_prices(runtime: HostRuntime) -> dict[str, tuple[float, 
 # ---------------------------------------------------------------------------
 
 
-@app.command("intake", help="Run one intake tick: collect signals, process, write state.")
+@app.command(
+    "intake",
+    short_help="Run one intake tick (collect, process, write state).",
+    help="Run one intake tick: collect signals, process, write state.",
+    rich_help_panel=_PANEL_LIFECYCLE,
+)
 def _intake_command(
     data_dir: DataDirOption = "",
     profile: ProfileOption = "",
@@ -2969,7 +3100,7 @@ def _intake_command(
     console.print(
         f"[green]Intake tick complete.[/green] "
         f"{len(state.context_items)} context item(s). "
-        f"State written to {resolved_data_dir / 'state' / 'state.json'}"
+        f"State written to {escape(str(resolved_data_dir / 'state' / 'state.json'))}"
     )
 
 

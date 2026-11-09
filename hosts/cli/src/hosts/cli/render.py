@@ -176,7 +176,7 @@ def render_pack_list_panel(runtime: HostRuntime, *, console: Console | None = No
 
     markdown_text = render_pack_list(runtime)
     panel = Panel(
-        Markdown(markdown_text),
+        Markdown(markdown_text, code_theme="github-dark", hyperlinks=True),
         title="Pack Activation",
         border_style=STYLE_BORDER_SESSION,
     )
@@ -374,7 +374,11 @@ def render_markdown_panel(
     """
     from rich.markdown import Markdown
 
-    panel = Panel(Markdown(text), title=title, border_style=border_style)
+    panel = Panel(
+        Markdown(text, code_theme="github-dark", hyperlinks=True),
+        title=title,
+        border_style=border_style,
+    )
     if console is not None:
         console.print(panel)
     return panel
