@@ -97,22 +97,28 @@ param(
     [Parameter()]
     [ValidateSet("git", "local")]
     [string]$Source = $(
+        # The invocation-mode check must live inside each default: parameter
+        # defaults bind before the script body runs, so a script-scoped
+        # variable assigned later (ExecutedFromIex) does not exist yet and
+        # strict mode makes reading it a terminating error. A null
+        # MyCommand.Path means the code is evaluating in the caller's session
+        # (irm | iex); a real path means the saved script file was executed.
         if ([Environment]::GetEnvironmentVariable("LISA_SOURCE")) { [Environment]::GetEnvironmentVariable("LISA_SOURCE") }
-        elseif ($script:ExecutedFromIex) { "git" }  # piped: default to git
+        elseif ($null -eq $MyInvocation.MyCommand.Path) { "git" }  # piped: default to git
         else { "local" }  # file: default to local
     ),
 
     [Parameter()]
     [string]$LisaRepo = $(
         if ([Environment]::GetEnvironmentVariable("LISA_GIT_REPO")) { [Environment]::GetEnvironmentVariable("LISA_GIT_REPO") }
-        elseif (-not $script:ExecutedFromIex -and $Source -eq "local") { "..\lisa" }  # file + local: default to ..\lisa
+        elseif (($null -ne $MyInvocation.MyCommand.Path) -and ($Source -eq "local")) { "..\lisa" }  # file + local: default to ..\lisa
         else { "" }
     ),
 
     [Parameter()]
     [string]$CliRepo = $(
         if ([Environment]::GetEnvironmentVariable("LISA_CLI_REPO")) { [Environment]::GetEnvironmentVariable("LISA_CLI_REPO") }
-        elseif (-not $script:ExecutedFromIex -and $Source -eq "local") { "." }  # file + local: default to .
+        elseif (($null -ne $MyInvocation.MyCommand.Path) -and ($Source -eq "local")) { "." }  # file + local: default to .
         else { "" }
     ),
 

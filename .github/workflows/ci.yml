@@ -100,11 +100,9 @@ jobs:
         # bindings (KeyProcessor match), so they need it installed.
         run: uv sync --no-sources --extra dev --extra prompt
 
-      - name: Format check (ruff)
-        run: uv run --no-sync ruff format --check hosts/cli/src
-
-      - name: Lint (ruff)
-        run: uv run --no-sync ruff check hosts/cli/src
+      # Format and lint run only in the ubuntu Quality gates job: a Windows
+      # checkout is CRLF (runner autocrlf), so ruff format --check flags every
+      # source file regardless of the committed content.
 
       - name: Offline tests and package coverage floors
         env:
