@@ -15,7 +15,6 @@ import os
 import platform
 import shlex
 import shutil
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +24,7 @@ import typer
 from kernel.models import McpServerHealth
 from kernel.tools.mcp_client import MCPToolSpec
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -186,6 +186,7 @@ if TYPE_CHECKING:
     from runtime.runtime import HostRuntime
 
     from hosts.cli.transport import PromptTransport
+    from hosts.cli.update import Selection
 
 # ``handle_message`` is deferred to the turn-execution call sites
 # (``_run_prompt_with_teardown``) so ``--version`` / ``modes`` / ``models`` /
@@ -1963,9 +1964,72 @@ _UPDATE_TOOL_NAME = "lisa-cli"
 _UPDATE_IN_PLACE_BLOCKED = platform.system() == "Windows"
 
 
+def _update_receipt_status(tool_dir: Path, selection: Selection) -> list[str]:
+    from hosts.cli.update import UpdateError, policy_status, rewrite_receipt
+
+    try:
+        receipt = (tool_dir / "uv-receipt.toml").read_text(encoding="utf-8")
+        status = policy_status(receipt)
+        if selection.changes_receipt:
+            rewrite_receipt(receipt, selection)
+    except (OSError, UnicodeError, UpdateError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
+    return status
+
+
+def _display_or_defer_update(
+    tool_dir: Path,
+    selection: Selection,
+    uv_bin: str | None,
+    *,
+    force: bool,
+    dry_run: bool,
+    status: list[str],
+) -> str:
+    from hosts.cli.update import format_command, standalone_command
+
+    uv = uv_bin or "uv"
+    argv = [uv, "tool", "upgrade", *(["--reinstall"] if force else []), _UPDATE_TOOL_NAME]
+    printable = shlex.join(argv)
+    if not selection.changes_receipt:
+        for line in status:
+            console.print(escape(line))
+        if status:
+            console.print(
+                "Use lisa update --latest to reset both, or --framework-latest "
+                "to reset only the framework."
+            )
+
+    blocked = uv_bin is None or (_UPDATE_IN_PLACE_BLOCKED and not dry_run)
+    if not dry_run and not blocked:
+        return printable
+
+    if selection.changes_receipt:
+        command = standalone_command(tool_dir, selection, uv, force=force)
+        manual = format_command(command, windows=_UPDATE_IN_PLACE_BLOCKED)
+    elif _UPDATE_IN_PLACE_BLOCKED:
+        tool_parent = str(tool_dir.parent).replace("'", "''")
+        manual = f"$env:UV_TOOL_DIR = '{tool_parent}'; {format_command(argv, windows=True)}"
+    else:
+        manual = f"UV_TOOL_DIR={shlex.quote(str(tool_dir.parent))} {printable}"
+
+    if dry_run:
+        if selection.changes_receipt:
+            cli = f"{selection.cli.mode} {selection.cli.value}".strip()
+            framework = f"{selection.framework.mode} {selection.framework.value}".strip()
+            console.print(f"Would select CLI {escape(cli)}; framework {escape(framework)}.")
+        console.print(f"Run: [bold]{escape(manual)}[/bold]")
+        raise typer.Exit(code=0)
+
+    reason = "uv is not on PATH; install it first" if uv_bin is None else "Windows locks lisa.exe"
+    console.print(f"[yellow]{reason}.[/yellow] Run: [bold]{escape(manual)}[/bold]")
+    raise typer.Exit(code=1)
+
+
 @app.command(
     "update",
-    help="Upgrade the installed lisa CLI in place (uv tool upgrade lisa-cli).",
+    help="Update lisa, or select a release, minor channel, or Git ref.",
 )
 def _update_command(
     force: bool = typer.Option(
@@ -1981,70 +2045,87 @@ def _update_command(
         "--dry-run",
         help="Print the uv command instead of running it.",
     ),
+    version: str = typer.Option("", "--version", help="Temporarily use this CLI release."),
+    pin: str = typer.Option("", "--pin", help="Pin the CLI to this release."),
+    channel: str = typer.Option("", "--channel", help="Track a CLI minor release, e.g. 0.3."),
+    ref: str = typer.Option("", "--ref", help="Track a CLI Git tag, branch, or commit."),
+    latest: bool = typer.Option(False, "--latest", help="Track the latest published releases."),
+    framework_version: str = typer.Option(
+        "", "--framework-version", help="Temporarily use this framework release."
+    ),
+    framework_pin: str = typer.Option(
+        "", "--framework-pin", help="Pin the framework packages to this release."
+    ),
+    framework_channel: str = typer.Option(
+        "", "--framework-channel", help="Track a framework minor release, e.g. 0.5."
+    ),
+    framework_ref: str = typer.Option(
+        "", "--framework-ref", help="Track a framework Git tag, branch, or commit."
+    ),
+    framework_latest: bool = typer.Option(
+        False, "--framework-latest", help="Track the latest published framework packages."
+    ),
 ) -> None:
-    """Upgrade the tool install that provides this ``lisa`` executable.
-
-    ``uv tool upgrade`` is the only correct update path: it replays the
-    install receipt (``<tool-dir>/lisa-cli/uv-receipt.toml``), which is where
-    the installer records the ``--with`` framework requirements, the
-    ``[prompt]`` extra, and ``no-sources``. ``uv tool install --upgrade
-    lisa-cli`` would rewrite that receipt from a bare index spec and drop
-    all of it, so this command never does that.
-    """
+    """Upgrade the running uv tool while preserving its extras and other requirements."""
     from runtime.paths import default_packs_venv, is_tool_install
 
-    if not is_tool_install():
-        console.print(
-            "[yellow]lisa is running from a repo checkout, so there is no uv tool to "
-            "upgrade. Update with:[/yellow] git pull && uv sync"
+    from hosts.cli.update import (
+        Policy,
+        Selection,
+        UpdateError,
+        choose_policy,
+        success_messages,
+        upgrade_tool,
+    )
+
+    try:
+        cli_policy = choose_policy(
+            version=version, pin=pin, channel=channel, ref=ref, latest=latest
         )
-        raise typer.Exit(code=2)
+        framework_policy = choose_policy(
+            version=framework_version,
+            pin=framework_pin,
+            channel=framework_channel,
+            ref=framework_ref,
+            latest=framework_latest,
+        )
+        if latest and framework_policy.mode == "keep":
+            framework_policy = Policy("latest")
+        selection = Selection(cli_policy, framework_policy)
+    except ValueError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
 
     tool_dir = _installed_tool_dir()
     if tool_dir is None:
-        console.print(
-            "[yellow]This interpreter is not a uv tool install (no uv-receipt.toml in "
-            f"{sys.prefix}), so there is nothing for `uv tool upgrade` to update.[/yellow]"
-        )
+        if not is_tool_install():
+            console.print(
+                "[yellow]lisa is running from a repo checkout, so there is no uv tool to "
+                "upgrade. Update with:[/yellow] git pull && uv sync"
+            )
+        else:
+            console.print(
+                "[yellow]This interpreter is not a uv tool install (no uv-receipt.toml in "
+                f"{sys.prefix}), so there is nothing for `uv tool upgrade` to update.[/yellow]"
+            )
         raise typer.Exit(code=2)
 
+    status = _update_receipt_status(tool_dir, selection)
     uv_bin = shutil.which("uv")
-    # Point uv at the tool dir this process is actually running from. Without
-    # it uv consults only UV_TOOL_DIR/default, so an install made with a custom
-    # tool dir would miss the real one and advise `uv tool install lisa-cli` —
-    # the receipt-clobbering path this command exists to avoid.
-    env = {**os.environ, "UV_TOOL_DIR": str(tool_dir.parent)}
-    argv = [
-        uv_bin or "uv",
-        "tool",
-        "upgrade",
-        *(["--reinstall"] if force else []),
-        _UPDATE_TOOL_NAME,
-    ]
-    printable = shlex.join(argv)
+    printable = _display_or_defer_update(
+        tool_dir, selection, uv_bin, force=force, dry_run=dry_run, status=status
+    )
 
-    # On Windows the console script is a .exe trampoline inside the tool
-    # venv, which cannot be replaced while this process still has it open.
-    blocked = uv_bin is None or (_UPDATE_IN_PLACE_BLOCKED and not dry_run)
-    if dry_run or blocked:
-        if dry_run:
-            console.print(f"Run: [bold]{printable}[/bold]")
-        else:
-            reason = (
-                "uv is not on PATH; run it yourself"
-                if uv_bin is None
-                else "Windows locks the running lisa.exe"
-            )
-            console.print(f"[yellow]{reason}.[/yellow] Run: [bold]{printable}[/bold]")
-        raise typer.Exit(code=0 if dry_run else 1)
-
-    console.print(f"Running [bold]{printable}[/bold]")
-    completed = subprocess.run(argv, check=False, env=env)  # inherits stdio so uv streams progress
-    if completed.returncode != 0:
-        console.print(f"[red]uv tool upgrade failed (exit {completed.returncode}).[/red]")
-        raise typer.Exit(code=completed.returncode)
+    console.print(f"Running [bold]{escape(printable)}[/bold]")
+    try:
+        upgrade_tool(tool_dir, selection, uv_bin or "uv", force=force)
+    except UpdateError as exc:
+        console.print(f"[red]{escape(str(exc))}.[/red]")
+        raise typer.Exit(code=exc.code) from exc
 
     console.print("Updated. Restart lisa to use the new version.")
+    for message in success_messages(selection):
+        console.print(escape(message))
     _warn_stale_packs_venv(default_packs_venv())
 
 

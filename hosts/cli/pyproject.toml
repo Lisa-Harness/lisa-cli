@@ -13,14 +13,14 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    "lisa-harness-runtime",
-    "lisa-harness-kernel",
-    "lisa-harness-sdk",
-    "lisa-harness-mcp-servers",
-    "lisa-pack-core",
-    "lisa-pack-introspect",
-    "lisa-pack-memory",
-    "lisa-pack-recovery",
+    "lisa-harness-runtime>=0.5.2",
+    "lisa-harness-kernel>=0.5.2",
+    "lisa-harness-sdk>=0.5.2",
+    "lisa-harness-mcp-servers>=0.5.2",
+    "lisa-pack-core>=0.5.2",
+    "lisa-pack-introspect>=0.5.2",
+    "lisa-pack-memory>=0.5.2",
+    "lisa-pack-recovery>=0.5.2",
     "openai>=1.30.0",
     "rich>=13.7.0",
     "typer>=0.12.3",

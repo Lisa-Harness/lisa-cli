@@ -15,24 +15,21 @@
 #   curl -fsSL ... | bash -s -- --clean --reset  # purge state too
 #
 # The installer auto-detects execution mode:
-#   - Piped (curl ... | bash): defaults to --source git
+#   - Piped (curl ... | bash): defaults to --source pypi
 #   - File (./install.sh): defaults to --source local with --lisa-repo ../lisa --cli-repo .
 #
-# Until the packages are published on PyPI, the installer resolves them
-# straight from git (default for piped) or from local checkouts (default for file):
-#   curl -fsSL ... | bash -s --                          # git source (default for piped)
+# Published releases are the piped default; git and local sources remain available:
+#   curl -fsSL ... | bash -s --                          # PyPI source (default for piped)
+#   curl -fsSL ... | bash -s -- --source git             # GitHub checkouts
 #   ./install.sh                                         # local source (default for file)
 #   ./install.sh --source local --lisa-repo /home/me/Code/lisa
-#
-# Requires: git (for git-mode installs) and network access to
-# github.com/Lisa-Harness/{lisa-cli,lisa}.
 
 set -euo pipefail
 
 # --- Detect execution mode (piped vs file) -----------------------------------
-# When piped (curl ... | bash): $0 is "bash"/"-bash", BASH_SOURCE may not match $0, stdin is not a tty
-# When file (./install.sh): $0 is the script path, BASH_SOURCE[0] == $0, stdin is a tty
-if [[ "${BASH_SOURCE[0]:-}" != "${0}" ]] || [[ ! -t 0 ]] || [[ "$0" == "bash" ]] || [[ "$0" == "-bash" ]]; then
+# When piped (curl ... | bash): $0 is "bash"/"-bash", or BASH_SOURCE differs.
+# When file (./install.sh): $0 is the script path and BASH_SOURCE[0] == $0.
+if [[ "${BASH_SOURCE[0]:-}" != "${0}" ]] || [[ "$0" == "bash" ]] || [[ "$0" == "-bash" ]]; then
     EXECUTED_FROM_PIPE=true
 else
     EXECUTED_FROM_PIPE=false
@@ -40,16 +37,20 @@ fi
 
 # --- Parameter parsing -------------------------------------------------------
 
-# Install source: "git" (resolve packages from GitHub) or "local" (use local
-# checkouts). Default: git when piped, local when run as file.
+# Install source: "pypi", "git", or "local". Default: pypi when piped, local
+# when run as file.
 # Local mode defaults: lisa-repo=../lisa, cli-repo=.
 if $EXECUTED_FROM_PIPE; then
-    SOURCE="${LISA_SOURCE:-git}"
+    SOURCE="${LISA_SOURCE:-pypi}"
 else
     SOURCE="${LISA_SOURCE:-local}"
 fi
 LISA_REPO="${LISA_GIT_REPO:-}"
 CLI_REPO="${LISA_CLI_REPO:-}"
+INSTALLER_DIR=""
+if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
+    INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # Set local defaults when running as file (not piped) and no explicit values given
 if ! $EXECUTED_FROM_PIPE && [[ "$SOURCE" == "local" ]]; then
@@ -67,6 +68,24 @@ SKIP_DIAGNOSTICS=false
 # model manifest and session context so the install re-seeds them.
 DO_CLEAN=false
 DO_RESET=false
+CLI_MODE=keep
+CLI_VALUE=""
+FRAMEWORK_MODE=keep
+FRAMEWORK_VALUE=""
+VERSION_HELPER=""
+VERSION_HELPER_TEMP=""
+
+set_cli_selection() {
+    [[ "$CLI_MODE" == keep ]] || { printf 'Choose only one CLI version option\n' >&2; exit 2; }
+    CLI_MODE="$1"
+    CLI_VALUE="$2"
+}
+
+set_framework_selection() {
+    [[ "$FRAMEWORK_MODE" == keep ]] || { printf 'Choose only one framework version option\n' >&2; exit 2; }
+    FRAMEWORK_MODE="$1"
+    FRAMEWORK_VALUE="$2"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,6 +96,14 @@ while [[ $# -gt 0 ]]; do
         --no-verify)      SKIP_DIAGNOSTICS=true; shift ;;
         --clean)          DO_CLEAN=true;         shift ;;
         --reset)          DO_RESET=true;         shift ;;
+        --version|--pin|--channel|--ref)
+            [[ $# -ge 2 && -n "$2" ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
+            set_cli_selection "${1#--}" "$2"; shift 2 ;;
+        --latest)         set_cli_selection latest ""; shift ;;
+        --framework-version|--framework-pin|--framework-channel|--framework-ref)
+            [[ $# -ge 2 && -n "$2" ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
+            set_framework_selection "${1#--framework-}" "$2"; shift 2 ;;
+        --framework-latest) set_framework_selection latest ""; shift ;;
         --help|-h)
             cat <<HELP
 Usage: install.sh [OPTIONS]
@@ -85,21 +112,31 @@ Install the Lisa CLI as a uv tool and configure model providers. After this
 script, \`lisa\` works from anywhere — no repo checkout, no \`uv run\`.
 
 The installer auto-detects execution mode:
-  - Piped (curl ... | bash): defaults to --source git
+  - Piped (curl ... | bash): defaults to --source pypi
   - File (./install.sh): defaults to --source local with --lisa-repo ../lisa --cli-repo .
 
 Options:
-  --source MODE           Install source: "git" or "local".
-                          Default: git (piped), local (file).
+  --source MODE           Install source: "pypi", "git", or "local".
+                          Default: pypi (piped), local (file).
                           Also settable via \$LISA_SOURCE.
   --lisa-repo DIR         Local checkout of the framework repo (lisa) for
                           --source local. Default (file mode): ../lisa.
                           Also settable via \$LISA_GIT_REPO.
   --cli-repo DIR          Local checkout of the CLI repo (defaults to
-                          DIR/../cli relative to --lisa-repo).
+                          DIR/../lisa-cli relative to --lisa-repo).
                           Default (file mode): .
   --provider LIST         Comma-separated provider(s): ollama,openai,azure_openai,
                           anthropic,google,openrouter,aws (default: \$LISA_PROVIDER or ollama)
+  --version VERSION       Temporarily install a CLI release; the next update tracks latest.
+  --pin VERSION           Stay on an exact CLI release until changed.
+  --channel MAJOR.MINOR   Track patch releases in a CLI minor series.
+  --ref REF               Track a CLI Git tag, branch, or commit.
+  --latest                Track published CLI and framework releases.
+  --framework-version V   Temporarily install this framework release.
+  --framework-pin V       Pin all framework packages to this release.
+  --framework-channel V   Track a framework minor series.
+  --framework-ref REF     Track a framework Git tag, branch, or commit.
+  --framework-latest      Track published framework releases.
   --no-verify             Do not run lisa verify after install
   --clean                 Remove the packs venv and state/installed-packs.json,
                           uninstall the existing lisa tool, then reinstall.
@@ -111,7 +148,11 @@ Options:
   --help, -h              Show this help
 
 Examples:
-  curl -fsSL ... | bash -s --                          # git source (default for piped)
+  curl -fsSL ... | bash -s --                          # published releases
+  curl -fsSL ... | bash -s -- --version 0.3.0          # temporary rollback
+  curl -fsSL ... | bash -s -- --channel 0.3            # follow a minor series
+  curl -fsSL ... | bash -s -- --latest                 # clear selections
+  curl -fsSL ... | bash -s -- --source git             # GitHub checkouts
   ./install.sh                                         # local source (default for file)
   ./install.sh --source local --lisa-repo ~/Code/lisa
   ./install.sh --provider ollama,openai
@@ -123,6 +164,13 @@ HELP
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+case "$SOURCE" in
+    pypi|git|local) ;;
+    *) printf 'Invalid install source: %s\n' "$SOURCE" >&2; exit 2 ;;
+esac
+if [[ "$CLI_MODE" == latest && "$FRAMEWORK_MODE" == keep ]]; then
+    FRAMEWORK_MODE=latest
+fi
 
 # --- Constants ---------------------------------------------------------------
 
@@ -190,19 +238,47 @@ install_uv() {
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 }
 
+prepare_version_helper() {
+    local candidate="$INSTALLER_DIR/hosts/cli/src/hosts/cli/update.py"
+    if [[ -n "$INSTALLER_DIR" && -f "$candidate" ]]; then
+        VERSION_HELPER="$candidate"
+        return
+    fi
+    VERSION_HELPER_TEMP="$(mktemp "${TMPDIR:-/tmp}/lisa-version.XXXXXXXX")"
+    if ! curl -fsSL "https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/hosts/cli/src/hosts/cli/update.py" -o "$VERSION_HELPER_TEMP"; then
+        rm -f -- "$VERSION_HELPER_TEMP"
+        error_exit "Could not download the version selection helper"
+    fi
+    VERSION_HELPER="$VERSION_HELPER_TEMP"
+}
+
+cleanup_version_helper() {
+    if [[ -n "$VERSION_HELPER_TEMP" ]]; then
+        rm -f -- "$VERSION_HELPER_TEMP"
+    fi
+}
+
+run_version_helper() {
+    local action="$1"
+    local -a args=(
+        "$action" --source "$SOURCE" --cli-mode "$CLI_MODE"
+        --framework-mode "$FRAMEWORK_MODE"
+    )
+    [[ -z "$CLI_VALUE" ]] || args+=(--cli-value "$CLI_VALUE")
+    [[ -z "$FRAMEWORK_VALUE" ]] || args+=(--framework-value "$FRAMEWORK_VALUE")
+    [[ -z "$CLI_REPO" ]] || args+=(--cli-repo "$CLI_REPO")
+    [[ -z "$LISA_REPO" ]] || args+=(--lisa-repo "$LISA_REPO")
+    uv run --isolated --no-project --no-config --python 3.12 python "$VERSION_HELPER" "${args[@]}"
+}
+
 install_lisa() {
     # Use the CI-tested Python 3.12: newer system interpreters may lack
     # native dependency wheels (notably google-re2). uv downloads it if needed.
-    #
-    # The framework packages (lisa-kernel, lisa-sdk, ...) are not on PyPI yet,
-    # so every install passes --no-sources (ignore the repos' path-based
-    # tool.uv.sources) and supplies each framework package as an explicit
-    # requirement. Git mode points them at GitHub; local mode at checkouts.
-    # The CLI repo is a uv workspace whose umbrella root is not a package;
-    # the installable member lives at hosts/cli (hence #subdirectory).
-    #
-    # Until lisa-sdk is published, the foreign PyPI package of the same name
-    # is irrelevant: the explicit requirement always wins over the index.
+    if [[ "${CLI_MODE:-keep}" != keep || "${FRAMEWORK_MODE:-keep}" != keep ]]; then
+        run_version_helper install || error_exit "Version-selected installation failed"
+        export PATH="$HOME/.local/bin:$PATH"
+        return
+    fi
     local -a git_withs=(
         --with "lisa-harness-runtime @ git+${LISA_REPO_URL}#subdirectory=runtime"
         --with "lisa-harness-kernel @ git+${LISA_REPO_URL}#subdirectory=kernel"
@@ -215,7 +291,10 @@ install_lisa() {
     )
     local cli_requirement
 
-    if [[ "$SOURCE" == "local" ]]; then
+    if [[ "$SOURCE" == "pypi" ]]; then
+        cli_requirement="lisa-cli[prompt]"
+        WITHS=()
+    elif [[ "$SOURCE" == "local" ]]; then
         [[ -n "$LISA_REPO" ]] || error_exit "--source local requires --lisa-repo (or \$LISA_GIT_REPO)"
         [[ -d "$LISA_REPO" ]] || error_exit "framework repo not found: $LISA_REPO"
         if [[ -z "$CLI_REPO" ]]; then
@@ -546,7 +625,9 @@ main() {
     printf "  ------------------------\n"
     printf "\n"
 
-    if ! have_cmd git; then
+    if { [[ "$CLI_MODE" == ref || "$FRAMEWORK_MODE" == ref ]] ||
+         [[ "$SOURCE" == git && ( "$CLI_MODE" == keep || "$FRAMEWORK_MODE" == keep ) ]]; } &&
+        ! have_cmd git; then
         error_exit "git is required for the ${SOURCE} install source but was not found on PATH"
     fi
 
@@ -560,6 +641,12 @@ main() {
     local uv_version
     uv_version=$(uv --version 2>/dev/null | cut -d' ' -f2 || echo "installed")
     printf "  OK: uv %s\n" "$uv_version"
+
+    if [[ "$CLI_MODE" != keep || "$FRAMEWORK_MODE" != keep ]]; then
+        prepare_version_helper
+        trap cleanup_version_helper EXIT
+        run_version_helper validate || error_exit "Invalid version selection"
+    fi
 
     # Runs after uv exists: the tool uninstall step shells out to it.
     if $DO_CLEAN; then

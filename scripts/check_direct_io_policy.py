@@ -67,6 +67,12 @@ _WRITE_OPEN_MODES: frozenset[str] = frozenset({"w", "a", "x", "wb", "ab", "xb"})
 # Each value is a tuple of line substrings that are permitted in that file.
 _ALLOWLIST: dict[str, tuple[str, ...]] = {
     "hosts/cli/src/hosts/cli/entry.py": ("history_path.parent.mkdir(parents=True, exist_ok=True)",),
+    # uv owns the tool receipt; update must atomically change its requirements
+    # without routing it through Lisa's runtime data storage.
+    "hosts/cli/src/hosts/cli/update.py": (
+        "os.replace(temp_path, receipt_path)",
+        "temp_path.unlink(missing_ok=True)",
+    ),
 }
 
 

@@ -13,6 +13,15 @@ function Invoke-Native {
     param([string]$FilePath, [string[]]$ArgumentList)
     $script:calls++
     Assert-True ($FilePath -eq "uv") "Expected uv"
+    if ($script:expectVersionHelper) {
+        Assert-True (($ArgumentList[0..5] -join " ") -eq "run --isolated --no-project --no-config --python 3.12") "Expected isolated version helper"
+        Assert-True ($ArgumentList[6] -eq "python" -and $ArgumentList[7] -eq $script:VersionHelper) "Expected shared helper"
+        Assert-True ($ArgumentList[8] -eq $script:expectedAction) "Incorrect helper action"
+        $joined = $ArgumentList -join " "
+        Assert-True ($joined -match "--cli-mode version" -and $joined -match "--cli-value 0.3.0") "CLI version missing"
+        Assert-True ($joined -match "--framework-mode pin" -and $joined -match "--framework-value 0.5.2") "Framework pin missing"
+        return 0
+    }
     Assert-True (($ArgumentList[0..3] -join " ") -eq "tool install --python 3.12") "Expected Python 3.12"
     $remaining = @($ArgumentList | Select-Object -Skip 4)
     if ($script:calls -eq 2) {
@@ -25,7 +34,8 @@ function Invoke-Native {
         $remaining = @($remaining | Select-Object -Skip 1)
     }
     Assert-True ($remaining[0] -eq $script:expectedRequirement) "Incorrect CLI source or missing prompt extra"
-    Assert-True ($remaining.Count -eq 17) "Expected all eight framework requirements"
+    $expectedCount = if ($Source -eq "pypi") { 1 } else { 17 }
+    Assert-True ($remaining.Count -eq $expectedCount) "Incorrect framework requirements"
     for ($i = 1; $i -lt $remaining.Count; $i += 2) {
         Assert-True ($remaining[$i] -eq "--with" -and $remaining[$i + 1] -like "* @ *") "Invalid framework requirement"
     }
@@ -36,8 +46,12 @@ function Invoke-Native {
 $LisaRepo = $repoRoot
 $CliRepo = $repoRoot
 $env:UV_PYTHON = "3.15"
-foreach ($Source in @("git", "local")) {
-    $script:expectedRequirement = if ($Source -eq "git") {
+$script:expectVersionHelper = $false
+foreach ($Source in @("pypi", "git", "local")) {
+    $script:expectedRequirement = if ($Source -eq "pypi") {
+        "lisa-cli[prompt]"
+    }
+    elseif ($Source -eq "git") {
         "lisa-cli[prompt] @ git+https://github.com/Lisa-Harness/lisa-cli.git#subdirectory=hosts/cli"
     }
     else {
@@ -50,6 +64,29 @@ foreach ($Source in @("git", "local")) {
         Assert-True ($script:calls -eq $expectedCalls) "Unexpected install call count"
     }
 }
+$Source = "pypi"
+$script:CliMode = "version"
+$script:CliValue = "0.3.0"
+$script:FrameworkMode = "pin"
+$script:FrameworkValue = "0.5.2"
+$script:VersionHelper = Join-Path $repoRoot "hosts\cli\src\hosts\cli\update.py"
+$script:expectVersionHelper = $true
+$script:expectedAction = "validate"
+$script:calls = 0
+Invoke-LisaVersionHelper -Action validate
+$script:expectedAction = "install"
+Install-LisaTool
+Assert-True ($script:calls -eq 2) "Expected validation and install helper calls"
+$script:expectVersionHelper = $false
+$script:CliMode = "keep"
+$script:FrameworkMode = "keep"
+$Version = "0.3.0"
+$Pin = "0.3.1"
+$rejected = $false
+try { Set-LisaVersionSelections } catch { $rejected = $true }
+Assert-True $rejected "Conflicting CLI selections must fail"
+$Version = ""
+$Pin = ""
 Write-Output "PowerShell installer tests passed"
 
 # -Clean / -Reset: run against a throwaway data dir with uv stubbed so no real

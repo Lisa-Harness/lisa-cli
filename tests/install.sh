@@ -8,7 +8,7 @@ bash -n "$repo_root/install.sh"
 source <(sed -n '/^install_lisa() {$/,/^}$/p' "$repo_root/install.sh")
 error_exit() { printf '%s\n' "$1" >&2; exit 1; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-for helper in packs_venv_path remove_path clean_install_state reset_seeded_state; do
+for helper in run_version_helper packs_venv_path remove_path clean_install_state reset_seeded_state; do
     source <(sed -n "/^${helper}() {\$/,/^}\$/p" "$repo_root/install.sh")
 done
 
@@ -36,7 +36,11 @@ uv() {
     fi
     [[ "$1" == "$expected_requirement" ]] || error_exit "Incorrect CLI source or missing prompt extra"
     shift
-    [[ "$#" == 16 ]] || error_exit "Expected all eight framework requirements"
+    if [[ "$SOURCE" == pypi ]]; then
+        [[ "$#" == 0 ]] || error_exit "Published installs should resolve framework dependencies"
+    else
+        [[ "$#" == 16 ]] || error_exit "Expected all eight framework requirements"
+    fi
     while [[ "$#" -gt 0 ]]; do
         [[ "$1" == --with && "$2" == *" @ "* ]] || error_exit "Invalid framework requirement"
         shift 2
@@ -47,8 +51,10 @@ uv() {
     return 0
 }
 
-for SOURCE in git local; do
-    if [[ "$SOURCE" == git ]]; then
+for SOURCE in pypi git local; do
+    if [[ "$SOURCE" == pypi ]]; then
+        expected_requirement="lisa-cli[prompt]"
+    elif [[ "$SOURCE" == git ]]; then
         expected_requirement="lisa-cli[prompt] @ git+$CLI_REPO_URL#subdirectory=hosts/cli"
     else
         expected_requirement="lisa-cli[prompt] @ $CLI_REPO/hosts/cli"
@@ -63,6 +69,37 @@ for SOURCE in git local; do
         fi
     done
 done
+
+uv() {
+    calls=$((calls + 1))
+    [[ "$1" == run && "$2" == --isolated && "$3" == --no-project &&
+       "$4" == --no-config && "$5" == --python && "$6" == 3.12 ]] ||
+        error_exit "Expected isolated version helper"
+    shift 6
+    [[ "$1" == python && "$2" == "$VERSION_HELPER" && "$3" == install ]] ||
+        error_exit "Expected version helper install"
+    shift 3
+    [[ "$1" == --source && "$2" == pypi && "$3" == --cli-mode && "$4" == version &&
+       "$5" == --framework-mode && "$6" == pin && "$7" == --cli-value &&
+       "$8" == 0.3.0 && "$9" == --framework-value && "${10}" == 0.5.2 ]] ||
+        error_exit "Version selections were not forwarded"
+}
+SOURCE=pypi
+CLI_MODE=version
+CLI_VALUE=0.3.0
+FRAMEWORK_MODE=pin
+FRAMEWORK_VALUE=0.5.2
+VERSION_HELPER="$repo_root/hosts/cli/src/hosts/cli/update.py"
+calls=0
+install_lisa
+[[ "$calls" == 1 ]] || error_exit "Expected one version helper invocation"
+
+if bash "$repo_root/install.sh" --version 0.3.0 --pin 0.3.1 >/dev/null 2>&1; then
+    error_exit "Conflicting CLI selections must fail"
+fi
+if bash "$repo_root/install.sh" --framework-ref >/dev/null 2>&1; then
+    error_exit "Missing framework ref must fail"
+fi
 
 # --clean / --reset: run against a throwaway data dir with uv stubbed so no
 # real install or uninstall is ever touched.

@@ -1,29 +1,21 @@
-"""Tests for the CLI ``lisa update`` command.
-
-``lisa update`` is a thin pass-through to ``uv tool upgrade lisa-cli``. The
-command exists (rather than telling operators to run uv themselves) because
-it knows which uv invocation is safe: ``uv tool upgrade`` replays the install
-receipt, while ``uv tool install --upgrade`` would rewrite it and drop the
-``--with`` framework requirements, extras, and ``no-sources`` the installer
-recorded.
-
-These tests stub ``is_tool_install``/``shutil.which``/``subprocess.run`` so no
-real uv process runs; they assert the emitted argv, the refusal paths (repo
-checkout, missing uv, Windows), and the packs-venv reminder.
-"""
+"""Tests for the CLI ``lisa update`` command and its uv receipt handling."""
 
 from __future__ import annotations
 
 # pylint: disable=protected-access
 import shutil
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 import typer
+from typer.testing import CliRunner
 
 from hosts.cli import main as cli_main
+from hosts.cli import update as cli_update
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -55,6 +47,17 @@ def _run_update(
     windows: bool = False,
     tool_dir: Path | None = None,
     with_receipt: bool = True,
+    version: str = "",
+    pin: str = "",
+    channel: str = "",
+    ref: str = "",
+    latest: bool = False,
+    framework_version: str = "",
+    framework_pin: str = "",
+    framework_channel: str = "",
+    framework_ref: str = "",
+    framework_latest: bool = False,
+    receipt_text: str = '[tool]\nrequirements = [{ name = "lisa-cli", extras = ["prompt"] }]\n',
 ) -> tuple[_CapturingConsole, list[list[str]], int | None, dict[str, str]]:
     """Invoke ``_update_command`` with stubbed environment seams.
 
@@ -87,7 +90,7 @@ def _run_update(
     if with_receipt:
         tool_dir.mkdir(parents=True, exist_ok=True)
         receipt = tool_dir / "uv-receipt.toml"
-        receipt.write_text("[tool]\nrequirements = []\n", encoding="utf-8")
+        receipt.write_text(receipt_text, encoding="utf-8")
 
     exit_code: int | None = None
     try:
@@ -95,17 +98,30 @@ def _run_update(
             patch("runtime.paths.is_tool_install", return_value=tool_install),
             patch("runtime.paths.default_packs_venv", return_value=venv),
             patch.object(cli_main.shutil, "which", return_value=uv_path),
-            patch.object(cli_main.subprocess, "run", new=_fake_run),
+            patch.object(cli_update.subprocess, "run", new=_fake_run),
             patch.object(cli_main, "_UPDATE_IN_PLACE_BLOCKED", new=windows),
             patch.object(cli_main.sys, "prefix", new=str(tool_dir)),
             patch.object(cli_main, "console", new=console),
         ):
             try:
-                cli_main._update_command(force=force, dry_run=dry_run)
+                cli_main._update_command(
+                    force=force,
+                    dry_run=dry_run,
+                    version=version,
+                    pin=pin,
+                    channel=channel,
+                    ref=ref,
+                    latest=latest,
+                    framework_version=framework_version,
+                    framework_pin=framework_pin,
+                    framework_channel=framework_channel,
+                    framework_ref=framework_ref,
+                    framework_latest=framework_latest,
+                )
             except typer.Exit as exc:
                 exit_code = exc.exit_code
     finally:
-        if receipt is not None:
+        if receipt is not None and scratch is not None:
             receipt.unlink(missing_ok=True)
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -138,7 +154,7 @@ def test_force_adds_reinstall_flag() -> None:
 
 def test_repo_checkout_points_at_git_pull() -> None:
     """Repo mode has no tool to upgrade; the fix is git pull + uv sync."""
-    console, invocations, exit_code, _env = _run_update(tool_install=False)
+    console, invocations, exit_code, _env = _run_update(tool_install=False, with_receipt=False)
 
     assert invocations == []
     assert exit_code == 2
@@ -151,7 +167,7 @@ def test_missing_uv_prints_command_and_fails() -> None:
 
     assert invocations == []
     assert exit_code == 1
-    assert "uv tool upgrade lisa-cli" in console.text
+    assert "tool" in console.text and "upgrade" in console.text and "lisa-cli" in console.text
     assert "not on PATH" in console.text
 
 
@@ -161,7 +177,7 @@ def test_windows_prints_command_instead_of_upgrading() -> None:
 
     assert invocations == []
     assert exit_code == 1
-    assert "uv tool upgrade lisa-cli" in console.text
+    assert "tool" in console.text and "upgrade" in console.text and "lisa-cli" in console.text
     assert "Windows" in console.text
 
 
@@ -247,3 +263,103 @@ def test_refuses_when_not_a_uv_tool_install(tmp_path: Path) -> None:
     assert invocations == []
     assert exit_code == 2
     assert "uv-receipt.toml" in console.text
+
+
+def test_uv_tool_with_editable_framework_can_update(tmp_path: Path) -> None:
+    console, invocations, exit_code, _ = _run_update(
+        tool_dir=tmp_path / "tools" / "lisa-cli", tool_install=False
+    )
+    assert exit_code is None
+    assert invocations == [["/usr/local/bin/uv", "tool", "upgrade", "lisa-cli"]]
+    assert "Restart lisa" in console.text
+
+
+def test_pin_persists_in_receipt_and_reports_recovery(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "tools" / "lisa-cli"
+    console, invocations, exit_code, _ = _run_update(pin="0.3.0", tool_dir=tool_dir)
+    receipt = tomllib.loads((tool_dir / "uv-receipt.toml").read_text(encoding="utf-8"))
+    assert receipt["tool"]["requirements"][0]["specifier"] == "==0.3.0"
+    assert invocations and exit_code is None
+    assert "tracking pin 0.3.0" in console.text
+    assert "installer with --latest" in console.text
+
+
+def test_temporary_version_restores_unpinned_receipt(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "tools" / "lisa-cli"
+    console, invocations, exit_code, _ = _run_update(version="0.3.0", tool_dir=tool_dir)
+    receipt = tomllib.loads((tool_dir / "uv-receipt.toml").read_text(encoding="utf-8"))
+    assert receipt["tool"]["requirements"] == [{"name": "lisa-cli", "extras": ["prompt"]}]
+    assert invocations and exit_code is None
+    assert "temporary" in console.text
+    assert "next normal update" in console.text
+
+
+def test_conflicting_versions_fail_before_invoking_uv(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "tools" / "lisa-cli"
+    console, invocations, exit_code, _ = _run_update(
+        version="0.3.0", pin="0.3.1", tool_dir=tool_dir
+    )
+    assert exit_code == 2
+    assert not invocations
+    assert "only one" in console.text
+
+
+def test_invalid_receipt_encoding_fails_cleanly(tmp_path: Path) -> None:
+    (tmp_path / "uv-receipt.toml").write_bytes(b"\xff")
+    console = _CapturingConsole()
+    with (
+        patch.object(cli_main, "console", console),
+        pytest.raises(typer.Exit) as exc,
+    ):
+        cli_main._update_receipt_status(tmp_path, cli_update.Selection())
+    assert exc.value.exit_code == 1
+    assert "utf-8" in console.text
+
+
+def test_dry_run_is_copyable_and_does_not_change_receipt(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "tools" / "lisa-cli"
+    console, invocations, exit_code, _ = _run_update(channel="0.3", dry_run=True, tool_dir=tool_dir)
+    receipt = tomllib.loads((tool_dir / "uv-receipt.toml").read_text(encoding="utf-8"))
+    assert receipt["tool"]["requirements"] == [{"name": "lisa-cli", "extras": ["prompt"]}]
+    assert exit_code == 0 and not invocations
+    assert "Would select CLI channel 0.3" in console.text
+    assert "--cli-mode channel" in console.text
+    assert str(tool_dir) in console.text
+
+
+def test_windows_selected_update_uses_external_helper(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "custom tools" / "lisa-cli"
+    console, invocations, exit_code, _ = _run_update(
+        windows=True, framework_ref="release/0.5", tool_dir=tool_dir
+    )
+    assert exit_code == 1 and not invocations
+    assert "'--framework-mode' 'ref'" in console.text
+    assert "'release/0.5'" in console.text
+    assert str(tool_dir) in console.text
+
+
+def test_plain_update_displays_existing_pin(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "tools" / "lisa-cli"
+    receipt = '[tool]\nrequirements = [{name="lisa-cli", specifier="==0.3.0"}]\n'
+    console, _, exit_code, _ = _run_update(tool_dir=tool_dir, receipt_text=receipt)
+    assert exit_code is None
+    assert "CLI tracking: ==0.3.0" in console.text
+    assert "lisa update --latest" in console.text
+    assert "--framework-latest" in console.text
+
+
+def test_typer_parses_update_version_without_global_version_conflict(tmp_path: Path) -> None:
+    tool_dir = tmp_path / "tools" / "lisa-cli"
+    tool_dir.mkdir(parents=True)
+    (tool_dir / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{name="lisa-cli"}]\n', encoding="utf-8"
+    )
+    console = _CapturingConsole()
+    with (
+        patch.object(cli_main.sys, "prefix", str(tool_dir)),
+        patch.object(cli_main.shutil, "which", return_value="/usr/local/bin/uv"),
+        patch.object(cli_main, "console", console),
+    ):
+        result = CliRunner().invoke(cli_main.app, ["update", "--version", "0.3.0", "--dry-run"])
+    assert result.exit_code == 0
+    assert "Would select CLI version 0.3.0" in console.text

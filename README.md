@@ -42,15 +42,43 @@ Windows:
 irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
 ```
 
+Piped installers use the latest published releases from PyPI. Running a saved
+installer from a checkout defaults to local sources; use `--source git` or
+`-Source git` to install the current GitHub checkouts instead.
+
 Both installers accept options, in Bash and PowerShell spellings:
 
-| Option       | Bash                                     | PowerShell                            |
-| ------------ | ---------------------------------------- | ------------------------------------- |
-| Help         | `--help`                                 | `-?`                                  |
-| Providers    | `--provider ollama,openai`               | `-Provider ollama,openai`             |
+| Option | Bash | PowerShell |
+| --- | --- | --- |
+| Help | `--help` | `-?` |
+| Providers | `--provider ollama,openai` | `-Provider ollama,openai` |
 | Local source | `--source local --lisa-repo ~/Code/lisa` | `-Source local -LisaRepo ~/Code/lisa` |
-| Clean        | `--clean`                                | `-Clean`                              |
-| Reset        | `--reset`                                | `-Reset`                              |
+| Temporary CLI version | `--version 0.3.0` | `-Version 0.3.0` |
+| Pin CLI | `--pin 0.3.0` | `-Pin 0.3.0` |
+| CLI minor series | `--channel 0.3` | `-Channel 0.3` |
+| CLI Git ref | `--ref v0.3.0` | `-Ref v0.3.0` |
+| Published releases | `--latest` | `-Latest` |
+| Temporary framework version | `--framework-version 0.5.2` | `-FrameworkVersion 0.5.2` |
+| Pin framework | `--framework-pin 0.5.2` | `-FrameworkPin 0.5.2` |
+| Framework minor series | `--framework-channel 0.5` | `-FrameworkChannel 0.5` |
+| Framework Git ref | `--framework-ref v0.5.2` | `-FrameworkRef v0.5.2` |
+| Published framework | `--framework-latest` | `-FrameworkLatest` |
+| Clean | `--clean` | `-Clean` |
+| Reset | `--reset` | `-Reset` |
+
+For example, to install an older CLI temporarily:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash -s -- --version 0.3.0
+```
+
+```pwsh
+iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Version 0.3.0"
+```
+
+Version selections override the corresponding CLI or framework source. For
+example, `--source git --version 0.3.0` uses the published CLI and Git
+framework packages. The two components can be selected independently.
 
 `--clean` removes the state the installer owns outside uv's receipts — the
 packs venv (`~/.lisa/venv`) and `state/installed-packs.json` — and uninstalls
@@ -72,7 +100,7 @@ regenerate configuration, or with `--clean` for a full teardown.
 1. Verify the setup
 
 ```bash
-uv tool install --python 3.12 lisa-cli[prompt]
+uv tool install --python 3.12 'lisa-cli[prompt]'
 lisa models discover
 # optionally edit ~/.lisa/state/models.proposed.yaml
 lisa models apply
@@ -91,12 +119,80 @@ lisa update                    # upgrade the CLI itself
 lisa pack update --all         # re-install installed packs from their sources
 ```
 
-`lisa update` is a pass-through to `uv tool upgrade`, which replays the
-install receipt (`~/.local/share/uv/tools/lisa-cli/uv-receipt.toml`). That
-receipt records how lisa was installed — the `[prompt]` extra, any `--with`
-framework requirements, and `no-sources` — so use `lisa update` rather than
-`uv tool install --upgrade lisa-cli`, which resolves from the index and
-rewrites the receipt.
+With no selection, `lisa update` runs `uv tool upgrade` using the existing
+install receipt (`~/.local/share/uv/tools/lisa-cli/uv-receipt.toml`). It
+continues tracking the installed source: published releases for a PyPI
+install, Git for a Git install, or a local checkout for a local install.
+Selections adjust the relevant requirements in that receipt while preserving
+the `[prompt]` extra, unrelated `--with` requirements, and uv options.
+
+#### Choosing releases
+
+Most users can run `lisa update` whenever they want the latest release.
+For a temporary rollback, specify a version:
+
+```bash
+lisa update --version 0.3.0   # install this CLI release for now
+lisa update                   # resume tracking the latest compatible CLI release
+```
+
+`--version` switches CLI tracking to published releases after the rollback.
+It does not change a separately selected framework policy. For a persistent
+selection, use one of:
+
+```bash
+lisa update --pin 0.3.0       # stay on this exact CLI release
+lisa update --channel 0.3     # track >=0.3,<0.4 (including patch releases)
+lisa update --ref v0.3.0      # track a CLI Git tag, branch, or commit
+lisa update --latest          # return CLI and framework to published releases
+```
+
+An exact pin, channel, or Git ref remains selected until changed. An update
+reports the active selection and how to leave it. A branch ref follows that
+branch on subsequent updates; use `--force` to reinstall when source code
+changes without a version bump.
+
+The framework has independent equivalents: `--framework-version`,
+`--framework-pin`, `--framework-channel`, and `--framework-ref`.
+They apply the same selection to all eight framework and bundled-pack
+packages. `--framework-version` is temporary; the other three persist.
+`--framework-latest` resets only the framework. For example:
+
+```bash
+lisa update --channel 0.3 --framework-channel 0.5
+lisa update --framework-version 0.5.2
+lisa update --latest --framework-pin 0.5.2
+```
+
+The CLI currently declares framework and bundled-pack requirements of
+`>=0.5.2`, the tested release baseline. uv rejects selections incompatible
+with declared package requirements. Older CLI releases may have less
+restrictive metadata, so a CLI rollback alone does not guarantee a compatible
+framework rollback; select a known-compatible framework version as well when
+needed. Newer releases are allowed, but are not automatically guaranteed to
+be compatible.
+
+If a rollback installs a CLI that predates `lisa update` or its `--latest`
+option, or the selected combination cannot start, rerun the current installer
+to recover without `--clean`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.sh | bash -s -- --latest
+```
+
+```pwsh
+iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Latest"
+```
+
+The recovery installer creates a new uv tool receipt, so custom `--with`
+requirements from a previous installation must be added again. When the CLI
+starts and supports it, prefer `lisa update --latest`, which preserves
+unrelated requirements.
+
+Selections are staged in the uv receipt while an update runs. Avoid running
+another Lisa installer or `uv tool` operation on the same install concurrently.
+If an update is forcibly terminated, a temporary selection may remain staged;
+use `lisa update --latest` or the recovery installer above to reset it.
 
 It locates the install from the running interpreter rather than assuming the
 default tool directory, so installs made with a custom `UV_TOOL_DIR` upgrade
@@ -106,7 +202,7 @@ refused instead of guessed at. Flags:
 | Flag | Effect |
 | --- | --- |
 | `--force` | Add `--reinstall`, so a local or git install whose version did not bump still picks up new code. |
-| `--dry-run` | Print the uv command without running it. |
+| `--dry-run` | Print the planned selection and runnable command without changing the receipt. |
 
 Two situations it deliberately hands back to you:
 
@@ -114,7 +210,8 @@ Two situations it deliberately hands back to you:
   `git pull && uv sync` instead.
 
 - On Windows the running `lisa.exe` cannot be replaced in place, so it
-  prints the uv command for you to run after exiting.
+  prints a command to run after exiting. Version selections use an isolated
+  Python helper to preserve the same receipt and selection semantics.
 
 #### Why packs need their own update
 

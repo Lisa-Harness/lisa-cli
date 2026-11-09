@@ -10,7 +10,7 @@
     script, `lisa` works from any directory - no checkout, no `uv run`.
 
     The installer auto-detects execution mode:
-      - Piped (irm ... | iex): defaults to -Source git
+      - Piped (irm ... | iex): defaults to -Source pypi
       - File (.\install.ps1): defaults to -Source local with -LisaRepo ..\lisa -CliRepo .
 
     Parameters work when the downloaded file is run directly. For piped
@@ -20,10 +20,11 @@
         irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
         iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Provider anthropic"
 
-    Until the packages are published on PyPI, the installer resolves them
-    straight from git (default for piped) or from local checkouts (default for file):
+    Piped installs use published releases by default. Git and local checkouts
+    are available for development:
 
         .\install.ps1                                    # local source (default for file)
+        .\install.ps1 -Source git                        # GitHub checkouts
         .\install.ps1 -Source local -LisaRepo C:\Code\lisa
 
     -Clean removes what the install owns outside uv's receipts (the packs
@@ -32,21 +33,42 @@
     again. Both then continue with a normal install.
 
 .PARAMETER Source
-    Install source: "git" (default for piped) resolves the packages from GitHub;
-    "local" (default for file) uses local checkouts (requires -LisaRepo).
+    Install source: "pypi" (default for piped) uses published releases, "git"
+    uses GitHub, and "local" (default for file) uses local checkouts.
     Also settable via the LISA_SOURCE environment variable.
 
 .PARAMETER LisaRepo
     Local checkout of the framework repo (lisa) for -Source local.
     Default (file mode): ..\lisa. Also settable via the LISA_GIT_REPO
-    environment variable. The CLI repo defaults to . relative to it (override
-    with LISA_CLI_REPO).
+    environment variable. The CLI repo defaults to . in file mode, or to a
+    sibling lisa-cli directory when unspecified. Override with LISA_CLI_REPO.
 
 .PARAMETER Provider
     One or more model providers to enable at install time.
     Accepted values: ollama, openai, azure_openai, anthropic, google,
     openrouter, aws. Default: ollama (local, no API key). When multiple are
     given, .env is pre-populated with keys for all of them.
+
+.PARAMETER Version
+    Temporarily install a CLI release; the next normal update tracks latest.
+.PARAMETER Pin
+    Stay on an exact CLI release until changed.
+.PARAMETER Channel
+    Track CLI patch releases in a major.minor series.
+.PARAMETER Ref
+    Track a CLI Git tag, branch, or commit.
+.PARAMETER Latest
+    Track the latest published CLI and framework releases.
+.PARAMETER FrameworkVersion
+    Temporarily install a framework release.
+.PARAMETER FrameworkPin
+    Pin all framework packages to one release.
+.PARAMETER FrameworkChannel
+    Track a framework major.minor series.
+.PARAMETER FrameworkRef
+    Track a framework Git tag, branch, or commit.
+.PARAMETER FrameworkLatest
+    Track the latest published framework packages.
 
 .PARAMETER SkipDiagnostics
     Skip running lisa verify after installation.
@@ -70,8 +92,13 @@
     .\install.ps1 -Clean -Reset
 
 .EXAMPLE
-    # Piped (irm | iex): git source (default), Ollama only
+    # Piped (irm | iex): published releases, Ollama only
     irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1 | iex
+
+.EXAMPLE
+    # Temporarily roll back, or return to releases after a pin
+    iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Version 0.3.0"
+    iex "& { $(irm https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/install.ps1) } -Latest"
 
 .EXAMPLE
     # File (.\install.ps1): local source (default), Ollama only
@@ -95,7 +122,7 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [ValidateSet("git", "local")]
+    [ValidateSet("pypi", "git", "local")]
     [string]$Source = $(
         # The invocation-mode check must live inside each default: parameter
         # defaults bind before the script body runs, so a script-scoped
@@ -104,7 +131,7 @@ param(
         # MyCommand.Path means the code is evaluating in the caller's session
         # (irm | iex); a real path means the saved script file was executed.
         if ([Environment]::GetEnvironmentVariable("LISA_SOURCE")) { [Environment]::GetEnvironmentVariable("LISA_SOURCE") }
-        elseif ($null -eq $MyInvocation.MyCommand.Path) { "git" }  # piped: default to git
+        elseif ($null -eq $MyInvocation.MyCommand.Path) { "pypi" }  # piped: published releases
         else { "local" }  # file: default to local
     ),
 
@@ -130,6 +157,36 @@ param(
     ),
 
     [Parameter()]
+    [string]$Version = "",
+
+    [Parameter()]
+    [string]$Pin = "",
+
+    [Parameter()]
+    [string]$Channel = "",
+
+    [Parameter()]
+    [string]$Ref = "",
+
+    [Parameter()]
+    [switch]$Latest,
+
+    [Parameter()]
+    [string]$FrameworkVersion = "",
+
+    [Parameter()]
+    [string]$FrameworkPin = "",
+
+    [Parameter()]
+    [string]$FrameworkChannel = "",
+
+    [Parameter()]
+    [string]$FrameworkRef = "",
+
+    [Parameter()]
+    [switch]$FrameworkLatest,
+
+    [Parameter()]
     [switch]$SkipDiagnostics,
 
     [Parameter()]
@@ -141,13 +198,57 @@ param(
 
 # PSScriptAnalyzer doesn't like how we use our params as globals; this calms
 # it (same no-op-read trick as astral.sh/uv's install.ps1).
-$null = $Source, $LisaRepo, $CliRepo, $Provider, $SkipDiagnostics, $Clean, $Reset
+$null = $Source, $LisaRepo, $CliRepo, $Provider, $SkipDiagnostics, $Clean, $Reset,
+    $Version, $Pin, $Channel, $Ref, $Latest, $FrameworkVersion, $FrameworkPin,
+    $FrameworkChannel, $FrameworkRef, $FrameworkLatest
 
 # -- Script state ------------------------------------------------------------
 
 # A null MyCommand.Path means this code is being evaluated in the caller's
 # session (irm | iex) - there is no script file on disk.
 $script:ExecutedFromIex = ($null -eq $MyInvocation.MyCommand.Path)
+$script:InstallerDir = if ($script:ExecutedFromIex) { "" } else { $PSScriptRoot }
+$script:CliMode = "keep"
+$script:CliValue = ""
+$script:FrameworkMode = "keep"
+$script:FrameworkValue = ""
+$script:VersionHelper = ""
+$script:VersionHelperTemporary = ""
+
+function Set-LisaVersionSelections {
+    <#
+    .SYNOPSIS
+        Validate mutually exclusive version options before any clean or install.
+    #>
+    [CmdletBinding()]
+    param()
+    $cliChoices = @()
+    if ($Version) { $cliChoices += @{ Mode = "version"; Value = $Version } }
+    if ($Pin) { $cliChoices += @{ Mode = "pin"; Value = $Pin } }
+    if ($Channel) { $cliChoices += @{ Mode = "channel"; Value = $Channel } }
+    if ($Ref) { $cliChoices += @{ Mode = "ref"; Value = $Ref } }
+    if ($Latest) { $cliChoices += @{ Mode = "latest"; Value = "" } }
+    if ($cliChoices.Count -gt 1) { throw "Choose only one CLI version option" }
+    if ($cliChoices.Count -eq 1) {
+        $script:CliMode = $cliChoices[0].Mode
+        $script:CliValue = $cliChoices[0].Value
+    }
+
+    $frameworkChoices = @()
+    if ($FrameworkVersion) { $frameworkChoices += @{ Mode = "version"; Value = $FrameworkVersion } }
+    if ($FrameworkPin) { $frameworkChoices += @{ Mode = "pin"; Value = $FrameworkPin } }
+    if ($FrameworkChannel) { $frameworkChoices += @{ Mode = "channel"; Value = $FrameworkChannel } }
+    if ($FrameworkRef) { $frameworkChoices += @{ Mode = "ref"; Value = $FrameworkRef } }
+    if ($FrameworkLatest) { $frameworkChoices += @{ Mode = "latest"; Value = "" } }
+    if ($frameworkChoices.Count -gt 1) { throw "Choose only one framework version option" }
+    if ($frameworkChoices.Count -eq 1) {
+        $script:FrameworkMode = $frameworkChoices[0].Mode
+        $script:FrameworkValue = $frameworkChoices[0].Value
+    }
+    elseif ($Latest) {
+        $script:FrameworkMode = "latest"
+    }
+}
 
 function Write-Step {
     <#
@@ -303,29 +404,69 @@ function Install-UvIfMissing {
     }
 }
 
+function Initialize-LisaVersionHelper {
+    <#
+    .SYNOPSIS
+        Locate the shared version helper or download it for a piped install.
+    #>
+    [CmdletBinding()]
+    param()
+    if ($script:InstallerDir) {
+        $candidate = Join-Path $script:InstallerDir "hosts\cli\src\hosts\cli\update.py"
+        if (Test-Path -LiteralPath $candidate) {
+            $script:VersionHelper = $candidate
+            return
+        }
+    }
+    $script:VersionHelperTemporary = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-version-" + [guid]::NewGuid().ToString("N") + ".py")
+    $url = "https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/hosts/cli/src/hosts/cli/update.py"
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $script:VersionHelperTemporary
+    $script:VersionHelper = $script:VersionHelperTemporary
+}
+
+function Invoke-LisaVersionHelper {
+    <#
+    .SYNOPSIS
+        Validate or apply version selections in an isolated Python environment.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet("validate", "install")][string]$Action)
+    $arguments = @(
+        "run", "--isolated", "--no-project", "--no-config", "--python", "3.12",
+        "python", $script:VersionHelper, $Action, "--source", $Source,
+        "--cli-mode", $script:CliMode, "--framework-mode", $script:FrameworkMode
+    )
+    if ($script:CliValue) { $arguments += @("--cli-value", $script:CliValue) }
+    if ($script:FrameworkValue) { $arguments += @("--framework-value", $script:FrameworkValue) }
+    if ($CliRepo) { $arguments += @("--cli-repo", $CliRepo) }
+    if ($LisaRepo) { $arguments += @("--lisa-repo", $LisaRepo) }
+    $exitCode = Invoke-Native -FilePath "uv" -ArgumentList $arguments
+    if ($exitCode -ne 0) { throw "Version selection $Action failed (exit $exitCode)" }
+}
+
 function Install-LisaTool {
     <#
     .SYNOPSIS
-        Install (or upgrade) the lisa tool, resolving the framework packages
-        from git or local checkouts.
+        Install (or upgrade) the lisa tool from published, git, or local sources.
     .DESCRIPTION
         Use the CI-tested Python 3.12: newer system interpreters may lack
         native dependency wheels (notably google-re2). uv downloads it if needed.
 
-        The framework packages (lisa-kernel, lisa-sdk, ...) are not on PyPI
-        yet, so every install passes --no-sources (ignore the repos'
-        path-based tool.uv.sources) and supplies each framework package as an
-        explicit requirement. Git mode points them at GitHub; local mode at
-        checkouts. The CLI repo is a uv workspace whose umbrella root is not
-        a package; the installable member lives at hosts\cli (hence
-        #subdirectory).
-
-        Until lisa-sdk is published, the foreign PyPI package of the same name
-        is irrelevant: the explicit requirement always wins over the index.
+        Git and local modes pass each framework package as an explicit
+        requirement. The installable CLI workspace member is hosts\cli.
     #>
     [CmdletBinding()]
     param()
     Set-StrictMode -Version Latest
+
+    if ($script:CliMode -ne "keep" -or $script:FrameworkMode -ne "keep") {
+        Invoke-LisaVersionHelper -Action "install"
+        $localBin = Join-Path $HOME ".local\bin"
+        if ((Test-Path $localBin) -and ($env:PATH -notlike "*$localBin*")) {
+            $env:PATH = "$localBin;$env:PATH"
+        }
+        return
+    }
 
     $lisaRepoUrl = "https://github.com/Lisa-Harness/lisa.git"
     $cliRepoUrl = "https://github.com/Lisa-Harness/lisa-cli.git"
@@ -340,7 +481,11 @@ function Install-LisaTool {
         "lisa-pack-recovery"       = "sdk/packs/recovery"
     }
 
-    if ($Source -eq "local") {
+    if ($Source -eq "pypi") {
+        $cliRequirement = "lisa-cli[prompt]"
+        $withArgs = @()
+    }
+    elseif ($Source -eq "local") {
         if (-not $LisaRepo) { throw "-Source local requires -LisaRepo (or `$env:LISA_GIT_REPO)" }
         if (-not (Test-Path $LisaRepo)) { throw "framework repo not found: $LisaRepo" }
         if (-not $CliRepo) {
@@ -783,6 +928,7 @@ function Install-LisaHarness {
     Write-Host "  ------------------------"
     Write-Host ""
 
+    Set-LisaVersionSelections
     Test-InstallEnvironment
 
     $total = 6
@@ -795,6 +941,11 @@ function Install-LisaHarness {
     Install-UvIfMissing
     $uvVersion = (uv --version 2>$null) -replace '^uv\s+', ''
     Write-Host "  OK: uv $uvVersion" -ForegroundColor Green
+
+    if ($script:CliMode -ne "keep" -or $script:FrameworkMode -ne "keep") {
+        Initialize-LisaVersionHelper
+        Invoke-LisaVersionHelper -Action "validate"
+    }
 
     # Runs after uv exists: the tool uninstall step shells out to it.
     if ($Clean) {
@@ -869,6 +1020,11 @@ if ($script:ShouldInstall) {
         }
         else {
             exit 1
+        }
+    }
+    finally {
+        if ($script:VersionHelperTemporary) {
+            Remove-Item -LiteralPath $script:VersionHelperTemporary -Force -ErrorAction Continue
         }
     }
 }
