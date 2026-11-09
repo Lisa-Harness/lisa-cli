@@ -122,7 +122,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     env:
-      COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+      # Only branch pushes have a meaningful before-SHA; a tag push reports
+      # the all-zeros SHA which is not a valid git commit name.
+      COVERAGE_BASE: ${{ github.event.pull_request.base.sha || (github.ref_type == 'branch' && github.event.before) || '' }}
 
     steps:
       - uses: actions/checkout@v4

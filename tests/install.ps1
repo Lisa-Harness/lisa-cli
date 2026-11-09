@@ -128,9 +128,15 @@ try {
 
     Write-Output "PowerShell clean/reset tests passed"
 }
+
 finally {
     [Environment]::SetEnvironmentVariable("LISA_DATA_DIR", $savedDataDir)
     [Environment]::SetEnvironmentVariable("LISA_PACKS_VENV", $savedPacksVenv)
     [Environment]::SetEnvironmentVariable("LISA_PROFILES_DIR", $null)
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# CI's pwsh wrapper propagates $LASTEXITCODE: close explicitly so a native
+# command's nonzero exit inside a passing test (e.g. uninstalling a tool
+# that is already gone) cannot fail the run.
+exit 0
