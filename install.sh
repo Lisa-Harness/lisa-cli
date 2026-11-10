@@ -184,32 +184,51 @@ LISA_HOME="${LISA_DATA_DIR:-$HOME/.lisa}"
 # Provider metadata: label, env var names, default values.
 # The CLI host reads LISA_* with fallbacks to bare OPENAI_API_KEY /
 # ANTHROPIC_API_KEY / AZURE_OPENAI_* / GOOGLE_API_KEY / OLLAMA_HOST / AWS_*.
-declare -A _PROVIDER_LABEL
-_PROVIDER_LABEL[ollama]="Ollama"
-_PROVIDER_LABEL[openai]="OpenAI"
-_PROVIDER_LABEL[azure_openai]="Azure OpenAI"
-_PROVIDER_LABEL[anthropic]="Anthropic"
-_PROVIDER_LABEL[google]="Google Gemini"
-_PROVIDER_LABEL[openrouter]="OpenRouter"
-_PROVIDER_LABEL[aws]="AWS Bedrock"
+# Lookup functions instead of declare -A hashes: macOS still ships GNU bash
+# 3.2 (associative arrays need bash 4+), and `curl | bash` on macOS resolves
+# to /bin/bash.
+_known_provider() {
+    case "$1" in
+        ollama|openai|azure_openai|anthropic|google|openrouter|aws) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-declare -A _PROVIDER_KEYS
-_PROVIDER_KEYS[ollama]="LISA_OLLAMA_HOST"
-_PROVIDER_KEYS[openai]="LISA_OPENAI_API_KEY"
-_PROVIDER_KEYS[azure_openai]="LISA_AZURE_OPENAI_ENDPOINT,LISA_AZURE_OPENAI_API_KEY,LISA_AZURE_OPENAI_API_VERSION"
-_PROVIDER_KEYS[anthropic]="LISA_ANTHROPIC_API_KEY,LISA_ANTHROPIC_BASE_URL,LISA_ANTHROPIC_VERSION"
-_PROVIDER_KEYS[google]="LISA_GOOGLE_API_KEY,LISA_GOOGLE_API_BASE_URL"
-_PROVIDER_KEYS[openrouter]="LISA_OPENROUTER_API_KEY,LISA_OPENROUTER_BASE_URL"
-_PROVIDER_KEYS[aws]="LISA_AWS_ACCESS_KEY_ID,LISA_AWS_SECRET_ACCESS_KEY,LISA_AWS_REGION"
+_provider_label() {
+    case "$1" in
+        ollama)        printf "Ollama" ;;
+        openai)        printf "OpenAI" ;;
+        azure_openai)  printf "Azure OpenAI" ;;
+        anthropic)     printf "Anthropic" ;;
+        google)        printf "Google Gemini" ;;
+        openrouter)    printf "OpenRouter" ;;
+        aws)           printf "AWS Bedrock" ;;
+    esac
+}
 
-declare -A _PROVIDER_DEFAULTS
-_PROVIDER_DEFAULTS[ollama]="127.0.0.1:11434"
-_PROVIDER_DEFAULTS[openai]=""
-_PROVIDER_DEFAULTS[azure_openai]=",,2024-10-21"
-_PROVIDER_DEFAULTS[anthropic]=",https://api.anthropic.com,2023-06-01"
-_PROVIDER_DEFAULTS[google]=",https://generativelanguage.googleapis.com/v1beta/openai/"
-_PROVIDER_DEFAULTS[openrouter]=",https://openrouter.ai/api/v1"
-_PROVIDER_DEFAULTS[aws]=",,us-east-1"
+_provider_keys() {
+    case "$1" in
+        ollama)        printf "LISA_OLLAMA_HOST" ;;
+        openai)        printf "LISA_OPENAI_API_KEY" ;;
+        azure_openai)  printf "LISA_AZURE_OPENAI_ENDPOINT,LISA_AZURE_OPENAI_API_KEY,LISA_AZURE_OPENAI_API_VERSION" ;;
+        anthropic)     printf "LISA_ANTHROPIC_API_KEY,LISA_ANTHROPIC_BASE_URL,LISA_ANTHROPIC_VERSION" ;;
+        google)        printf "LISA_GOOGLE_API_KEY,LISA_GOOGLE_API_BASE_URL" ;;
+        openrouter)    printf "LISA_OPENROUTER_API_KEY,LISA_OPENROUTER_BASE_URL" ;;
+        aws)           printf "LISA_AWS_ACCESS_KEY_ID,LISA_AWS_SECRET_ACCESS_KEY,LISA_AWS_REGION" ;;
+    esac
+}
+
+_provider_defaults() {
+    case "$1" in
+        ollama)        printf "127.0.0.1:11434" ;;
+        openai)        printf "" ;;
+        azure_openai)  printf ",,2024-10-21" ;;
+        anthropic)     printf ",https://api.anthropic.com,2023-06-01" ;;
+        google)        printf ",https://generativelanguage.googleapis.com/v1beta/openai/" ;;
+        openrouter)    printf ",https://openrouter.ai/api/v1" ;;
+        aws)           printf ",,us-east-1" ;;
+    esac
+}
 
 # --- Utility functions -------------------------------------------------------
 
@@ -222,6 +241,10 @@ error_exit() {
     printf "  ERROR: %s\n" "$1" >&2
     exit 1
 }
+
+for _prov_check in "${PROVIDERS[@]}"; do
+    _known_provider "$_prov_check" || error_exit "Unknown provider: $_prov_check (supported: ollama, openai, azure_openai, anthropic, google, openrouter, aws)"
+done
 
 have_cmd() {
     command -v "$1" >/dev/null 2>&1
@@ -430,11 +453,12 @@ generate_env_file() {
         printf "\n"
 
         for prov in ${PROVIDERS[@]}; do
-            local label="${_PROVIDER_LABEL[$prov]}"
-            printf "# %s\n" "$label"
+            printf "# %s\n" "$(_provider_label "$prov")"
 
-            local keys="${_PROVIDER_KEYS[$prov]}"
-            local defaults="${_PROVIDER_DEFAULTS[$prov]}"
+            local keys
+            keys="$(_provider_keys "$prov")"
+            local defaults
+            defaults="$(_provider_defaults "$prov")"
 
             old_ifs="$IFS"
             IFS=','
@@ -561,9 +585,12 @@ post_install_guidance() {
         printf "    1. Edit %s\n" "$LISA_HOME/.env"
         for prov in ${PROVIDERS[@]}; do
             [[ "$prov" == "ollama" ]] && continue
-            local label="${_PROVIDER_LABEL[$prov]}"
-            local keys="${_PROVIDER_KEYS[$prov]}"
-            local defaults="${_PROVIDER_DEFAULTS[$prov]}"
+            local label
+            label="$(_provider_label "$prov")"
+            local keys
+            keys="$(_provider_keys "$prov")"
+            local defaults
+            defaults="$(_provider_defaults "$prov")"
 
             old_ifs="$IFS"
             IFS=','
