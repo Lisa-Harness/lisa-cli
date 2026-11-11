@@ -35,3 +35,5 @@ artifacts
 # uv lockfile is kept for reproducible installs
 # (uncomment to ignore if you prefer manual lock management)
 # uv.lock
+# Slice E gate evidence (generated per run; published in the PR body)
+bench_results/

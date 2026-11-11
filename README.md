@@ -791,6 +791,30 @@ uv run pytest -m "not live"
 uv run lisa --help
 ```
 
+### Startup latency benchmark (PROMPT_STARTUP Slice E)
+
+`scripts/startup_benchmark.py` runs the controlled fresh-process probes from
+the [prompt-startup CLI spec](https://github.com/Lisa-Harness/lisa/blob/dev/docs/SPEC/PROMPT_STARTUP.md)
+against the **installed** `lisa` executable (never an editable checkout
+import): `--version`, `--help`, and a `prompt` turn against a deterministic
+loopback model stub. It reuses the framework harness (`runtime.startup_benchmark`,
+complete at framework `1f19c5f2`) for p50/p95 aggregation, `lisa.startup`
+telemetry (stage phases, distinct `setup_framework` invocations), teardown
+timing, and module-root verification, and it fails the run on leaked owned
+children:
+
+```bash
+uv run python scripts/startup_benchmark.py --samples 10 --json out.json
+```
+
+The CLI's import structure is deliberately lazy: `--help` and `--version`
+defer `kernel.models`, `runtime.config`, network, and presentation imports to
+the commands that need them (the `.env` load and packs-venv injection run
+lazily too, mirroring the framework's resolver contracts with parity tests).
+The benchmark is the release gate: land changes with before/after runs from
+identical interpreter and dependency conditions, and close the slice from a
+wheel-built installed CLI.
+
 ## Architecture
 
 `lisa-cli` wraps the transport-neutral `runtime` package (from `lisa-harness-runtime`)
