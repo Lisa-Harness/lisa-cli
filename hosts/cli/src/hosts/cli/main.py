@@ -13,41 +13,115 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import shlex
 import shutil
 import sys
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple, cast
 
 import typer
-from kernel.models import McpServerHealth
-from kernel.tools.mcp_client import MCPToolSpec
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
-from rich.table import Table
 
 # Load .env BEFORE injecting the packs venv site-packages so that
 # LISA_DATA_DIR (and LISA_PACKS_VENV) are honored when resolving the
-# packs venv (``<data_dir>/venv``) location. The loader only needs framework_root() and
-# default_data_dir(), both of which are env-independent, so it can run
-# safely before any host import. Search order (lowest precedence first —
-# every existing candidate is loaded, later ones overriding earlier ones):
+# packs venv (``<data_dir>/venv``) location. Search order (lowest
+# precedence first — every existing candidate is loaded, later ones
+# overriding earlier ones):
 #   (1) CWD — for repo-mode dev sessions
 #   (2) ~/.lisa/.env — for tool-install mode (uv tool install lisa)
 #   (3) project root — repo-mode back-compat
 #   (4) hosts/little_lisa/.env — legacy repo-mode back-compat
-from runtime.paths import (
-    framework_root as _framework_root,
-)
+#
+# PROMPT_STARTUP Slice C (CLI half): the .env load and the packs-venv
+# injection are deferred off the import path and run lazily on the first
+# path that needs them (``_bootstrap_env_and_packs`` below). Importing
+# ``runtime.paths`` / ``runtime.config`` at module level pulled the
+# framework's eager ``runtime/__init__`` -> ``runtime.config`` ->
+# ``kernel.session_plan`` -> ``kernel.ipsar_fsm`` -> ``mcp`` chain
+# (~1.1s) onto every ``--help`` / ``--version`` run — the two commands
+# that need neither .env values, the packs venv, nor any framework
+# session. The framework functions remain the resolution authority for
+# every command that builds a runtime; the local mirrors below
+# re-implement only the import-free env contract ``default_data_dir``,
+# ``profile_data_dir``, and ``framework_root`` document, and
+# ``tests/test_startup_deferred_imports.py`` locks the mirror to the
+# framework's own functions so drift fails CI.
+_ENV_LOADED = False
+"""Whether the .env candidate sweep has run in this process."""
+
+
+def _mirror_default_data_dir() -> Path:
+    """Return ``runtime.config.default_data_dir``'s platform default (~/.lisa).
+
+    Import-free mirror of the framework function: the spec defers
+    ``runtime.config`` off the ``--help`` / ``--version`` paths (PROMPT_STARTUP
+    Slice C, CLI half), and the .env candidate order needs this value before
+    any runtime command has run. ``runtime.config.default_data_dir`` is
+    ``Path.home() / ".lisa"`` (``_DEFAULT_DATA_DIR_NAME``), resolved through
+    ``Path.home()`` so Windows ``%USERPROFILE%`` and POSIX ``$HOME`` both
+    work. A regression test asserts equality against the framework
+    function.
+    """
+    return Path.home() / ".lisa"
+
+
+_PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _mirror_profile_data_dir(profile: str) -> Path:
+    """Return ``runtime.config.profile_data_dir``'s value for ``profile``.
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir`). Matches the framework contract:
+    ``<profiles_dir>/<name>`` where ``profiles_dir`` honors
+    ``LISA_PROFILES_DIR``, else ``<default_data_dir>/profiles``; the name
+    must be a single path-safe segment or ``ValueError`` raises.
+    """
+    name = profile.strip()
+    if not name:
+        raise ValueError("LISA_PROFILE must not be empty")
+    if not _PROFILE_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid profile name {name!r}: use letters, digits, '-', '_', '.' "
+            "(single path segment, no separators)"
+        )
+    override = os.getenv("LISA_PROFILES_DIR", "").strip()
+    if override:
+        return (Path(override).expanduser() / name).resolve()
+    return (_mirror_default_data_dir() / "profiles" / name).resolve()
+
+
+def _mirror_framework_root() -> Path:
+    """Return ``runtime.paths.framework_root``'s value without importing runtime.
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir``). Matches the framework contract:
+    a repo checkout (a ``.git`` dir or a ``[tool.uv.workspace]``
+    ``pyproject.toml`` walking up from this module) resolves to the repo
+    root; a tool install resolves to ``sys.prefix``.
+    """
+    current = Path(__file__).resolve().parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file():
+            try:
+                payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            if isinstance(payload.get("tool", {}).get("uv", {}).get("workspace"), dict):
+                return candidate
+    return Path(sys.prefix)
+
 
 try:
     from dotenv import load_dotenv
-
-    _FRAMEWORK_ROOT = _framework_root()
-    from runtime.config import default_data_dir as _default_data_dir
-    from runtime.config import profile_data_dir as _profile_data_dir
 
     def _env_data_dir() -> Path:
         """Resolve the .env data dir from the env: LISA_DATA_DIR > LISA_PROFILE.
@@ -63,15 +137,15 @@ try:
             return Path(override).expanduser()
         profile = os.getenv("LISA_PROFILE", "").strip()
         if not profile:
-            return _default_data_dir()
+            return _mirror_default_data_dir()
         try:
-            return _profile_data_dir(profile)
+            return _mirror_profile_data_dir(profile)
         except ValueError:
             # Invalid profile name: HostConfig.from_env raises the real
             # startup error later; the .env loader falls back to the
             # platform default so the error panel (not an import crash)
             # is what the user sees.
-            return _default_data_dir()
+            return _mirror_default_data_dir()
 
     def _env_candidates() -> tuple[Path, tuple[Path, ...]]:
         """Return (data-dir .env candidate, full low→high precedence order).
@@ -88,7 +162,7 @@ try:
         the fallback collapses to the same path, so it is not listed twice.
         """
         env_dir = _env_data_dir()
-        base_dir = _default_data_dir()
+        base_dir = _mirror_default_data_dir()
         candidates = (
             Path.cwd() / ".env",
             env_dir / ".env",
@@ -120,11 +194,13 @@ try:
     # repo .env, so the pack's optional BINARY server failed to compile and
     # `lisa prompt` died with a Startup Error panel.
     #
-    # TEST CONTRACT: this import-time load runs during pytest collection,
-    # before any fixture can intervene, so operator .env values DO land in
-    # os.environ inside test processes. hosts/cli/tests/conftest.py scrubs
-    # them (autouse _hermetic_env) — tests own their environment; anything
+    # TEST CONTRACT: the lazy load still runs before any fixture can
+    # intervene on the first CLI path that needs it, so operator .env
+    # values DO land in os.environ inside test processes the same way the
+    # import-time load did. hosts/cli/tests/conftest.py scrubs them
+    # (autouse _hermetic_env) — tests own their environment; anything
     # ambient is treated as noise, not config.
+    _FRAMEWORK_ROOT = _mirror_framework_root()
     (_BASE_ENV_CANDIDATE, _ENV_SEARCH_CANDIDATES) = _env_candidates()
 
     def _load_env_candidates(candidates: tuple[Path, ...]) -> Path | None:
@@ -149,31 +225,225 @@ try:
             loaded = candidate
         return loaded
 
-    _load_env_candidates(_ENV_SEARCH_CANDIDATES)
+    def _load_env_once() -> None:
+        """Run the .env candidate sweep once per process (idempotent).
+
+        PROMPT_STARTUP Slice C (CLI half): the sweep is invoked lazily by
+        :func:`_bootstrap_env_and_packs` instead of at import time, so
+        ``lisa --version`` (which reads no operator configuration) pays
+        nothing. ``--help`` reaches it through pack-command discovery;
+        runtime commands reach it before ``build_runtime`` so
+        ``LISA_*`` env values from .env still configure the runtime.
+        """
+        global _ENV_LOADED  # noqa: PLW0603  # module-level idempotence seam
+        if _ENV_LOADED:
+            return
+        _ENV_LOADED = True
+        _load_env_candidates(_ENV_SEARCH_CANDIDATES)
 except ImportError:  # pragma: no cover — python-dotenv is optional
-    pass
+    _FRAMEWORK_ROOT = _mirror_framework_root()
 
-# Inject the packs venv site-packages into sys.path BEFORE importing
-# host so that importlib.metadata.entry_points discovers packs
-# installed via /pack install into the packs venv. This must run
-# before any host / kernel import that triggers entry-point scanning.
-from runtime.paths import (
-    inject_packs_venv_site_packages as _inject_packs_venv_site_packages,
-)
+    def _load_env_once() -> None:  # pragma: no cover — optional-dependency stub
+        """No-op when python-dotenv is absent (no candidates can load)."""
+        global _ENV_LOADED  # noqa: PLW0603
+        _ENV_LOADED = True
 
-_inject_packs_venv_site_packages()
 
-from runtime.config import default_data_dir
+_PACKS_VENV_INJECTED = False
+"""Whether the packs venv site-packages injection has run in this process."""
 
-from hosts.cli.render import (
-    render_mcp_server_tools,
-    render_mcp_servers,
-    render_models,
-    render_modes,
-    render_operations,
-    render_pack_list_panel,
-    render_tools,
-)
+_PACKS_VENV_DIR_NAME = "venv"
+_PROFILES_SUBDIR_NAME = "profiles"
+_PYVER_MIN_PARTS = 2
+
+
+def _mirror_base_data_dir() -> Path:
+    """Return ``runtime.config.base_data_dir``'s value (venv-owning base dir).
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir`): ``LISA_DATA_DIR`` when set, else the
+    platform default. The packs venv is shared with profiles through this
+    base dir (``runtime.paths.profile_base_data_dir`` contract).
+    """
+    override = os.getenv("LISA_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return _mirror_default_data_dir()
+
+
+def _mirror_profile_base_data_dir(data_dir: Path) -> Path | None:
+    """Return ``runtime.paths.profile_base_data_dir``'s value for ``data_dir``.
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir``). Matches the framework contract: a
+    profile ``<root>/<name>`` resolves to the base dir that owns the packs
+    venv — the default root's parent when the profiles root sits under the
+    data dir, the base data dir itself for a relocated root
+    (``LISA_PROFILES_DIR``), the structural ``profiles/`` parent otherwise,
+    and ``None`` when ``data_dir`` is not a profile.
+    """
+    data_dir = Path(data_dir).resolve()
+    override = os.getenv("LISA_PROFILES_DIR", "").strip()
+    root = Path(override).expanduser().resolve() if override else None
+    default_root = (_mirror_default_data_dir() / _PROFILES_SUBDIR_NAME).resolve()
+    if root is None:
+        root = default_root
+    if data_dir.parent == root:
+        # Inside the profiles root. The default root sits under the data
+        # dir, so its parent is the base; a relocated root has no such
+        # relation, so the base is the data dir itself.
+        if root == default_root:
+            return root.parent
+        return _mirror_base_data_dir()
+    if data_dir.parent.name == _PROFILES_SUBDIR_NAME:
+        return data_dir.parent.parent
+    return None
+
+
+def _mirror_default_packs_venv() -> Path:
+    """Return ``runtime.paths.default_packs_venv``'s value.
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir``). Matches the framework contract:
+    ``LISA_PACKS_VENV`` > ``<LISA_DATA_DIR>/venv`` > the profile's BASE
+    data dir's venv > ``<~/.lisa>/venv``. An invalid profile name falls
+    through to the platform default (the startup error belongs to
+    ``HostConfig.from_env``, not this resolver).
+    """
+    override = os.getenv("LISA_PACKS_VENV", "").strip()
+    if override:
+        return Path(override).expanduser()
+    data_dir_env = os.getenv("LISA_DATA_DIR", "").strip()
+    if data_dir_env:
+        return Path(data_dir_env).expanduser().resolve() / _PACKS_VENV_DIR_NAME
+    profile_env = os.getenv("LISA_PROFILE", "").strip()
+    if profile_env:
+        try:
+            profile = _mirror_profile_data_dir(profile_env)
+        except ValueError:
+            pass
+        else:
+            base = _mirror_profile_base_data_dir(profile)
+            if base is not None:
+                return base / _PACKS_VENV_DIR_NAME
+            return profile / _PACKS_VENV_DIR_NAME
+    return _mirror_default_data_dir() / _PACKS_VENV_DIR_NAME
+
+
+def _mirror_venv_python_dir(venv_path: Path) -> str:
+    """Return ``runtime.paths._venv_python_dir``'s value for a venv.
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir``). The packs venv may target a
+    different Python than the host interpreter, so the ``pythonX.Y`` tag is
+    read from the venv's own ``pyvenv.cfg`` (``version_info``/``version``)
+    or scanned from ``<venv>/lib/``, falling back to the running
+    interpreter's version.
+    """
+    cfg = venv_path / "pyvenv.cfg"
+    if cfg.is_file():
+        try:
+            for line in cfg.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if key in ("version_info", "version") and value:
+                    parts = value.split(".")
+                    if len(parts) >= _PYVER_MIN_PARTS and parts[0].isdigit() and parts[1].isdigit():
+                        return f"python{parts[0]}.{parts[1]}"
+        except OSError:  # pragma: no cover — unreadable cfg (root ignores modes)
+            pass
+    lib_dir = venv_path / "lib"
+    if lib_dir.is_dir():
+        for child in sorted(lib_dir.iterdir()):
+            if (
+                child.is_dir()
+                and child.name.startswith("python")
+                and child.name[6:].replace(".", "").isdigit()
+            ):
+                return child.name
+    return f"python{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def _mirror_packs_venv_site_packages(venv_path: Path) -> Path:
+    """Return ``runtime.paths.packs_venv_site_packages``'s value.
+
+    Import-free mirror (same deferral reason as
+    :func:`_mirror_default_data_dir``): ``<venv>/Lib/site-packages`` on
+    Windows, ``<venv>/lib/pythonX.Y/site-packages`` on POSIX with the tag
+    from :func:`_mirror_venv_python_dir`.
+    """
+    if os.name == "nt":
+        return venv_path / "Lib" / "site-packages"
+    return venv_path / "lib" / _mirror_venv_python_dir(venv_path) / "site-packages"
+
+
+def _inject_packs_venv_site_packages_once() -> None:
+    """Insert the packs venv site-packages into ``sys.path`` once per process.
+
+    The injection must precede the first ``importlib.metadata.entry_points``
+    scan (pack-command discovery and pack discovery) so that packs
+    installed via /pack install into the packs venv are discoverable.
+    PROMPT_STARTUP Slice C (CLI half): the injection is an import-free
+    mirror of ``runtime.paths.inject_packs_venv_site_packages`` —
+    importing ``runtime.paths`` at this call site would drag the
+    framework's eager ``runtime/__init__`` -> ``runtime.config`` chain
+    (kernel.session_plan -> kernel.ipsar_fsm -> mcp) onto the ``--help``
+    path, and pack-command discovery is what ``--help`` runs it for. The
+    mirror is locked to the framework function by a parity regression
+    test (``tests/test_startup_deferred_imports.py``).
+
+    Like the framework original, this uses ``site.addsitedir()`` (not
+    just ``sys.path.insert``) so ``.pth`` files in the packs venv
+    site-packages are processed — critical for editable installs whose
+    ``.pth`` ``import`` lines register the meta-path finders that make
+    ``import lisa_packs.<name>`` work. Idempotent within the process.
+    """
+    global _PACKS_VENV_INJECTED  # noqa: PLW0603  # module-level idempotence seam
+    if _PACKS_VENV_INJECTED:
+        return
+    _PACKS_VENV_INJECTED = True
+    import site as _site
+
+    venv = _mirror_default_packs_venv()
+    site_packages = _mirror_packs_venv_site_packages(venv)
+    if site_packages.is_dir():
+        site_str = str(site_packages)
+        # site.addsitedir processes .pth files (including the import lines
+        # that register editable-install meta-path finders) and appends to
+        # sys.path. Safe to call even if already on sys.path.
+        _site.addsitedir(site_str)
+        # Defensive (mirrors runtime.paths verbatim): addsitedir already
+        # appends the directory, so the insert fires only when a .pth hook
+        # removed it mid-processing — not reachable on a normal filesystem.
+        if site_str not in sys.path:  # pragma: no cover — defensive, mirrors framework
+            sys.path.insert(0, site_str)
+            logger.debug("Injected packs venv site-packages: %s", site_str)
+
+
+def _bootstrap_env_and_packs() -> None:
+    """Run the CLI entry bootstrap (.env sweep + packs-venv injection) once.
+
+    Ordering contract (unchanged from the import-time sequence): the .env
+    candidates load FIRST so ``LISA_DATA_DIR`` / ``LISA_PACKS_VENV`` /
+    ``LISA_PROFILE`` are honored when the packs venv is resolved, and the
+    injection runs before any framework entry-point scan. Callers:
+    ``_pack_commands`` (pack-command discovery for ``--help``, completion,
+    and the dynamic pack subcommands) and ``_initialize_runtime`` (every
+    runtime-building command).
+    """
+    _load_env_once()
+    _inject_packs_venv_site_packages_once()
+
+
+# PROMPT_STARTUP Slice C (CLI half): presentation imports are deferred.
+# ``kernel.models`` (the ``~250ms`` pydantic model-chain import the mcp
+# introspection helpers type against), ``hosts.cli.render`` (which
+# imports it plus ``rich.table``/``rich.panel``), and
+# ``rich.traceback`` (the crash renderer) are each imported lazily at
+# their command call sites so ``--help`` / ``--version`` never pay for
+# them. Every deferral below carries its reason clause at the import
+# site.
 
 # ``HostRuntime`` is used only as a string annotation (``from __future__
 # import annotations`` stringifies signatures) across the Typer callbacks.
@@ -183,6 +453,8 @@ from hosts.cli.render import (
 # body runs) does not pay the ~2s ``runtime.runtime`` ->
 # ``kernel.ipsar_fsm`` -> ``openai`` import chain.
 if TYPE_CHECKING:
+    from kernel.models import McpServerHealth
+    from kernel.tools.mcp_client import MCPToolSpec
     from runtime.runtime import HostRuntime
 
     from hosts.cli.transport import PromptTransport
@@ -194,12 +466,37 @@ if TYPE_CHECKING:
 # import cost it drags in. See ``host/__init__.py``'s PEP 562
 # ``__getattr__`` for the package-level lazy import.
 
-from rich.traceback import install
 
-# show_locals=False: uncaught frames here carry provider keys (verify's
-# env reads), .env values, and prompt payloads — a locals dump prints them
-# unredacted to the terminal. Keep the styled traceback, drop the values.
-install(show_locals=False, word_wrap=True)
+def _lisa_excepthook(
+    exc_type: type[BaseException], exc_value: BaseException, tb: TracebackType | None
+) -> None:
+    """Render an uncaught exception through rich with locals suppressed.
+
+    PROMPT_STARTUP Slice C (CLI half): this replaces the module-level
+    ``rich.traceback.install(...)`` call, which imported
+    ``rich.traceback`` -> ``rich.pretty`` on every ``--help`` /
+    ``--version`` run. The import now happens only when an exception
+    actually fires.
+
+    show_locals=False is preserved exactly: uncaught frames here carry
+    provider keys (verify's env reads), .env values, and prompt payloads —
+    a locals dump prints them unredacted to the terminal. Keep the styled
+    traceback, drop the values.
+
+    Typer's ``app.__call__`` replaces this hook with its own
+    pretty-exception renderer once command dispatch starts; the Typer
+    app is configured with ``pretty_exceptions_show_locals=False`` (same
+    contract, enforced by ``tests/test_no_locals_dump.py``). This hook
+    covers everything before that point: import-time failures in modules
+    loaded after this one and direct module use.
+    """
+    from rich.traceback import install  # lazy: crash rendering deferred (Slice C)
+
+    install(show_locals=False, word_wrap=True)
+    sys.excepthook(exc_type, exc_value, tb)
+
+
+sys.excepthook = _lisa_excepthook
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +552,11 @@ def _pack_commands() -> dict[str, Any]:
     """
     global _pack_command_specs  # noqa: PLW0603  # module-level cache seam
     if _pack_command_specs is None:
+        # .env + packs-venv injection must precede the entry-point scan
+        # (packs live in the packs venv; LISA_PACKS_VENV may come from
+        # .env). PROMPT_STARTUP Slice C: this runs on the first
+        # command-resolution path that needs pack names, not at import.
+        _bootstrap_env_and_packs()
         specs: dict[str, Any] = {}
         try:
             from kernel.host_command_discovery import (  # lazy: avoids eager pack scan
@@ -806,6 +1108,10 @@ def _initialize_runtime(
     ``runtime.start()`` must be called inside the host's event loop (see
     the prompt/verify paths).
     """
+    # .env + packs-venv bootstrap before any framework import or
+    # configuration resolution (PROMPT_STARTUP Slice C: the sweep is
+    # lazy, so this is the first runtime-building path to run it).
+    _bootstrap_env_and_packs()
     from runtime.bootstrap import build_runtime
 
     return build_runtime(
@@ -849,6 +1155,7 @@ def _render_runtime_error(console: Console, exc: Exception, *, title: str = "Err
     escaped per line: a ``[tag]`` in the message is content, not markup.
     """
     from rich.markup import escape as _escape
+    from rich.panel import Panel  # lazy: presentation import (Slice C)
 
     lines = str(exc).splitlines()
     if lines:
@@ -1167,6 +1474,7 @@ def _verify_command(
     ]
 
     from rich.box import SIMPLE_HEAD
+    from rich.table import Table  # lazy: presentation import (Slice C)
 
     # No zebra row_styles here either: terminal backgrounds are unknown and
     # dark-grey rows vanish on black consoles (same rationale as
@@ -1236,7 +1544,11 @@ def _modes_command(
     )
     if runtime is None:
         return
-    render_modes(runtime, console=console)
+    from hosts.cli.render import (  # lazy: presentation import (Slice C)
+        render_modes as _render_modes,
+    )
+
+    _render_modes(runtime, console=console)
 
 
 # ---------------------------------------------------------------------------
@@ -1308,7 +1620,11 @@ def _models_command(
     # gets the same friendly "run discover first" guidance as the REPL.
     if action == "show":
         try:
-            render_models(runtime, console=console)
+            from hosts.cli.render import (  # lazy: presentation import (Slice C)
+                render_models as _render_models,
+            )
+
+            _render_models(runtime, console=console)
             return
         except Exception:  # pylint: disable=broad-except
             action = "show"
@@ -1332,7 +1648,8 @@ def _models_command(
     # command uses), so behavior stays identical across hosts. We
     # synthesize the equivalent '/models <sub> [--force]' slash string
     # and print the returned Markdown text in a Rich panel.
-    from rich.markdown import Markdown
+    from rich.markdown import Markdown  # lazy: presentation import (Slice C)
+    from rich.panel import Panel  # lazy: presentation import (Slice C)
     from runtime.commands import handle_models_command
 
     if action == "discover" and force:
@@ -1405,7 +1722,11 @@ def _operations_command(
     )
     if runtime is None:
         return
-    render_operations(runtime, console=console)
+    from hosts.cli.render import (  # lazy: presentation import (Slice C)
+        render_operations as _render_operations,
+    )
+
+    _render_operations(runtime, console=console)
 
 
 # ---------------------------------------------------------------------------
@@ -1452,7 +1773,11 @@ def _tools_command(
     )
     if runtime is None:
         return
-    render_tools(runtime, console=console)
+    from hosts.cli.render import (  # lazy: presentation import (Slice C)
+        render_tools as _render_tools,
+    )
+
+    _render_tools(runtime, console=console)
 
 
 # ---------------------------------------------------------------------------
@@ -1548,6 +1873,7 @@ def _render_markdown_response(response_text: str, *, title: str) -> None:
         console.print(response_text, highlight=False, markup=False, soft_wrap=False)
         return
     from rich.markdown import Markdown  # lazy: defers startup cost
+    from rich.panel import Panel  # lazy: presentation import (Slice C)
 
     console.print(
         Panel(
@@ -1701,7 +2027,7 @@ def _dispatch_constant_command(command: str, *, title: str, **runtime_kwargs: An
     _render_markdown_response(text, title=title)
 
 
-McpIntrospection = tuple[dict[str, Any], dict[str, list[MCPToolSpec]]]
+McpIntrospection = tuple[dict[str, Any], dict[str, "list[MCPToolSpec]"]]
 """One MCP introspection result: ``(health, tools_by_server)``.
 
 ``health`` is a ``dict[str, McpServerHealth]`` keyed by ``server_id``;
@@ -1710,6 +2036,12 @@ discovered tool specs by their owning server. Both are collected by
 warming the MCP pool (see :func:`_collect_mcp_tools`). The CLI render
 layer reads health for the summary table and the specs for the per-server
 tool detail.
+
+PROMPT_STARTUP Slice C (CLI half): the alias is quoted against
+``kernel.tools.mcp_client.MCPToolSpec``, whose import lives under
+``TYPE_CHECKING`` — the kernel model chain is deferred off the
+``--help`` / ``--version`` path (it costs ~250ms of pydantic model
+imports for the ``mcp`` command only).
 """
 
 
@@ -1929,6 +2261,15 @@ def _mcp_command(
     mcp_health, mcp_tools_by_server = asyncio.run(
         _collect_mcp_tools(runtime, connect_server_ids={server_id} if server_id else None)
     )
+    # Deferred render import (Slice C): the kernel.models-typed render
+    # helpers load only on the mcp command's own path.
+    from hosts.cli.render import (  # lazy: presentation import (Slice C)
+        render_mcp_server_tools as _render_mcp_server_tools,
+    )
+    from hosts.cli.render import (
+        render_mcp_servers as _render_mcp_servers,
+    )
+
     if not mcp_health:
         console.print("[yellow]No MCP server tools discovered.[/yellow]")
         return
@@ -1940,9 +2281,9 @@ def _mcp_command(
                 f"[yellow]No MCP server named {escape(server_id)!r} is configured.[/yellow]"
             )
             return
-        render_mcp_server_tools(specs, health, console=console)
+        _render_mcp_server_tools(specs, health, console=console)
     else:
-        render_mcp_servers(mcp_health, console=console)
+        _render_mcp_servers(mcp_health, console=console)
 
 
 # ---------------------------------------------------------------------------
@@ -1998,7 +2339,11 @@ def _pack_command(
 
     # Typer parsed/validated the action (Literal) — no normalization needed.
     if action == "list":
-        render_pack_list_panel(runtime, console=console)
+        from hosts.cli.render import (  # lazy: presentation import (Slice C)
+            render_pack_list_panel as _render_pack_list_panel,
+        )
+
+        _render_pack_list_panel(runtime, console=console)
         return
     if action == "install":
         _finish_pack_mutation(runtime, asyncio.run(_run_pack_install(runtime, target)))
@@ -3085,6 +3430,11 @@ def _intake_command(
     loops, and writes the merged UnifiedState to ``<data-dir>/state/state.json``.
     The next turn reads that state so the model has fresh ambient data.
     """
+    # Deferred config import (Slice C): ``runtime.config`` drags the
+    # framework's eager ``runtime/__init__`` chain; the intake command
+    # is the only consumer of the platform default data dir.
+    from runtime.config import default_data_dir  # lazy: runtime.config (Slice C)
+
     resolved_data_dir = (
         Path(_resolve_profiled_data_dir(data_dir, profile)).expanduser()
         if _resolve_profiled_data_dir(data_dir, profile)

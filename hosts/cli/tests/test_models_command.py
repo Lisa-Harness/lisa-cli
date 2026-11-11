@@ -65,11 +65,12 @@ def _invoke_models(
         # handler is NOT called. For non-show actions (or a show fallback
         # failure) the delegation path runs. We force the show path to
         # fall through to the core handler by stubbing render_models to
-        # raise, so the 'show' delegation is also observable.
+        # raise, so the 'show' delegation is also observable. The render
+        # helper is imported lazily inside the command (Slice C deferral),
+        # so the patch target is the render module itself.
         if action in {"", "show"}:
-            with patch.object(
-                cli_main,
-                "render_models",
+            with patch(
+                "hosts.cli.render.render_models",
                 side_effect=RuntimeError("no manifest"),
             ):
                 cli_main._models_command(
@@ -235,7 +236,8 @@ def test_models_show_renders_table_when_manifest_present(
             "_initialize_runtime_or_exit",
             return_value=runtime,
         ),
-        patch.object(cli_main, "render_models", new=_fake_render_models),
+        # Lazy render import (Slice C): patch the render module itself.
+        patch("hosts.cli.render.render_models", new=_fake_render_models),
         patch.object(cli_main, "console", new=Console(quiet=True)),
     ):
         cli_main._models_command(

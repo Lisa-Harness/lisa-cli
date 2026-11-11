@@ -162,10 +162,10 @@ def test_check_env_warns_when_no_env_found(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.chdir(tmp_path)
     fake_profiles_dir = tmp_path / "profiles"
     with (
-        patch.object(cli_main, "_default_data_dir", lambda: tmp_path / "lisa_home"),
+        patch.object(cli_main, "_mirror_default_data_dir", lambda: tmp_path / "lisa_home"),
         patch.object(
             cli_main,
-            "_profile_data_dir",
+            "_mirror_profile_data_dir",
             lambda profile, base_dir=None: fake_profiles_dir / profile,
         ),
         patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
@@ -190,15 +190,15 @@ def test_check_env_falls_back_to_base_env_for_profile(
     (base_dir / ".env").write_text("LISA_OPENAI_API_KEY=test\n", encoding="utf-8")
     # Route the module's dir resolvers at the scratch tree (env vars alone
     # would still touch the real ~/.lisa; the loader ignores LISA_PROFILES_DIR
-    # because _profile_data_dir is patched to live under tmp_path).
+    # because _mirror_profile_data_dir is patched to live under tmp_path).
     monkeypatch.setenv("LISA_PROFILE", "taxes")
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     with (
-        patch.object(cli_main, "_default_data_dir", lambda: base_dir),
+        patch.object(cli_main, "_mirror_default_data_dir", lambda: base_dir),
         patch.object(
             cli_main,
-            "_profile_data_dir",
+            "_mirror_profile_data_dir",
             lambda profile, base_dir=None: tmp_path / "profiles" / profile,
         ),
         patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
@@ -225,10 +225,10 @@ def test_check_env_profile_env_beats_base_fallback(
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     with (
-        patch.object(cli_main, "_default_data_dir", lambda: base_dir),
+        patch.object(cli_main, "_mirror_default_data_dir", lambda: base_dir),
         patch.object(
             cli_main,
-            "_profile_data_dir",
+            "_mirror_profile_data_dir",
             lambda profile, base_dir=None: tmp_path / "profiles" / profile,
         ),
         patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
@@ -256,7 +256,7 @@ def test_check_env_data_dir_override_skips_redundant_base(
     fake_base_dir = tmp_path / "lisa_home"
 
     with (
-        patch.object(cli_main, "_default_data_dir", lambda: fake_base_dir),
+        patch.object(cli_main, "_mirror_default_data_dir", lambda: fake_base_dir),
         patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
     ):
         candidates = cli_main._resolve_env_candidates()

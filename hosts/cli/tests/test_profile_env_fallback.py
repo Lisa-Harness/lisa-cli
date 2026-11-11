@@ -23,10 +23,10 @@ def _patch_dirs(
     base_dir.mkdir()
     cwd.mkdir()
     monkeypatch.chdir(cwd)
-    monkeypatch.setattr(cli_main, "_default_data_dir", lambda: base_dir)
+    monkeypatch.setattr(cli_main, "_mirror_default_data_dir", lambda: base_dir)
     monkeypatch.setattr(
         cli_main,
-        "_profile_data_dir",
+        "_mirror_profile_data_dir",
         lambda profile, base_dir=None: tmp_path / "profiles" / profile,
     )
     return cwd

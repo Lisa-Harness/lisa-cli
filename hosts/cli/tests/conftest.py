@@ -7,11 +7,13 @@ autouse ``_hermetic_env`` fixture removes all Lisa/provider configuration
 variables from ``os.environ`` before each test, so a test sees the
 framework defaults unless it sets a variable itself.
 
-Why: the CLI host loads an operator ``.env`` at *module import time*
-(``hosts.cli.main`` runs ``load_dotenv`` during collection, searching
-``Path.cwd()/.env`` first), so ambient operator configuration — provider
-keys, ``LISA_DATA_DIR``, a stale ``LISA_SESSION_CONTEXT_PATH`` — lands in
-``os.environ`` before any test code runs. Tests then failed on the
+Why: the CLI host loads an operator ``.env`` before the first path that
+needs operator configuration (``hosts.cli.main`` runs ``load_dotenv`` in
+its lazy bootstrap, reached on the first pack-command resolution or
+runtime construction — during collection for any test importing the CLI,
+searching ``Path.cwd()/.env`` first), so ambient operator configuration
+— provider keys, ``LISA_DATA_DIR``, a stale ``LISA_SESSION_CONTEXT_PATH``
+— lands in ``os.environ`` before any test code runs. Tests then failed on the
 operator's machine but passed on CI (the 2026-09-19 once-decisions
 incident: 22/22 red because ``.env`` pointed the session context at a
 deleted file). A dedicated test ``.env`` cannot fix this — the operator

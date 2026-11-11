@@ -102,7 +102,8 @@ def test_models_command_passes_profile_through(
     captured = _capture_runtime_kwargs(monkeypatch, tmp_path)
     fake_handler = _fake_handler()
     with (
-        patch.object(cli_main, "render_models", side_effect=RuntimeError("no manifest")),
+        # Lazy render import (Slice C): patch the render module itself.
+        patch("hosts.cli.render.render_models", side_effect=RuntimeError("no manifest")),
         patch("runtime.commands.handle_models_command", new=fake_handler),
     ):
         cli_main._models_command(
