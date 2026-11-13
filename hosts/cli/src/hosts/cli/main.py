@@ -1790,7 +1790,7 @@ def _tools_command(
     short_help="Reprint a previous response verbatim (no model call).",
     help=(
         "Reprint a previous response verbatim (default: the last model turn). "
-        "Pass a turn number to replay that turn's response: `lisa last 3`. "
+        "Pass a turn number to reprint that turn's response: `lisa last 3`. "
         "Reads the durable thread — no model call."
     ),
     rich_help_panel=_PANEL_INTROSPECTION,
@@ -1798,7 +1798,7 @@ def _tools_command(
 def _last_command(
     turn: str = typer.Argument(
         "",
-        help="Optional turn number to replay that turn's response.",
+        help="Optional turn number to reprint that turn's response.",
     ),
     log_level: LogLevelOption = "",
     log: LogOption = "",
@@ -1837,7 +1837,7 @@ def _last_command(
 
     turn_index, response_text = resolve_last_turn(runtime, turn.strip())
     if turn_index is not None and not console.is_terminal:
-        # Piped/redirected: a one-line header so the replayed turn is
+        # Piped/redirected: a one-line header so the reprinted turn is
         # addressable in captured output, then the response verbatim —
         # no Markdown re-render (the raw contract; highlight/markup off
         # so Rich never interprets the body). Diagnostics (usage,
@@ -1852,7 +1852,7 @@ def _last_command(
     # ``Response · turn N`` rule separator plus Rich Markdown rendering
     # (colors, headings, code fences). The number is the global thread
     # turn index the prompt output already renders, so operators address
-    # a replayed turn the same way wherever it surfaces.
+    # a reprinted turn the same way wherever it surfaces.
     console.print(Rule(title=f"Response · turn {turn_index}", style=_STYLE_RESPONSE))
     console.print(Markdown(response_text, code_theme="github-dark", hyperlinks=True))
 
