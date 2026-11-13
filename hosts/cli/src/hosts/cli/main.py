@@ -3311,9 +3311,9 @@ async def _run_prompt_with_teardown(
     (``approval_unresolved``). The caller starts its activity display before
     runtime construction and owns cleanup if construction fails.
 
-    In raw mode the transport console moves to stderr so activity output
-    (λ echo, tool lines, ⚡ footer, errors) never lands in redirected stdout;
-    the response itself is written verbatim to stdout by the transport.
+    In raw mode the transport console moves to stderr so the prompt/activity
+    screen, ⚡ footer, and errors never land in redirected stdout; the
+    response itself is written verbatim to stdout by the transport.
     """
     from runtime.handle_message import (  # lazy: defers turn import cost
         decide_pending_approval,

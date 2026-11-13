@@ -3,27 +3,24 @@
 This is the terminal-transport implementation of
 :class:`runtime.callbacks.TransportCallbacks` for ``lisa prompt`` — the CLI's
 only turn path. A prompt run is input/output in the caller's shell: another
-pipeline stage, not a session with a screen. Instead of a persistent Live
-transcript it renders:
+pipeline stage. On a tty it renders:
 
-* a one-line transient activity indicator (spinner + mode + in-flight
-  tool label + models/tools/elapsed) via an overwrite-in-place Live; and
-* each tool/model/fork row printed to real scrollback as it *completes*,
-  so the trajectory survives piping/tee.
+* a full-screen Live view with the prompt pinned at the top, tool activity
+  scrolling through the middle, and thinking/status pinned at the bottom.
 
 Tokens are per-turn: a ``prompt`` invocation is one process and one turn,
 so the footer reports a single total (the turn/session split collapses).
 
-Non-tty consoles (``console.is_terminal`` False) skip the spinner entirely
-and emit only the completed-event lines — safe under ``| grep``.
+Non-tty consoles (``console.is_terminal`` False) skip the Live view and
+emit completed-event lines — safe under ``| grep`` and ``tee``.
 
 Streamed tool output (``stream_output`` tools, e.g. bash_run) follows the
 same tty split: non-tty consoles print every streamed line to scrollback as
-it arrives (the legacy transcript, safe under tee); on a tty the in-flight
-lines stage into a bounded tail box inside the activity display (older
-lines age out, the title flags how much was elided) so a churning command
-never floods the screen — the completion row's ``⎿ N lines`` summary
-carries the shape, and a failed tool flushes the tail for error context.
+it arrives; on a tty lines join the bounded middle transcript as they
+arrive, so failures retain their output context without a separate output
+box. Older transcript rows scroll out of view and are counted; when stdin
+is a tty, ↑/↓, PgUp/PgDn, and Home/End scroll back through the full
+transcript (End resumes following the tail).
 
 Raw mode (``raw=True``) writes the response verbatim to raw stdout — no
 Rule header, no Markdown re-render — so redirected/piped output stays
@@ -46,7 +43,9 @@ from collections.abc import Callable
 from time import perf_counter
 from typing import Any, ClassVar
 
+from rich.align import Align
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
+from rich.layout import Layout
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -121,15 +120,141 @@ _STREAM_BOX_MIN_WIDTH = 60
 #: to keep the activity display light during very short generations.
 _STREAM_BOX_BORDER_CHARS = 240
 
-#: Bounded in-flight tool-output window (tty): streamed command lines held
-#: inside the activity display while the tool runs, same tail-window shape
-#: as the model stream box. Only the tail is kept; on completion the row's
-#: ``⎿ N lines`` summary reports the shape (a ✗ flushes the tail to
-#: scrollback for error context).
-_TOOL_BOX_MAX_LINES = 12
-#: Minimum terminal width for the tool-output box (below it, lines print
-#: to scrollback as before — narrow consoles keep the plain transcript).
-_TOOL_BOX_MIN_WIDTH = 60
+#: Maximum prompt lines kept pinned in the interactive screen header.
+_PROMPT_MAX_LINES = 6
+#: Bounded number of transcript entries retained by the interactive screen.
+_ACTIVITY_HISTORY_MAX_ROWS = 5000
+#: Transcript lines kept free of streamed tool output so recent tool rows
+#: stay visible while a chatty tool runs.
+_ACTIVITY_MIN_TOOL_ROWS = 7
+#: Streamed-output lines per tool kept when the transcript is copied into
+#: scrollback after the turn (the newest lines; earlier ones are counted).
+_SCROLLBACK_OUTPUT_MAX_LINES = 20
+
+
+class _OutputLine(Text):
+    """A streamed tool-output transcript row, collapsible at render time."""
+
+
+_ESC = 0x1B
+#: Byte range that terminates a CSI/SS3 escape sequence.
+_CSI_FINAL_MIN = 0x40
+_CSI_FINAL_MAX = 0x7E
+#: Smallest transcript window that has room for both scroll markers.
+_SCROLL_MARKER_MIN_ROWS = 3
+
+_SCROLL_KEYS: dict[bytes, str] = {
+    b"\x1b[A": "up",
+    b"\x1bOA": "up",
+    b"\x1b[B": "down",
+    b"\x1bOB": "down",
+    b"\x1b[5~": "pgup",
+    b"\x1b[6~": "pgdn",
+    b"\x1b[H": "home",
+    b"\x1bOH": "home",
+    b"\x1b[1~": "home",
+    b"\x1b[F": "end",
+    b"\x1bOF": "end",
+    b"\x1b[4~": "end",
+}
+
+
+def _parse_scroll_keys(buf: bytes) -> tuple[list[str], bytes]:
+    """Split ``buf`` into scroll actions; return them and any partial escape."""
+    actions: list[str] = []
+    i = 0
+    while i < len(buf):
+        if buf[i] != _ESC:
+            i += 1
+            continue
+        end = i + 1
+        if end >= len(buf):
+            return actions, buf[i:]
+        if buf[end] in b"[O":
+            end += 1
+            while end < len(buf) and not _CSI_FINAL_MIN <= buf[end] <= _CSI_FINAL_MAX:
+                end += 1
+            if end >= len(buf):
+                return actions, buf[i:]
+        action = _SCROLL_KEYS.get(buf[i : end + 1])
+        if action:
+            actions.append(action)
+        i = end + 1
+    return actions, b""
+
+
+class _ScrollKeyReader:
+    """Read scroll keys from a tty stdin while the live screen is up.
+
+    Puts the terminal in cbreak mode (no echo, signals intact so Ctrl-C
+    still aborts), reads on a daemon thread, and hands each action to the
+    event loop that started it so transcript state is only touched there.
+    """
+
+    def __init__(self, fd: int, saved: list[Any], on_action: Callable[[str], None]) -> None:
+        import asyncio
+        import threading
+
+        self._fd = fd
+        self._saved = saved
+        self._on_action = on_action
+        try:
+            self._loop: Any = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="lisa-scroll-keys", daemon=True)
+        self._thread.start()
+
+    @classmethod
+    def start(cls, on_action: Callable[[str], None]) -> _ScrollKeyReader | None:
+        try:
+            import termios
+            import tty
+
+            if not sys.stdin.isatty():
+                return None
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            return None
+        return cls(fd, saved, on_action)
+
+    def _dispatch(self, action: str) -> None:
+        if self._loop is not None:
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(self._on_action, action)
+        else:
+            self._on_action(action)
+
+    def _run(self) -> None:
+        import os
+        import select
+
+        pending = b""
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self._fd], [], [], 0.1)
+                if not ready:
+                    pending = b""
+                    continue
+                chunk = os.read(self._fd, 64)
+            except OSError:
+                return
+            if not chunk:
+                return
+            actions, pending = _parse_scroll_keys(pending + chunk)
+            for action in actions:
+                self._dispatch(action)
+
+    def stop(self) -> None:
+        import termios
+
+        self._stop.set()
+        self._thread.join(timeout=0.5)
+        with contextlib.suppress(Exception):
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
 
 
 #: Minimum distinct samples before a velocity estimate is trusted.
@@ -286,15 +411,16 @@ class PromptTransport:
         self.quiet = quiet
         self.raw = raw
         #: Verbosity for tool-call detail. 0 = one-line rows (default);
-        #: 1 = + result-preview line under each completed row; 2 = + the
-        #: full pretty-printed arguments under the row.
+        #: 1 = + result preview; 2 = + pretty-printed arguments and the full
+        #: result preview.
         self.tool_detail = max(0, min(2, int(tool_detail)))
         #: Runtime ``--streaming`` mode (none|stage|text|hybrid). Controls
-        #: the bounded stream box inside the activity display: ``text``
+        #: the bounded stream box at the bottom of the activity display: ``text``
         #: streams the visible answer, ``hybrid`` streams reasoning (with a
         #: char-counter fallback when the provider sends none); ``none``
         #: and ``stage`` keep the plain one-line indicator.
         self.streaming_mode = (streaming_mode or "none").strip().lower()
+        self._init_screen_state()
         self.approval_unresolved: bool = False
         self.yield_unresolved: bool = False
         self.yield_question: str = ""
@@ -307,6 +433,7 @@ class PromptTransport:
         self._active_label: str = ""
         self._last_tool_data: dict[str, Any] | None = None
         self._last_tool_streaming: bool = False
+        self._last_tool_depth: int = 0
         # Streamed-output line count for the in-flight tool (drives the
         # ``⎿ N lines`` result-shape summary on the completion row).
         self._last_tool_output_lines: int = 0
@@ -366,18 +493,28 @@ class PromptTransport:
         self._stream_reasoning_buf: str = ""
         self._iteration_current: int = 0
         self._iteration_max: int = 0
-        # ── Bounded in-flight tool-output window (tty) ────────────
-        # Tail of the in-flight tool's streamed lines. On a tty the lines
-        # render inside the activity display (bounded, so a churning
-        # command never floods scrollback); non-tty consoles print each
-        # line to scrollback as it arrives — the legacy transcript.
-        self._tool_output_lines: list[str] = []
         #: Pre-first-event label shown on the activity line while the
         #: runtime boots (profile/manifest/MCP warmup) — the window that
         #: otherwise reads as a bare spinner. Cleared on the first stage.
         self._phase_label: str = "starting runtime"
         # ── Stream velocity (observable, not manifest-trusted) ──────
         self._init_velocity_state()
+
+    def _init_screen_state(self) -> None:
+        self._screen_mode = False
+        self._prompt_message = ""
+        self._activity_rows: list[Text] = []
+        self._activity_history_elided = 0
+        self._screen_tool_contexts: list[tuple[int, dict[str, Any], int, int]] = []
+        #: First visible transcript line while scrolled back; None follows the tail.
+        self._activity_scroll_top: int | None = None
+        self._activity_view_rows = 1
+        self._key_reader: _ScrollKeyReader | None = None
+        self._wrap_cache: dict[int, tuple[Text, int, list[Text]]] = {}
+        #: Transcript rows already copied into normal scrollback.
+        self._scrollback_flushed_rows = 0
+        self._scrollback_prompt_printed = False
+        self._scrollback_rule_printed = False
 
     def _init_status_counters(self) -> None:
         """Zero the per-turn token/cost counters shared by the footer.
@@ -436,41 +573,93 @@ class PromptTransport:
         self._last_delta_perf: float = 0.0
 
     def start_turn(self, message: str) -> None:
-        """Begin prompt-mode rendering: echo the command, arm the activity line.
+        """Begin prompt-mode rendering: pin the prompt, arm the activity display.
 
-        No-op when ``quiet`` (the response alone prints later).
+        Interactive terminals retain the full prompt in the screen header.
+        Non-terminal output keeps the compact legacy echo.
         """
         if self.quiet:
             return
-        width = self.console.size.width or self._ACTIVITY_WIDTH
-        line = Text()
-        line.append("λ ", style="bold steel_blue3")
-        line.append(
-            _truncate(message.strip(), max(0, width - 6)), style="bold " + STYLE_TEXT_PRIMARY
-        )
-        self.console.print(line)
+        self._prompt_message = message.strip()
+        self._activity_rows = []
+        self._activity_history_elided = 0
+        self._screen_tool_contexts = []
+        self._activity_scroll_top = None
+        self._scrollback_flushed_rows = 0
+        self._scrollback_prompt_printed = False
+        self._scrollback_rule_printed = False
+        if not self.console.is_terminal:
+            width = self.console.size.width or self._ACTIVITY_WIDTH
+            line = Text()
+            line.append("λ ", style="bold steel_blue3")
+            line.append(
+                _truncate(self._prompt_message, max(0, width - 6)),
+                style="bold " + STYLE_TEXT_PRIMARY,
+            )
+            self.console.print(line)
         self.start_activity()
 
     def start_activity(self) -> None:
-        """Show the one-line transient activity display (tty only)."""
+        """Show the interactive screen or the compact activity line."""
         if self.quiet or self._activity is not None or not self.console.is_terminal:
             return
+        self._screen_mode = True
         activity = Live(
             self._activity_renderable(),
             console=self.console,
             refresh_per_second=8,
             transient=True,
+            screen=True,
         )
-        with contextlib.suppress(Exception):
-            activity.start(refresh=True)
+        activity.start(refresh=True)
         self._activity = activity
+        self._key_reader = _ScrollKeyReader.start(self._scroll_activity)
 
     def stop_activity(self) -> None:
+        reader = self._key_reader
+        self._key_reader = None
+        if reader is not None:
+            reader.stop()
         activity = self._activity
         self._activity = None
         if activity is not None:
             with contextlib.suppress(Exception):
                 activity.stop()
+        self._flush_transcript_to_scrollback()
+
+    def _flush_transcript_to_scrollback(self) -> None:
+        """Copy the screen's prompt and tool rows into normal scrollback.
+
+        The live screen runs on the alternate buffer, so without this the
+        turn's tool history vanishes when it closes. Rows are copied once
+        (later stops print only new rows); streamed-output blocks keep their
+        last ``_SCROLLBACK_OUTPUT_MAX_LINES`` so the answer is not buried.
+        """
+        if not self._screen_mode or self.quiet:
+            return
+        if not self._scrollback_prompt_printed and self._prompt_message:
+            header = self._prompt_header(max_lines=_PROMPT_MAX_LINES)
+            self.console.print(Group(*header.renderables[:-1]))
+            self._scrollback_prompt_printed = True
+        start = self._scrollback_flushed_rows
+        if start >= len(self._activity_rows):
+            return
+        if not self._scrollback_rule_printed:
+            self.console.print(Rule(style=STYLE_ROW_TOOL))
+            self._scrollback_rule_printed = True
+            if self._activity_history_elided:
+                self.console.print(
+                    Text(f"… {self._activity_history_elided} oldest lines dropped"),
+                    style=STYLE_TEXT_MUTED,
+                )
+        width = max(1, (self.console.size.width or self._ACTIVITY_WIDTH) - 2)
+        lines = self._activity_lines(
+            width=width,
+            output_budget=_SCROLLBACK_OUTPUT_MAX_LINES,
+            rows=self._activity_rows[start:],
+        )
+        self.console.print(Group(*lines))
+        self._scrollback_flushed_rows = len(self._activity_rows)
 
     def start_thinking(self, stage: str = "dispatch", **kwargs: Any) -> None:
         """Prompt mode has no Live transcript; (re)arm the activity line.
@@ -500,6 +689,7 @@ class PromptTransport:
         self._fork_children = {}
         self._fork_total = 0
         self._tool_call_stack = []
+        self._screen_tool_contexts = []
         self._current_mode = ""
         self._reset_model_status()
         self._active_label = ""
@@ -516,7 +706,6 @@ class PromptTransport:
         self._stream_answer_buf = ""
         self._stream_answer_chars = 0
         self._stream_reasoning_buf = ""
-        self._tool_output_lines = []
         self._turn_started_perf = perf_counter()
         is_dispatch = stage == "dispatch"
         self._thinking_spinner = "dots2" if is_dispatch else "dots"
@@ -535,11 +724,9 @@ class PromptTransport:
     ) -> None:
         """Stop the activity indicator if it is running.
 
-        The activity line is always transient — the flush flags exist for
-        TransportCallbacks compatibility and do not resurrect it once the
-        answer/error is ready to print. Completed event lines already live
-        in real scrollback, so only the staged partial answer may need
-        flushing on a diagnostic (error) path.
+        The Live screen is transient; non-tty event lines remain in
+        scrollback. The flush flags exist for TransportCallbacks
+        compatibility and only flush a staged partial answer on diagnostics.
         """
         if flush_transcript and flush_stream and self._answer_staging:
             with contextlib.suppress(Exception):
@@ -766,12 +953,11 @@ class PromptTransport:
         return
 
     async def on_error(self, message: str, exc: Exception | None = None) -> None:
-        """Stop the activity line and render the error panel.
+        """Stop the activity view and render the error panel.
 
-        Completed event lines already printed to scrollback as they finished,
-        so the trajectory up to the failure is preserved without a flush.
-        Any staged partial answer flushes first so partial work isn't
-        silently lost before the error panel shows.
+        Non-tty event lines are already in scrollback. Any staged partial
+        answer flushes first so partial work isn't silently lost before the
+        error panel shows.
         """
         self.stop_thinking(flush_transcript=True, flush_stream=True)
         body = message
@@ -861,11 +1047,10 @@ class PromptTransport:
     def _handle_tool_stage(self, label: str, data: dict[str, Any]) -> None:
         """Route tool_* stage events to the prompt-mode scrollback lines.
 
-        ``tool_dispatch`` arms the activity label only; ``tool_output``
-        prints streamed lines as they arrive (a dim rail marks them as tool
-        output, not model prose); ``tool_dispatch_complete`` prints the one
-        completed row — rendered from the dispatch payload (the completion
-        event does not re-send arguments) with status/duration applied.
+        ``tool_dispatch`` adds a running row to the interactive transcript;
+        ``tool_output`` adds streamed lines as they arrive; and
+        ``tool_dispatch_complete`` updates that row with status and duration.
+        Non-tty output still prints completed rows to scrollback.
         """
         if label == "tool_dispatch":
             self._tool_call_count += 1
@@ -874,6 +1059,7 @@ class PromptTransport:
             tool_name = str(data.get("tool") or "")
             tool_kind = str(data.get("tool_kind") or "")
             self._tool_call_stack.append((tool_name, tool_kind, parent_idx))
+            self._last_tool_depth = len(self._tool_call_stack) - 1
             # Update activity label with hierarchy depth indicator
             depth = len(self._tool_call_stack) - 1
             depth_indicator = "  " * depth + "└─ " if depth > 0 else ""
@@ -881,35 +1067,55 @@ class PromptTransport:
             self._last_tool_data = data
             self._last_tool_streaming = bool(data.get("stream_output"))
             self._last_tool_output_lines = 0
-            self._tool_output_lines = []
+            if self._screen_mode:
+                self._print_event_line(self._render_tool_dispatch(data, status_glyph="…"))
+                self._screen_tool_contexts.append(
+                    (len(self._activity_rows) - 1, data, self._last_tool_depth, 0)
+                )
             if self.tool_detail >= _TOOL_DETAIL_FULL:
                 self._print_detail_arguments(data)
             return
         if label == "tool_output":
-            # Prompt mode has no Live transcript region — streamed lines
-            # either print to real scrollback as they arrive (piped runs
-            # keep them under tee/grep) or, on a tty, stage into the
-            # bounded in-flight box inside the activity display so a
-            # churning command never floods scrollback. Quiet mode drops
-            # them either way.
-            text = str(data.get("text") or "")
-            stream_label = str(data.get("stream") or "stdout")
-            if text and not self.quiet:
-                for raw_line in text.split("\n"):
-                    line = raw_line.rstrip()
-                    if line:
-                        self._last_tool_output_lines += 1
-                        if self._tool_box_active():
-                            self._stage_tool_box_line(line, stream=stream_label)
-                        else:
-                            self._print_stream_line(line, stream=stream_label)
+            self._handle_tool_output(data)
             return
         if label == "tool_dispatch_complete":
             self._print_completion_row(data)
             return
 
+    def _handle_tool_output(self, data: dict[str, Any]) -> None:
+        """Route streamed tool lines to the tty transcript or plain scrollback."""
+        text = str(data.get("text") or "")
+        stream_label = str(data.get("stream") or "stdout")
+        if not text or self.quiet:
+            return
+        for raw_line in text.split("\n"):
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            self._last_tool_output_lines += 1
+            if self._screen_mode and self._screen_tool_contexts:
+                row_index, tool_data, depth, line_count = self._screen_tool_contexts[-1]
+                self._screen_tool_contexts[-1] = (
+                    row_index,
+                    tool_data,
+                    depth,
+                    line_count + 1,
+                )
+            self._print_stream_line(line, stream=stream_label)
+
     def _print_completion_row(self, data: dict[str, Any]) -> None:
         """Print the one completed tool row (+ summary + detail lines)."""
+        screen_row_index: int | None = None
+        if self._screen_mode and self._screen_tool_contexts:
+            context = self._screen_tool_contexts.pop()
+            (
+                screen_row_index,
+                self._last_tool_data,
+                self._last_tool_depth,
+                self._last_tool_output_lines,
+            ) = context
+            if screen_row_index < 0:
+                screen_row_index = None
         ok = data.get("ok")
         status = "ok" if ok is True else ("error" if ok is False else "")
         if status == "ok":
@@ -919,23 +1125,17 @@ class PromptTransport:
         # Pop from tool call stack for hierarchy tracking
         if self._tool_call_stack:
             self._tool_call_stack.pop()
-        # The in-flight tool-output box closes with the row: a succeeded tool
-        # discards its window (the ``⎿ N lines`` summary reports the shape),
-        # a failed one flushes the tail to scrollback so the operator still
-        # sees what the command printed around the failure.
-        staged = self._tool_output_lines
-        self._tool_output_lines = []
-        if staged and status == "error":
-            for line in staged[-_TOOL_BOX_MAX_LINES:]:
-                self._print_stream_line(line)
         glyph = _TOOL_STATUS_GLYPH.get(status, _TOOL_STATUS_GLYPH[""])
         row_data = self._last_tool_data or data
         summary = self._result_shape_summary(row_data, data)
         row = self._render_tool_dispatch(
             row_data, status_glyph=glyph, complete=data, summary=summary
         )
-        self._print_event_line(row)
-        if self.tool_detail >= _TOOL_DETAIL_SUMMARY:
+        if screen_row_index is not None:
+            self._replace_activity_row(screen_row_index, row)
+        else:
+            self._print_event_line(row)
+        if self.tool_detail >= _TOOL_DETAIL_SUMMARY or status == "error":
             self._print_detail_lines(row_data, data)
         self._active_label = ""
         self._last_tool_data = None
@@ -1023,32 +1223,47 @@ class PromptTransport:
             rendered = json.dumps(arguments, indent=2, sort_keys=True, default=str)
         except (TypeError, ValueError):
             return
+        if self._screen_mode:
+            self._print_event_line(Text("    Arguments", style=STYLE_TEXT_MUTED))
         for line in rendered.splitlines()[:_DETAIL_ARGUMENT_MAX_LINES]:
-            self.console.print(Text(f"    {line}", style=STYLE_ARG_PREVIEW))
+            prefix = "    │ " if self._screen_mode else "    "
+            self._print_event_line(Text(f"{prefix}{line}", style=STYLE_ARG_PREVIEW))
 
     def _print_detail_lines(self, row_data: dict[str, Any], complete: dict[str, Any]) -> None:
-        """Detail level >= 1: print the result preview under the row.
+        """Print the result preview for verbose tools or failed calls.
 
         The kernel sends ``result_preview`` on every completion: a compact
         payload-first summary for JSON-object outputs (content quoted
         first, then short scalars), else the first 200 chars of raw text.
-        At level 2 the full snippet shows as a plain indented block;
-        level 1 shows only the first line.
+        Failed calls show the first line even at the default detail level;
+        ``-v`` also shows the first line and ``-vv`` the full snippet.
         """
         preview = str(complete.get("result_preview") or "").strip()
         if preview and preview != "Done":
             lines = preview.splitlines() or [preview]
             shown = lines if self.tool_detail >= _TOOL_DETAIL_FULL else lines[:_TOOL_DETAIL_SUMMARY]
+            if self._screen_mode:
+                self._print_event_line(Text("    Result", style=STYLE_TEXT_MUTED))
             for line in shown:
-                self.console.print(Text(f"    ⎿ {line}", style=STYLE_OUTPUT_REGION))
+                prefix = "    │ " if self._screen_mode else "    ⎿ "
+                self._print_event_line(Text(f"{prefix}{line}", style=STYLE_OUTPUT_REGION))
 
     def _print_event_line(self, text: Text | str, *, style: str | None = None) -> None:
-        """Print one completed scrollback line, replacing the activity line.
+        """Print one event line or append it to the interactive transcript.
 
         ``text`` may be a pre-styled ``Text`` (preferred — spans carry their
         own colors and markup is never parsed, so raw tool arguments can
         never raise ``MarkupError``) or a legacy plain string styled whole.
         """
+        if self._screen_mode:
+            row = Text()
+            if isinstance(text, Text):
+                row.append(text)
+            else:
+                row.append(text, style=style or STYLE_TEXT_MUTED)
+            self._append_activity_row(row)
+            self._redraw_activity(refresh=True)
+            return
         self.stop_activity()
         if isinstance(text, Text):
             line = Text("  ")
@@ -1059,70 +1274,21 @@ class PromptTransport:
         self.start_activity()
 
     def _print_stream_line(self, line: str, *, stream: str = "stdout") -> None:
-        """Print one streamed tool-output line to scrollback (prompt mode).
-
-        Unlike ``_print_event_line`` this does NOT stop/restart the activity
-        line per line — a churning command would flicker the spinner. The
-        activity Live redraws over its own region on the next refresh, so
-        printed lines persist above it.
-        """
+        """Add one streamed tool-output line to the screen or scrollback."""
         if stream == "stderr" and not line.startswith("[stderr]"):
             line = f"[stderr] {line}"
-        self.console.print(Text(f"  │ {line}", style=STYLE_OUTPUT_REGION))
+        prefix = "    │ " if self._screen_mode else "  │ "
+        row = _OutputLine(f"{prefix}{line}", style=STYLE_OUTPUT_REGION)
+        if self._screen_mode:
+            self._append_activity_row(row)
+            self._redraw_activity()
+        else:
+            self._print_event_line(row)
 
-    def _redraw_activity(self) -> None:
+    def _redraw_activity(self, *, refresh: bool = False) -> None:
         if self._activity is not None:
             with contextlib.suppress(Exception):
-                self._activity.update(self._activity_renderable())
-
-    # ── Bounded in-flight tool-output box (tty) ─────────────────────
-
-    def _tool_box_active(self) -> bool:
-        """Whether streamed tool output stages into the bounded box.
-
-        Gated on: tty, not quiet, no Live-less degenerate console, and a
-        wide-enough width. Non-tty consoles (piped runs, tests) print each
-        line to scrollback as it arrives — the legacy transcript contract.
-        """
-        return (
-            not self.quiet
-            and self.console.is_terminal
-            and (self.console.size.width or 0) >= _TOOL_BOX_MIN_WIDTH
-        )
-
-    def _stage_tool_box_line(self, line: str, *, stream: str = "stdout") -> None:
-        """Stage one streamed tool-output line into the bounded window.
-
-        The list holds only the tail window (older lines age out); the
-        ``_last_tool_output_lines`` counter keeps the true line count so
-        the box title can report how much was elided.
-        """
-        if stream == "stderr" and not line.startswith("[stderr]"):
-            line = f"[stderr] {line}"
-        self._tool_output_lines.append(line)
-        if len(self._tool_output_lines) > _TOOL_BOX_MAX_LINES:
-            del self._tool_output_lines[:-_TOOL_BOX_MAX_LINES]
-
-    def _tool_box_renderable(self) -> RenderableType | None:
-        """Render the staged in-flight tool output as a bordered tail window.
-
-        The title flags elided head lines so the operator knows the window
-        is a tail, not the whole output.
-        """
-        lines = self._tool_output_lines
-        if not lines:
-            return None
-        title = "output"
-        elided = self._last_tool_output_lines - len(lines)
-        if elided > 0:
-            title = f"output · +{elided} lines"
-        return Panel(
-            Text("\n".join(lines), style=STYLE_STREAM_BOX),
-            title=title,
-            title_align="left",
-            border_style=STYLE_STREAM_BOX_BORDER,
-            padding=(0, 1),
-        )
+                self._activity.update(self._activity_renderable(), refresh=refresh)
 
     # ── Bounded stream box (thinking/answer tail window) ────────────
 
@@ -1141,7 +1307,7 @@ class PromptTransport:
         width = self.console.size.width or 0
         return width >= _STREAM_BOX_MIN_WIDTH and self._model_call_count > 0
 
-    def _stream_box_lines(self) -> list[str]:
+    def _stream_box_lines(self, *, max_lines: int = _STREAM_BOX_MAX_LINES) -> list[str]:
         """Return the tail window of the active stream as wrapped lines.
 
         Picks the content source from the streaming mode and what has
@@ -1152,6 +1318,8 @@ class PromptTransport:
         first. Long single-line chunks (minified JSON, URLs) hard-wrap on
         their own — a box line never exceeds the console width.
         """
+        if max_lines <= 0:
+            return []
         if self.streaming_mode == "text":
             buf = self._stream_answer_buf
         else:
@@ -1162,7 +1330,7 @@ class PromptTransport:
         # Walk from the tail: keep only as much text as can fill the box.
         # Rough char budget before wrapping (wraps can only shrink visible
         # chars per line), with slack for hard-wrapped long words.
-        budget = width * _STREAM_BOX_MAX_LINES
+        budget = width * max_lines
         tail = buf[-budget:] if len(buf) > budget else buf
         lines: list[str] = []
         for para in tail.replace("\r\n", "\n").split("\n"):
@@ -1174,9 +1342,11 @@ class PromptTransport:
                 lines.append(remaining[:width])
                 remaining = remaining[width:]
             lines.append(remaining)
-        return lines[-_STREAM_BOX_MAX_LINES:]
+        return lines[-max_lines:]
 
-    def _stream_box_renderable(self) -> RenderableType | None:
+    def _stream_box_renderable(
+        self, *, max_lines: int = _STREAM_BOX_MAX_LINES
+    ) -> RenderableType | None:
         """Render the active stream box as a bordered, dim tail window.
 
         The content is deliberately rendered as *plain dim text*, not the
@@ -1185,7 +1355,7 @@ class PromptTransport:
         ``_STREAM_BOX_BORDER_CHARS`` of content the box renders bare (no
         border) to stay light for short generations.
         """
-        lines = self._stream_box_lines()
+        lines = self._stream_box_lines(max_lines=max_lines)
         if not lines:
             return None
         body = Text("\n".join(lines), style=STYLE_STREAM_BOX)
@@ -1237,30 +1407,216 @@ class PromptTransport:
         return delta / span
 
     def _activity_renderable(self) -> RenderableType:
-        """The transient activity display: status line + bounded stream box.
+        """Build the full-screen tty layout or compact non-tty activity row.
 
-        The first row is the one-line status (mode · model · in-flight
-        label · thinking-meter · iter counters · budget bars · elapsed)
-        with a trailing spinner. Below it, when a streaming mode streams
-        into the box, the tail window of the model's live output renders
-        inside a bounded panel — so long generations show visible motion
-        without pushing completed event rows (or the footer) too far back.
-
-        Everything is PULLED per frame: the Live holds this proxy
-        renderable, and each refresh re-reads transport state (elapsed,
-        thinking size, box tail), so counters tick during quiet model
-        generations instead of freezing at construction values.
-
-        Wide-tty surfaces additionally show a tool-call budget bar
-        (``▰▰▱▱ 4/8``) when the kernel stamped a finite cap on the stage
-        payloads — the denominator rides every event, so this costs one
-        capture per turn. Unlimited caps fall back to the plain counter;
-        the bar warns gold past ``_BUDGET_BAR_WARN_RATIO``.
+        The tty layout divides the screen into a prompt header, a tailing
+        event transcript, and a thinking/status footer. Non-tty callers keep
+        the compact transient activity row used by the legacy transport.
         """
+        if self._screen_mode:
+            return self._screen_layout()
         return self
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         yield self._activity_frame()
+
+    def _screen_layout(self) -> Layout:
+        """Keep prompt and thinking pinned while the transcript scrolls."""
+        height = self.console.size.height or 24
+        width = self.console.size.width or self._ACTIVITY_WIDTH
+        prompt_header = self._prompt_header(
+            max_lines=min(_PROMPT_MAX_LINES, max(1, height // 3 - 1))
+        )
+        header_rows = len(prompt_header.renderables)
+        footer_rows = min(11, max(2, height // 3))
+        if header_rows + footer_rows >= height:
+            footer_rows = max(1, height - header_rows - 1)
+        history_rows = max(1, height - header_rows - footer_rows)
+        self._activity_view_rows = history_rows
+
+        footer_parts: list[RenderableType] = []
+        stream_lines = footer_rows - 3
+        if stream_lines > 0:
+            box = self._stream_box_renderable(max_lines=stream_lines)
+            if box is not None:
+                footer_parts.append(box)
+        footer_parts.append(self._status_line(width))
+
+        layout = Layout()
+        layout.split_column(
+            Layout(
+                prompt_header,
+                name="prompt",
+                size=header_rows,
+            ),
+            Layout(
+                self._activity_history(max_rows=history_rows),
+                name="activity",
+                ratio=1,
+                minimum_size=1,
+            ),
+            Layout(
+                Align(Group(*footer_parts), vertical="bottom"),
+                name="thinking",
+                size=footer_rows,
+            ),
+        )
+        return layout
+
+    def _prompt_header(self, *, max_lines: int) -> Group:
+        """Render the wrapped prompt (capped) above a separator rule.
+
+        The header is sized to its content: one row per prompt line plus
+        the rule, so a one-line prompt takes two rows.
+        """
+        width = max(1, (self.console.size.width or self._ACTIVITY_WIDTH) - 2)
+        wrapped: list[Text] = list(
+            Text(self._prompt_message).wrap(self.console, width, overflow="fold")
+        ) or [Text("")]
+        limit = max(1, max_lines)
+        truncated = len(wrapped) > limit
+        if truncated:
+            wrapped = wrapped[:limit]
+        rows: list[RenderableType] = []
+        for index, line in enumerate(wrapped):
+            row = Text("λ " if index == 0 else "  ", style="bold " + STYLE_ROW_TOOL)
+            if truncated and index == limit - 1:
+                row.append("… prompt continues", style=STYLE_TEXT_MUTED)
+            else:
+                row.append(line.plain, style="bold " + STYLE_TEXT_PRIMARY)
+            rows.append(row)
+        rows.append(Rule(style=STYLE_ROW_TOOL))
+        return Group(*rows)
+
+    def _wrapped_row(self, row: Text, width: int) -> list[Text]:
+        """Wrap one transcript row, cached per row object and width."""
+        cached = self._wrap_cache.get(id(row))
+        if cached is not None and cached[0] is row and cached[1] == width:
+            return cached[2]
+        lines = list(row.wrap(self.console, width, overflow="fold"))
+        if len(self._wrap_cache) > 2 * len(self._activity_rows) + 64:
+            live = {id(r) for r in self._activity_rows}
+            self._wrap_cache = {k: v for k, v in self._wrap_cache.items() if k in live}
+        self._wrap_cache[id(row)] = (row, width, lines)
+        return lines
+
+    def _activity_lines(
+        self, *, width: int, output_budget: int | None, rows: list[Text] | None = None
+    ) -> list[Text]:
+        """Wrap the transcript; collapse streamed-output blocks to ``output_budget``."""
+        lines: list[Text] = []
+        output_run: list[Text] = []
+
+        def flush_output_run() -> None:
+            # Collapse each block of streamed output to its tail so it never
+            # crowds the tool rows out of the middle region.
+            if output_budget is not None and len(output_run) > output_budget:
+                hidden = len(output_run) - output_budget + 1
+                if output_budget > 1:
+                    lines.append(
+                        Text(f"    │ … {hidden} earlier output lines", style=STYLE_TEXT_MUTED)
+                    )
+                    lines.extend(output_run[-(output_budget - 1) :])
+                else:
+                    lines.append(output_run[-1])
+            else:
+                lines.extend(output_run)
+            output_run.clear()
+
+        for row in self._activity_rows if rows is None else rows:
+            wrapped = self._wrapped_row(row, width)
+            if isinstance(row, _OutputLine):
+                output_run.extend(wrapped)
+                continue
+            flush_output_run()
+            lines.extend(wrapped)
+        flush_output_run()
+        return lines
+
+    def _activity_history(self, *, max_rows: int) -> RenderableType:
+        """Render the transcript tail, or the scrolled-back window."""
+        max_rows = max(1, max_rows)
+        width = max(1, (self.console.size.width or self._ACTIVITY_WIDTH) - 2)
+        if self._activity_scroll_top is not None:
+            return self._scrolled_activity_history(max_rows=max_rows, width=width)
+        # One extra row is reserved for the "earlier lines" marker.
+        output_budget = max(1, max_rows - _ACTIVITY_MIN_TOOL_ROWS - 1)
+        lines = self._activity_lines(width=width, output_budget=output_budget)
+        omitted = self._activity_history_elided
+        if len(lines) > max_rows:
+            omitted += len(lines) - max_rows
+            lines = lines[-max_rows:]
+        if omitted:
+            hint = " · ↑ to scroll back" if self._key_reader is not None else ""
+            marker = Text(f"… {omitted} earlier lines{hint}", style=STYLE_TEXT_MUTED)
+            visible_tail = lines[-(max_rows - 1) :] if max_rows > 1 else []
+            lines = [marker, *visible_tail]
+        if not lines:
+            return Text("Waiting for tool activity…", style=STYLE_TEXT_MUTED)
+        return Group(*lines)
+
+    def _scrolled_activity_history(self, *, max_rows: int, width: int) -> RenderableType:
+        """Render the full (uncollapsed) transcript from the scroll position."""
+        lines = self._activity_lines(width=width, output_budget=None)
+        top = max(0, min(self._activity_scroll_top or 0, len(lines) - max_rows))
+        self._activity_scroll_top = top
+        window = lines[top : top + max_rows]
+        if max_rows >= _SCROLL_MARKER_MIN_ROWS:
+            above = top + (self._activity_history_elided if top == 0 else 0)
+            if above:
+                label = (
+                    f"↑ {top} earlier lines"
+                    if top
+                    else f"… {self._activity_history_elided} oldest lines dropped"
+                )
+                window[0] = Text(label, style=STYLE_TEXT_MUTED)
+            below = len(lines) - (top + max_rows)
+            hint = "↑/↓ PgUp/PgDn scroll · End to follow"
+            label = f"↓ {below} newer lines · {hint}" if below > 0 else f"— end · {hint}"
+            if len(window) == max_rows:
+                window[-1] = Text(label, style=STYLE_TEXT_MUTED)
+            else:
+                window.append(Text(label, style=STYLE_TEXT_MUTED))
+        return Group(*window)
+
+    def _scroll_activity(self, action: str) -> None:
+        """Apply one scroll action to the middle transcript and redraw."""
+        rows = max(1, self._activity_view_rows)
+        width = max(1, (self.console.size.width or self._ACTIVITY_WIDTH) - 2)
+        total = len(self._activity_lines(width=width, output_budget=None))
+        bottom = max(0, total - rows)
+        top = bottom if self._activity_scroll_top is None else self._activity_scroll_top
+        page = max(1, rows - 2)
+        step = {"up": -1, "down": 1, "pgup": -page, "pgdn": page}.get(action)
+        if action == "home":
+            new_top: int | None = 0
+        elif action == "end" or step is None:
+            new_top = None
+        else:
+            new_top = max(0, min(bottom, top + step))
+            if new_top >= bottom and action in ("down", "pgdn"):
+                new_top = None
+        if new_top is not None and bottom == 0:
+            new_top = None
+        self._activity_scroll_top = new_top
+        self._redraw_activity(refresh=True)
+
+    def _append_activity_row(self, row: Text) -> None:
+        self._activity_rows.append(row)
+        excess = len(self._activity_rows) - _ACTIVITY_HISTORY_MAX_ROWS
+        if excess > 0:
+            del self._activity_rows[:excess]
+            self._activity_history_elided += excess
+            self._scrollback_flushed_rows = max(0, self._scrollback_flushed_rows - excess)
+            self._screen_tool_contexts = [
+                (index - excess if index >= excess else -1, data, depth, lines)
+                for index, data, depth, lines in self._screen_tool_contexts
+            ]
+
+    def _replace_activity_row(self, index: int, row: Text) -> None:
+        if 0 <= index < len(self._activity_rows):
+            self._activity_rows[index] = row
+            self._redraw_activity(refresh=True)
 
     def _activity_frame(self) -> RenderableType:
         """Build one frame of the activity display from current state."""
@@ -1268,9 +1624,6 @@ class PromptTransport:
         width = transport.console.size.width or transport._ACTIVITY_WIDTH
         line = transport._status_line(width)
         boxes: list[RenderableType] = []
-        tool_box = transport._tool_box_renderable()
-        if tool_box is not None:
-            boxes.append(tool_box)
         box = transport._stream_box_renderable() if transport._stream_box_active() else None
         if box is not None:
             boxes.append(box)
@@ -1661,12 +2014,9 @@ class PromptTransport:
     ) -> Text:
         """Render a tool call as a one-liner: glyph, tool, primary arg, status.
 
-        ``→ tool brave_search("query") ✓ 120ms``. On completion
-        (``status_glyph`` set) the status and duration are appended,
-        right-aligned on wide terminals so a column of completions scans
-        vertically. ``summary`` (the ``⎿ N lines`` result shape) rides
-        after the status; its length is reserved in the alignment math so
-        the row never wraps.
+        Non-screen output stays in its legacy form. In the interactive
+        screen, tool identity, argument, status, and duration are a
+        left-to-right scan line rather than opposing edge columns.
 
         Returns a styled ``Text``: glyph in the tool-kind color, tool name
         bright, argument preview dim, status success/error colored. Plain
@@ -1675,6 +2025,13 @@ class PromptTransport:
         """
         tool = str(data.get("tool") or "")
         kind = str(data.get("tool_kind") or "")
+        if status_glyph and self._screen_mode and kind != "transition":
+            return self._render_screen_tool_dispatch(
+                data,
+                status_glyph=status_glyph,
+                complete=complete,
+                summary=summary,
+            )
         glyph = self._TOOL_KIND_GLYPH.get(kind, "→")
 
         out = Text()
@@ -1693,6 +2050,36 @@ class PromptTransport:
             if summary:
                 out.append(" ", style=STYLE_TEXT_MUTED)
                 out.append(summary, style=STYLE_TEXT_MUTED)
+        return out
+
+    def _render_screen_tool_dispatch(
+        self,
+        data: dict[str, Any],
+        *,
+        status_glyph: str,
+        complete: dict[str, Any] | None,
+        summary: str,
+    ) -> Text:
+        """Render a tool as one left-to-right scan line in the tty transcript."""
+        tool = str(data.get("tool") or "")
+        status_style = {
+            "✓": STYLE_ROW_SUCCESS,
+            "✗": STYLE_ROW_ERROR,
+            "…": STYLE_STAGE,
+        }.get(status_glyph, STYLE_TEXT_MUTED)
+        out = Text("  " * self._last_tool_depth)
+        out.append(f"{status_glyph} ", style=status_style)
+        out.append(tool, style=STYLE_TOOL_NAME)
+        arg = self._primary_arg_preview(data)
+        if arg:
+            out.append(f" · {arg}", style=STYLE_ARG_PREVIEW)
+        duration = (complete or data).get("duration_ms")
+        if status_glyph == "…":
+            out.append(" · running", style=STYLE_TEXT_MUTED)
+        elif duration not in (None, "", 0):
+            out.append(f" · {round(float(duration))}ms", style=STYLE_TEXT_MUTED)
+        if summary:
+            out.append(f" · {summary.removeprefix('⎿ ')}", style=STYLE_TEXT_MUTED)
         return out
 
     def _render_transition_dispatch(
