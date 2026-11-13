@@ -33,11 +33,14 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
+        # --frozen: the committed uv.lock is the wheel pin. Without it a
+        # registry-side framework release can silently drift the resolved
+        # wheel set between runs (see docs/SPEC/CLI_INTEGRATION_LAYER.md).
         # Resolves all framework deps from PyPI — no sibling checkout required.
         # This validates the "clone just cli and run" path. The prompt extra
         # also provides prompt_toolkit so the strict mypy run sees a typed
         # dependency instead of import-not-found stub misses.
-        run: uv sync --no-sources --extra dev --extra prompt
+        run: uv sync --no-sources --frozen --extra dev --extra prompt
 
       - name: Format check (ruff)
         run: uv run --no-sync ruff format --check .
@@ -94,11 +97,12 @@ jobs:
         run: uv python install ${{ matrix.python }}
 
       - name: Install dependencies
-        # Resolves all framework deps from PyPI — no sibling checkout required.
-        # This validates the "clone just cli and run" path. The prompt extra
-        # provides prompt_toolkit: the TUI prompt tests exercise real key
-        # bindings (KeyProcessor match), so they need it installed.
-        run: uv sync --no-sources --extra dev --extra prompt
+        # --frozen: the committed uv.lock is the wheel pin; the offline
+        # scripted scenarios import the published lisa-harness-e2e module,
+        # so the resolved wheel set must not drift run to run.
+        # --no-sources: resolve the lisa-harness packages from PyPI wheels
+        # (no sibling ../lisa checkout exists in CI).
+        run: uv sync --no-sources --frozen --extra dev --extra prompt
 
       # Format and lint run only in the ubuntu Quality gates job: a Windows
       # checkout is CRLF (runner autocrlf), so ruff format --check flags every
@@ -140,9 +144,11 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
+        # --frozen: the committed uv.lock is the wheel pin; coverage must be
+        # measured against the same resolved set the test matrix used.
         # --no-sources: resolve the lisa-harness packages from PyPI wheels
         # (no sibling ../lisa checkout exists in CI).
-        run: uv sync --no-sources --extra dev
+        run: uv sync --no-sources --frozen --extra dev
 
       - name: Download matrix coverage data
         uses: actions/download-artifact@v4
@@ -212,6 +218,14 @@ jobs:
 
       - name: Run verify
         run: uv run --no-sync lisa verify
+
+      - name: Run scripted-turn integration scenarios
+        # Per-OS turn coverage beyond `lisa verify` diagnostics: real runtime
+        # + scripted model offline (see docs/SPEC/CLI_INTEGRATION_LAYER.md).
+        # The approval scenarios install lisa-pack-bash from PyPI into the
+        # test data dir's packs venv; the suite is hermetic (no operator
+        # state, no provider credentials).
+        run: uv run --no-sync pytest hosts/cli/tests/integration -q -m integration
 
   merge-gate:
     name: Merge gate

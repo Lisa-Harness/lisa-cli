@@ -46,8 +46,20 @@ dev = [
 prompt = ["prompt-toolkit>=3.0"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [
+    "src",
+    # The offline scenarios import the scripted-model double from the
+    # published ``lisa-harness-e2e`` distribution's source tree (the same
+    # ``e2etest.scripted`` module the wheels ship; CI resolves the dist
+    # from PyPI wheels — see docs/SPEC/CLI_INTEGRATION_LAYER.md).
+    # Relative to this member root: ``hosts/cli/../../../lisa/e2etest/src``
+    # is ``<sibling>/lisa/e2etest/src``.
+    "../../../lisa/e2etest/src",
+]
 testpaths = ["tests"]
+# An xfail that unexpectedly passes must fail the suite, so a fixed bug
+# flips its regression guard back on instead of silently staying skipped.
+xfail_strict = true
 markers = [
     "live: hits real external signal or provider APIs and prints a tester-visible summary",
     "integration: multi-module in-process test; may require local services",
@@ -108,7 +120,7 @@ select = [
 ignore = ["PLR0913", "PLC0415", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["PLC0415", "PLR2004"]
+"**/tests/**" = ["PLC0415", "PLR2004", "PLR0917"]
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
 "**/hosts/cli/render.py" = ["PLC0415"]
 "**/hosts/cli/entry.py" = ["PLC0415", "RUF001"]

@@ -1,0 +1,50 @@
+name: Framework compatibility probe
+
+# Advisory weekly probe: install the NEWEST framework wheels satisfying the
+# CLI's requirements and run the offline scripted-turn scenarios. Unlike the
+# required gates (which pin the committed uv.lock via `--frozen`), this job
+# resolves `>=` freely, so a breaking framework release is caught here before
+# the next lock bump reaches users. Red does NOT block the merge gate — it
+# means the lock should be bumped (or a floor fixed).
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-wheels:
+    name: Integration scenarios on latest wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install CLI deps and upgrade the framework set
+        # The workspace resolves the harness packages from PyPI (--no-sources
+        # avoids requiring a sibling checkout), then upgrades every wheel so
+        # the probe sees the newest release rather than the lock-pinned one.
+        run: |
+          uv sync --no-sources --frozen --extra dev --extra prompt
+          uv pip install --python .venv --upgrade \
+            lisa-harness-kernel \
+            lisa-harness-sdk \
+            lisa-harness-runtime \
+            lisa-harness-mcp-servers \
+            lisa-harness-e2e \
+            lisa-pack-core
+
+      - name: Run the offline integration scenarios
+        run: |
+          uv run --no-sync pytest hosts/cli/tests/integration -q -m integration
