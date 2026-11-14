@@ -845,7 +845,7 @@ def _get_version() -> str:
 
         return _pkg_version("lisa-cli")
     except Exception:  # pylint: disable=broad-except
-        return "0.4.0"
+        return "0.5.0"
 
 
 _VERSION_OPTION = typer.Option(

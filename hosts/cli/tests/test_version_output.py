@@ -53,7 +53,7 @@ def test_metadata_failure_falls_back_to_declared_version(
         raise md.PackageNotFoundError(name)
 
     monkeypatch.setattr(md, "version", _missing)
-    assert cli_main._get_version() == "0.4.0"
+    assert cli_main._get_version() == "0.5.0"
 
 
 def test_version_constant_matches_package_manifest() -> None:
