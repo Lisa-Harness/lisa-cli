@@ -387,8 +387,16 @@ def test_report_phase_detail_prints_prompt_stages(bench: ModuleType) -> None:
 
 
 def test_assert_no_leaked_children_counts_direct_children(bench: ModuleType) -> None:
-    """The leak scan counts living direct children of this process."""
+    """The leak scan counts living direct children of this process.
+
+    The scan reads ``/proc``, which only exists on Linux; elsewhere it
+    degrades to a no-op (the bounded-teardown half of the lifecycle gate
+    still runs), so the counting assertion is Linux-only.
+    """
     import subprocess
+
+    if not Path("/proc").is_dir():
+        pytest.skip("the leak scan reads /proc (Linux-only)")
 
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:

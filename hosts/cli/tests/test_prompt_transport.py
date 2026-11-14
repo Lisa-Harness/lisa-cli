@@ -855,7 +855,17 @@ def test_scroll_key_reader_start_requires_a_tty(monkeypatch: pytest.MonkeyPatch)
 def test_scroll_key_reader_start_survives_a_terminal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A terminal that cannot be put in cbreak mode yields no reader."""
+    """A terminal that cannot be put in cbreak mode yields no reader.
+
+    ``termios`` is POSIX-only: the reader's ``start`` catches the import
+    error on Windows and returns no reader, so the POSIX-only path is
+    skipped there.
+    """
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("termios is POSIX-only; the Windows path is the import guard")
+
     import termios
 
     from hosts.cli import transport as transport_module

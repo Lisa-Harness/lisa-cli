@@ -923,8 +923,11 @@ def test_inject_packs_venv_site_packages_inserts_path(
     """The injection adds a real site dir to sys.path exactly once."""
     import sys as _sys
 
-    site_packages = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
-    site_packages.mkdir(parents=True)
+    # The venv layout is platform-specific: ``Lib/site-packages`` on
+    # Windows, ``lib/pythonX.Y/site-packages`` on POSIX. Use the mirror's
+    # own resolver so the test asserts the production path on every OS.
+    site_packages = cli_main._mirror_packs_venv_site_packages(tmp_path / "venv")
+    site_packages.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(cli_main, "_mirror_default_packs_venv", lambda: tmp_path / "venv")
     monkeypatch.setattr(cli_main, "_PACKS_VENV_INJECTED", False)
     monkeypatch.setattr(cli_main, "_ENV_LOADED", True)

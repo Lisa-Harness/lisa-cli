@@ -2152,12 +2152,22 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
     proxy subprocesses. When those teardown awaits stall (the 2026-09-21
     headroom incident: the loop sat idle in select after sequential anyio
     task-group exits), a plain ``await runtime.aclose()`` never returns and
-    the CLI prints nothing. Bound the graceful path with
-    :func:`asyncio.wait_for`; on timeout, fall back to terminating every
-    tracked MCP/proxy subprocess directly so no orphans survive.
+    the CLI prints nothing. Bound the graceful path with a timeout; on
+    timeout, fall back to terminating every tracked MCP/proxy subprocess
+    directly so no orphans survive.
+
+    The bounded close must run ``runtime.aclose()`` in the *calling* task:
+    the runtime's MCP teardown exits anyio cancel scopes, and anyio forbids
+    exiting a cancel scope from a different task than the one that entered
+    it. :func:`asyncio.wait_for` only guarantees that on Python 3.12+ (it
+    runs the wrapped coroutine in the current task there); on 3.11 it wraps
+    it in a new task, so the close would trip anyio's cross-task guard and
+    raise ``CancelledError``. ``asyncio.timeout`` has the in-task
+    semantics on every supported version, so it is the primitive used here.
     """
     try:
-        await asyncio.wait_for(runtime.aclose(), timeout=timeout_s)
+        async with asyncio.timeout(timeout_s):
+            await runtime.aclose()
         return
     except TimeoutError:
         logger.warning(
