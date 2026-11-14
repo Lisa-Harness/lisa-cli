@@ -1281,6 +1281,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "import-linter" },
+    { name = "lisa-harness-e2e" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1309,6 +1310,7 @@ requires-dist = [
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "lisa-cli", editable = "hosts/cli" },
     { name = "lisa-cli", extras = ["prompt"], marker = "extra == 'prompt'", editable = "hosts/cli" },
+    { name = "lisa-harness-e2e", marker = "extra == 'dev'", specifier = ">=0.5.4" },
     { name = "mutmut", marker = "sys_platform == 'linux' and extra == 'mutation'", specifier = ">=3,<4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -1326,6 +1328,22 @@ dev = [
     { name = "mypy", specifier = ">=2.4.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "vulture", specifier = ">=2.16" },
+]
+
+[[package]]
+name = "lisa-harness-e2e"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lisa-harness-kernel" },
+    { name = "lisa-harness-runtime" },
+    { name = "lisa-harness-sdk" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/15/34a7601fb7928d695118c5fe3a87f110d504bb1e30fc63f22dc1b36b9b3d/lisa_harness_e2e-0.5.4.tar.gz", hash = "sha256:14c1148038b79328a0dc958f1a526581fe3e5d49386822021e9a1dc4d0ec57e9", size = 37479, upload-time = "2026-11-12T00:01:14.191Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/2c/41883cdda7214721e34040f86653aaf5a7537be02b6bb5d6ded7f7a335cd/lisa_harness_e2e-0.5.4-py3-none-any.whl", hash = "sha256:6a64b336554c085a89cef5d9df4ed7ba540392172b1ddfe5a112e963a7cf13fa", size = 24240, upload-time = "2026-11-12T00:01:12.858Z" },
 ]
 
 [[package]]

@@ -118,8 +118,8 @@ Invariants every slice must hold:
 
 ## Sequencing decision
 
-```
-PR 1  integration scenarios + --frozen wheels + xfail_strict   (layer spec M1)
+```text
+PR 1  integration scenarios + lock-pinned wheels + xfail_strict  (layer spec M1)
 PR 2  slices 1–3 (options, bootstrap, group)
 PR 3  slice 4 (command modules)
 PR 4  slice 5 (prompt) — approval / decision-only scenarios green before + after

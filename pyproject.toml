@@ -9,6 +9,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # The scripted-model double the offline integration scenarios import
+    # (``e2etest.scripted``). It ships in the published ``lisa-harness-e2e``
+    # distribution, so CI resolves it from a PyPI wheel like every other
+    # framework package (see docs/SPEC/CLI_INTEGRATION_LAYER.md).
+    "lisa-harness-e2e>=0.5.4",
     "mypy>=1.10.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

@@ -36,7 +36,7 @@ jobs:
         # avoids requiring a sibling checkout), then upgrades every wheel so
         # the probe sees the newest release rather than the lock-pinned one.
         run: |
-          uv sync --no-sources --frozen --extra dev --extra prompt
+          uv sync --no-sources --extra dev --extra prompt
           uv pip install --python .venv --upgrade \
             lisa-harness-kernel \
             lisa-harness-sdk \

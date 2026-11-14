@@ -705,3 +705,103 @@ def test_script_entry_point_guard_runs_main() -> None:
     )
     assert completed.returncode == 1
     assert "gate FAILED" in completed.stderr
+
+
+# ── probe failure semantics: missing executable ────────────────────────
+
+
+def test_run_executable_probe_missing_executable_yields_failed_sample(bench: ModuleType) -> None:
+    """A vanished executable becomes a failed sample, not a crash.
+
+    ``OSError`` (the binary does not exist or is not executable) is
+    swallowed into a failed sample so one bad probe cannot destroy the
+    whole sweep.
+    """
+
+    def _runner(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("No such file or directory")
+
+    sample = bench._run_executable_probe(
+        ["/nonexistent/lisa", "--version"],
+        variant="warm",
+        timeout_seconds=5.0,
+        runner=_runner,
+    )
+    assert sample.exit_code == -1
+    assert sample.wall_seconds >= 0.0
+
+
+def test_probe_help_version_gate_missing_executable_fails_the_gate(bench: ModuleType) -> None:
+    """A gate runner that cannot start the binary fails the gate, not the run.
+
+    The timeout and missing-executable paths both degrade to a
+    ``_GateResult`` with exit -1, which the gate then reports as FAILED
+    (a non-zero exit code, not an exception).
+    """
+
+    def _runner(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("No such file or directory")
+
+    result = bench._probe_help_version_variant(
+        "/nonexistent/lisa",
+        "help",
+        ["--help"],
+        1,
+        5.0,
+        gate_runner=_runner,
+    )
+    assert isinstance(result, int)
+    assert result != 0
+
+
+def test_probe_help_version_gate_timeout_fails_the_gate(bench: ModuleType) -> None:
+    """A gate runner that times out degrades to a failed gate result."""
+    import subprocess
+
+    def _runner(*_args: Any, **_kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(cmd="lisa", timeout=1.0)
+
+    result = bench._probe_help_version_variant(
+        "/nonexistent/lisa",
+        "help",
+        ["--help"],
+        1,
+        5.0,
+        gate_runner=_runner,
+    )
+    assert isinstance(result, int)
+    assert result != 0
+
+
+def test_gate_result_carries_failure_fields(bench: ModuleType) -> None:
+    """The degraded gate result keeps the failure shape the gate reads."""
+    result = bench._GateResult(returncode=-1, stdout="", stderr="")
+    assert result.returncode == -1
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_module_paths_from_env_skips_unimportable_modules(
+    bench: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A module that cannot be imported is skipped, not fatal.
+
+    The probe reports the resolved roots of the modules it can import; a
+    missing optional module (kernel/runtime/hosts.cli) is simply omitted
+    from the report instead of aborting the measurement.
+    """
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    def _import_module(name: str) -> Any:
+        if name == "runtime":
+            raise ImportError("simulated missing module")
+        return real_import_module(name)
+
+    # The function imports ``importlib`` inside its body, so patching the
+    # module attribute is what the local import resolves to.
+    monkeypatch.setattr(importlib, "import_module", _import_module)
+    paths = bench._module_paths_from_env()
+    assert "runtime" not in paths
+    assert paths, "the remaining modules still resolve"

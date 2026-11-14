@@ -27,9 +27,10 @@ def _make_runtime(tmp_path: Path) -> HostRuntime:
 
 def test_prompt_pack_mutation_exits_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A prompt turn that flags restart_required still exits 0."""
-    from unittest.mock import patch
+    import io
 
     import typer
+    from rich.console import Console
 
     from hosts.cli import main as cli_main
 
@@ -41,11 +42,14 @@ def test_prompt_pack_mutation_exits_zero(tmp_path: Path, monkeypatch: pytest.Mon
 
     monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kw: runtime)
     monkeypatch.setattr(cli_main, "_run_prompt_with_teardown", _fake_run_prompt_with_teardown)
+    # A real non-tty Console, not a mock: the transport reads the console's
+    # size to lay out the prompt screen, and a MagicMock's ``size.height``
+    # is a mock rather than an int. ``force_terminal=False`` keeps the
+    # transport on its non-tty path (no full-screen layout), which is what
+    # this exit-code contract exercises.
+    monkeypatch.setattr(cli_main, "console", Console(file=io.StringIO(), force_terminal=False))
 
-    with (
-        patch.object(cli_main, "console"),
-        pytest.raises(typer.Exit) as exc_info,
-    ):
+    with pytest.raises(typer.Exit) as exc_info:
         cli_main._prompt_command(
             message=["continue"],
             stdin=False,

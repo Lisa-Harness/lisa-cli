@@ -105,22 +105,32 @@ subprocess servers (in-process pool only), and the `/approve` string grammar
 ### Wheel pinning
 
 Problem: local dev resolves `lisa-harness-*` from editable `../lisa` sources;
-CI's `uv sync --no-sources` (quality/test jobs) resolves **without**
-`--frozen`, so a registry-side framework release can silently drift the
+CI's `uv sync --no-sources` (quality/test jobs) resolves against the
+registry, so a registry-side framework release can silently drift the
 resolved wheel set between runs, and nothing checks newer-than-pinned
 releases.
 
+The pinning mechanism is the **committed `uv.lock`**: `--no-sources`
+re-resolves against PyPI but keeps the locked version whenever one is still
+available, so the resolved wheel set does not drift between runs. A newer
+framework release is only picked up when the lock is deliberately bumped.
+(`--frozen` is *not* used here: uv rejects `--no-sources` together with
+`--frozen` — they are mutually exclusive — and CI has no sibling `../lisa`
+checkout for the lock's editable paths to resolve against anyway.)
+
 Two parts:
 
-1. **Pinned matrix** — every CI sync that installs framework wheels gains
-   `--frozen` (quality, test, changed-coverage, diagnose-smoke,
-   build-package). `uv.lock` is the committed pin; `--frozen` fails rather
-   than re-resolving, which is the reproducibility contract the offline
-   scenarios need (scripted doubles import `e2etest.scripted` from a wheel).
+1. **Pinned matrix** — every CI sync that installs framework wheels keeps
+   `--no-sources` (quality, test, changed-coverage, diagnose-smoke) and
+   resolves the versions committed in `uv.lock`. The scripted double the
+   scenarios need (`e2etest.scripted`) ships in the published
+   `lisa-harness-e2e` distribution, which is a dev dependency of the root
+   workspace so CI installs it as a wheel like every other framework package.
 2. **Drift probe (advisory)** — a weekly scheduled workflow
    (`framework-compat.yml`, shaped like mutation.yml) installs the latest
    satisfying framework wheels (`uv sync --no-sources --extra dev
-   --extra prompt -U <five framework dists>`) and runs only
+   --extra prompt` then `uv pip install --upgrade <five framework dists>`)
+   and runs only
    `pytest hosts/cli/tests/integration -m integration -q`. Red ⇒ the CLI
    needs a lock bump (or a floor fix) before users hit it; red does **not**
    gate merges.

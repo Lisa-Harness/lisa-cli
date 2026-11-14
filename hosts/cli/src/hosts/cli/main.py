@@ -10,6 +10,7 @@ policy, pack, mcp, last, intake) run once and exit.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import os
 import platform
@@ -102,9 +103,23 @@ def _mirror_framework_root() -> Path:
     Import-free mirror (same deferral reason as
     :func:`_mirror_default_data_dir``). Matches the framework contract:
     a repo checkout (a ``.git`` dir or a ``[tool.uv.workspace]``
-    ``pyproject.toml`` walking up from this module) resolves to the repo
-    root; a tool install resolves to ``sys.prefix``.
+    ``pyproject.toml`` walking up from the *framework's* module) resolves
+    to the framework repo root; a tool install resolves to ``sys.prefix``.
+
+    The framework root is resolved from where ``runtime`` actually lives,
+    not from this CLI module's own location: the two are different trees
+    in the sibling-checkout dev layout (the framework in ``../lisa``, the
+    CLI in its own repo), so walking up from here would report the CLI
+    repo while the framework reports its own. ``importlib.util.find_spec``
+    resolves the installed framework's location *without executing* the
+    ``runtime`` package — the import chain this deferral exists to avoid
+    (``runtime/__init__`` → kernel → mcp) is never entered. A framework
+    that cannot be located falls back to walking up from this module.
     """
+    framework_root = _framework_root_from_installed_runtime()
+    if framework_root is not None:
+        return framework_root
+
     current = Path(__file__).resolve().parent
     for candidate in (current, *current.parents):
         if (candidate / ".git").exists():
@@ -118,6 +133,42 @@ def _mirror_framework_root() -> Path:
             if isinstance(payload.get("tool", {}).get("uv", {}).get("workspace"), dict):
                 return candidate
     return Path(sys.prefix)
+
+
+def _framework_root_from_installed_runtime() -> Path | None:
+    """Return the framework repo root for the installed ``runtime``, or None.
+
+    Mirrors ``runtime.paths.framework_root``'s repo-detection walk, but
+    anchored at the installed ``runtime`` package's location rather than
+    at this module. Returns ``None`` when the framework is not installed
+    or is not in a repo checkout (the tool-install case, where the
+    framework root is ``sys.prefix`` and the caller falls back to its own
+    walk).
+    """
+    try:
+        spec = importlib.util.find_spec("runtime")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    locations = list(spec.submodule_search_locations)
+    if not locations:
+        return None
+    # ``runtime`` lives at ``<root>/runtime/src/runtime`` (src layout) or
+    # ``<root>/runtime`` (flat layout); the repo root is above both.
+    package_dir = Path(locations[0]).resolve()
+    for candidate in (package_dir, *package_dir.parents):
+        if (candidate / ".git").exists():
+            return candidate
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file():
+            try:
+                payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            if isinstance(payload.get("tool", {}).get("uv", {}).get("workspace"), dict):
+                return candidate
+    return None
 
 
 try:

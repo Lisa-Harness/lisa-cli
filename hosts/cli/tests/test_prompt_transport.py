@@ -674,6 +674,210 @@ def test_parse_scroll_keys_handles_split_sequences() -> None:
     assert pending == b""
 
 
+# ── scroll key reader (tty stdin) ─────────────────────────────────────
+
+
+def test_scroll_key_reader_dispatches_parsed_actions() -> None:
+    """The reader thread turns tty bytes into scroll actions.
+
+    The reader owns the terminal in cbreak mode and reads on a daemon
+    thread; this drives the same loop with a fake ``os.read`` so the
+    dispatch path is exercised without a real tty.
+    """
+    import threading
+
+    from hosts.cli.transport import _ScrollKeyReader
+
+    actions: list[str] = []
+    reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
+    reader._fd = 0
+    reader._saved = []
+    reader._on_action = actions.append
+    reader._loop = None
+    reader._stop = threading.Event()
+    reader._thread = threading.Thread(target=lambda: None, daemon=True)
+
+    chunks = [b"\x1b[A", b"\x1b[B"]
+
+    def _fake_read(_fd: int, _size: int) -> bytes:
+        return chunks.pop(0) if chunks else b""
+
+    # ``os`` and ``select`` are imported inside ``_run``, so the real
+    # modules are what the loop resolves to; patch them there.
+    import os as real_os
+    import select as real_select
+
+    real_read = real_os.read
+    real_select_fn = real_select.select
+    real_os.read = _fake_read  # type: ignore[assignment]
+    real_select.select = lambda _r, _w, _x, _t: ([0], [], [])  # type: ignore[assignment]
+    try:
+        reader._run()
+    finally:
+        real_os.read = real_read  # type: ignore[assignment]
+        real_select.select = real_select_fn  # type: ignore[assignment]
+
+    assert actions == ["up", "down"]
+
+
+def test_scroll_key_reader_dispatch_uses_the_event_loop() -> None:
+    """With a running loop the action is handed over thread-safely."""
+    import asyncio
+    import threading
+
+    from hosts.cli.transport import _ScrollKeyReader
+
+    actions: list[str] = []
+    reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
+    reader._fd = 0
+    reader._saved = []
+    reader._on_action = actions.append
+    reader._stop = threading.Event()
+    reader._thread = threading.Thread(target=lambda: None, daemon=True)
+
+    async def scenario() -> None:
+        reader._loop = asyncio.get_running_loop()
+        reader._dispatch("up")
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert actions == ["up"]
+
+
+def test_scroll_key_reader_captures_the_running_loop() -> None:
+    """The constructor binds the running loop, if there is one."""
+    import asyncio
+
+    from hosts.cli.transport import _ScrollKeyReader
+
+    reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
+    reader._fd = 0
+    reader._saved = []
+    reader._on_action = lambda _action: None
+    reader._loop = None
+    reader._stop = __import__("threading").Event()
+    reader._thread = __import__("threading").Thread(target=lambda: None, daemon=True)
+
+    async def scenario() -> None:
+        # The constructor's own loop capture, with the read loop stubbed
+        # out so the daemon thread has nothing to do.
+        original_run = _ScrollKeyReader._run
+        _ScrollKeyReader._run = lambda self: None  # type: ignore[method-assign]
+        try:
+            built = _ScrollKeyReader(0, [], lambda _action: None)
+        finally:
+            _ScrollKeyReader._run = original_run  # type: ignore[method-assign]
+        assert built._loop is asyncio.get_running_loop()
+        built._stop.set()
+
+    asyncio.run(scenario())
+
+
+def test_scroll_key_reader_without_a_loop_has_no_loop() -> None:
+    """Constructed outside a loop, the reader falls back to a direct call."""
+    from hosts.cli.transport import _ScrollKeyReader
+
+    original_run = _ScrollKeyReader._run
+    _ScrollKeyReader._run = lambda self: None  # type: ignore[method-assign]
+    try:
+        reader = _ScrollKeyReader(0, [], lambda _action: None)
+    finally:
+        _ScrollKeyReader._run = original_run  # type: ignore[method-assign]
+    assert reader._loop is None
+    reader._stop.set()
+
+
+def test_scroll_key_reader_stops_on_a_closed_terminal() -> None:
+    """A read error ends the reader loop instead of raising."""
+    import os as real_os
+    import select as real_select
+    import threading
+
+    from hosts.cli.transport import _ScrollKeyReader
+
+    reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
+    reader._fd = 0
+    reader._saved = []
+    reader._on_action = lambda _action: None
+    reader._loop = None
+    reader._stop = threading.Event()
+    reader._thread = threading.Thread(target=lambda: None, daemon=True)
+
+    def _boom(_fd: int, _size: int) -> bytes:
+        raise OSError("terminal closed")
+
+    real_read = real_os.read
+    real_select_fn = real_select.select
+    real_os.read = _boom  # type: ignore[assignment]
+    real_select.select = lambda _r, _w, _x, _t: ([0], [], [])  # type: ignore[assignment]
+    try:
+        reader._run()
+    finally:
+        real_os.read = real_read  # type: ignore[assignment]
+        real_select.select = real_select_fn  # type: ignore[assignment]
+
+
+def test_scroll_key_reader_exits_on_empty_read() -> None:
+    """EOF on the terminal ends the reader loop."""
+    import os as real_os
+    import select as real_select
+    import threading
+
+    from hosts.cli.transport import _ScrollKeyReader
+
+    reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
+    reader._fd = 0
+    reader._saved = []
+    reader._on_action = lambda _action: None
+    reader._loop = None
+    reader._stop = threading.Event()
+    reader._thread = threading.Thread(target=lambda: None, daemon=True)
+
+    real_read = real_os.read
+    real_select_fn = real_select.select
+    real_os.read = lambda _fd, _size: b""  # type: ignore[assignment]
+    real_select.select = lambda _r, _w, _x, _t: ([0], [], [])  # type: ignore[assignment]
+    try:
+        reader._run()
+    finally:
+        real_os.read = real_read  # type: ignore[assignment]
+        real_select.select = real_select_fn  # type: ignore[assignment]
+
+
+def test_scroll_key_reader_start_requires_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-tty stdin yields no reader (the caller keeps the compact row)."""
+    from hosts.cli import transport as transport_module
+
+    monkeypatch.setattr(transport_module.sys, "stdin", io.StringIO())
+    assert transport_module._ScrollKeyReader.start(lambda _action: None) is None
+
+
+def test_scroll_key_reader_start_survives_a_terminal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal that cannot be put in cbreak mode yields no reader."""
+    import termios
+
+    from hosts.cli import transport as transport_module
+
+    class _FakeTTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+        @staticmethod
+        def fileno() -> int:
+            return 0
+
+    monkeypatch.setattr(transport_module.sys, "stdin", _FakeTTY())
+
+    def _boom(_fd: int) -> Any:
+        raise termios.error("no tty")
+
+    monkeypatch.setattr(termios, "tcgetattr", _boom)
+    assert transport_module._ScrollKeyReader.start(lambda _action: None) is None
+
+
 def test_scrolling_reveals_oldest_rows_and_end_resumes_tail() -> None:
     transport, console = _make_tty_transport()
     transport._screen_mode = True

@@ -28,6 +28,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -643,7 +645,14 @@ def test_mirror_framework_root_walks_to_checkout(
     the walk branches directly requires faking ``__file__`` — the module
     attribute is read inside the function, so a scratch-tree probe pins
     the loop: a workspace pyproject.toml marker resolves to that root.
+
+    The installed-runtime lookup is disabled here so the fallback walk is
+    what gets probed: with the framework installed, the mirror resolves
+    the framework root from the framework's own location (the sibling
+    dev layout keeps the two trees apart — see
+    ``test_mirror_framework_root_uses_installed_runtime_location``).
     """
+    monkeypatch.setattr(cli_main, "_framework_root_from_installed_runtime", lambda: None)
     repo = tmp_path / "somerepo"
     pkg_dir = repo / "src" / "hosts" / "cli"
     pkg_dir.mkdir(parents=True)
@@ -668,10 +677,128 @@ def test_mirror_framework_root_walks_to_checkout(
     assert cli_main._mirror_framework_root() == Path(sys.prefix)
 
 
+def test_mirror_framework_root_uses_installed_runtime_location(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The mirror resolves the framework root from the installed framework.
+
+    The CLI and the framework are separate trees in the sibling dev layout
+    (the CLI in its own repo, the framework in ``../lisa``). Walking up
+    from the CLI's own module would report the CLI repo while the
+    framework's own ``framework_root()`` reports the framework repo — so
+    the mirror anchors the walk at the installed ``runtime`` package.
+    """
+    framework_repo = tmp_path / "framework"
+    package_dir = framework_repo / "runtime" / "src" / "runtime"
+    package_dir.mkdir(parents=True)
+    (framework_repo / ".git").mkdir()
+    monkeypatch.setattr(
+        cli_main,
+        "_framework_root_from_installed_runtime",
+        lambda: framework_repo,
+    )
+    # The CLI's own location is a different tree entirely.
+    cli_repo = tmp_path / "cli"
+    cli_repo.mkdir()
+    (cli_repo / ".git").mkdir()
+    monkeypatch.setattr(cli_main, "__file__", str(cli_repo / "src" / "hosts" / "cli" / "main.py"))
+    assert cli_main._mirror_framework_root() == framework_repo
+
+
+# ── installed-runtime lookup (the framework-root anchor) ──────────────
+
+
+def _fake_spec(locations: list[str] | None) -> Any:
+    """A stand-in for ``importlib.util.find_spec``'s result."""
+    return SimpleNamespace(origin=None, submodule_search_locations=locations)
+
+
+def test_framework_root_lookup_returns_none_without_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A framework that is not installed yields no framework root."""
+    monkeypatch.setattr(cli_main.importlib.util, "find_spec", lambda _name: None)
+    assert cli_main._framework_root_from_installed_runtime() is None
+
+
+def test_framework_root_lookup_survives_an_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken installation yields no framework root instead of raising."""
+
+    def _boom(_name: str) -> Any:
+        raise ImportError("broken install")
+
+    monkeypatch.setattr(cli_main.importlib.util, "find_spec", _boom)
+    assert cli_main._framework_root_from_installed_runtime() is None
+
+
+def test_framework_root_lookup_needs_a_package_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespace-ish spec with no locations yields no framework root."""
+    monkeypatch.setattr(cli_main.importlib.util, "find_spec", lambda _name: _fake_spec(None))
+    assert cli_main._framework_root_from_installed_runtime() is None
+
+
+def test_framework_root_lookup_walks_to_the_workspace_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The lookup finds the workspace root by walking up from the package."""
+    framework_repo = tmp_path / "framework"
+    package_dir = framework_repo / "runtime" / "src" / "runtime"
+    package_dir.mkdir(parents=True)
+    (framework_repo / "pyproject.toml").write_text(
+        "[tool.uv]\nworkspace = { members = ['runtime'] }\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        cli_main.importlib.util,
+        "find_spec",
+        lambda _name: _fake_spec([str(package_dir)]),
+    )
+    assert cli_main._framework_root_from_installed_runtime() == framework_repo
+
+
+def test_framework_root_lookup_skips_a_malformed_pyproject(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A malformed candidate pyproject is skipped, not a crash."""
+    framework_repo = tmp_path / "framework"
+    package_dir = framework_repo / "runtime" / "src" / "runtime"
+    package_dir.mkdir(parents=True)
+    (framework_repo / "pyproject.toml").write_text("[tool.uv\nbroken", encoding="utf-8")
+    monkeypatch.setattr(
+        cli_main.importlib.util,
+        "find_spec",
+        lambda _name: _fake_spec([str(package_dir)]),
+    )
+    # No usable marker anywhere above the package → no framework root.
+    assert cli_main._framework_root_from_installed_runtime() is None
+
+
+def test_framework_root_lookup_returns_none_outside_a_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A framework installed outside a repo checkout yields no root.
+
+    That is the tool-install case: the framework root is ``sys.prefix``,
+    which the caller's own fallback handles.
+    """
+    package_dir = tmp_path / "site-packages" / "runtime"
+    package_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli_main.importlib.util,
+        "find_spec",
+        lambda _name: _fake_spec([str(package_dir)]),
+    )
+    assert cli_main._framework_root_from_installed_runtime() is None
+
+
 def test_mirror_framework_root_skips_unreadable_pyproject(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A malformed pyproject.toml is skipped, not a crash."""
+    monkeypatch.setattr(cli_main, "_framework_root_from_installed_runtime", lambda: None)
     repo = tmp_path / "brokenrepo"
     pkg_dir = repo / "pkg"
     pkg_dir.mkdir(parents=True)
