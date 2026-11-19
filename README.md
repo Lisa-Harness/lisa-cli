@@ -25,8 +25,11 @@ Either in the shell, e.g.,
 export LISA_OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-Or, precreate a `.lisa` directory in your home directory,
-and copy/edit the example [.env](.env.example) file into it.
+The installers download or copy the canonical [.env.example](.env.example)
+file to `~/.lisa/.env` on first install. Available `LISA_*` environment
+variables and their documented bare-name fallbacks are substituted when the
+template is copied. On reinstall, existing values are preserved and missing
+template keys are merged.
 
 ### Run the installer
 

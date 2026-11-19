@@ -180,8 +180,10 @@ LISA_REPO_URL="https://github.com/Lisa-Harness/lisa.git"
 
 # Data dir: tool-mode lisa loads .env from here (load order: CWD → ~/.lisa).
 LISA_HOME="${LISA_DATA_DIR:-$HOME/.lisa}"
+ENV_TEMPLATE_URL="https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/.env.example"
+ENV_TEMPLATE_TEMP=""
 
-# Provider metadata: label, env var names, default values.
+# Provider metadata: labels used by the install guidance.
 # The CLI host reads LISA_* with fallbacks to bare OPENAI_API_KEY /
 # ANTHROPIC_API_KEY / AZURE_OPENAI_* / GOOGLE_API_KEY / OLLAMA_HOST / AWS_*.
 # Lookup functions instead of declare -A hashes: macOS still ships GNU bash
@@ -203,30 +205,6 @@ _provider_label() {
         google)        printf "Google Gemini" ;;
         openrouter)    printf "OpenRouter" ;;
         aws)           printf "AWS Bedrock" ;;
-    esac
-}
-
-_provider_keys() {
-    case "$1" in
-        ollama)        printf "LISA_OLLAMA_HOST" ;;
-        openai)        printf "LISA_OPENAI_API_KEY" ;;
-        azure_openai)  printf "LISA_AZURE_OPENAI_ENDPOINT,LISA_AZURE_OPENAI_API_KEY,LISA_AZURE_OPENAI_API_VERSION" ;;
-        anthropic)     printf "LISA_ANTHROPIC_API_KEY,LISA_ANTHROPIC_BASE_URL,LISA_ANTHROPIC_VERSION" ;;
-        google)        printf "LISA_GOOGLE_API_KEY,LISA_GOOGLE_API_BASE_URL" ;;
-        openrouter)    printf "LISA_OPENROUTER_API_KEY,LISA_OPENROUTER_BASE_URL" ;;
-        aws)           printf "LISA_AWS_ACCESS_KEY_ID,LISA_AWS_SECRET_ACCESS_KEY,LISA_AWS_REGION" ;;
-    esac
-}
-
-_provider_defaults() {
-    case "$1" in
-        ollama)        printf "127.0.0.1:11434" ;;
-        openai)        printf "" ;;
-        azure_openai)  printf ",,2024-10-21" ;;
-        anthropic)     printf ",https://api.anthropic.com,2023-06-01" ;;
-        google)        printf ",https://generativelanguage.googleapis.com/v1beta/openai/" ;;
-        openrouter)    printf ",https://openrouter.ai/api/v1" ;;
-        aws)           printf ",,us-east-1" ;;
     esac
 }
 
@@ -436,51 +414,165 @@ reset_seeded_state() {
     fi
 }
 
+acquire_env_template() {
+    local candidate=""
+    if [[ -n "$INSTALLER_DIR" && -f "$INSTALLER_DIR/.env.example" ]]; then
+        candidate="$INSTALLER_DIR/.env.example"
+    fi
+
+    if [[ -n "$candidate" ]]; then
+        ENV_TEMPLATE_TEMP="$candidate"
+        return 0
+    fi
+
+    ENV_TEMPLATE_TEMP="$(mktemp "${TMPDIR:-/tmp}/lisa-env.XXXXXXXX")"
+    if ! curl -fsSL "$ENV_TEMPLATE_URL" -o "$ENV_TEMPLATE_TEMP"; then
+        rm -f -- "$ENV_TEMPLATE_TEMP"
+        ENV_TEMPLATE_TEMP=""
+        return 1
+    fi
+    [[ -s "$ENV_TEMPLATE_TEMP" ]] || {
+        rm -f -- "$ENV_TEMPLATE_TEMP"
+        ENV_TEMPLATE_TEMP=""
+        return 1
+    }
+    return 0
+}
+
+cleanup_env_template() {
+    if [[ -n "$ENV_TEMPLATE_TEMP" && "$ENV_TEMPLATE_TEMP" == "${TMPDIR:-/tmp}"/lisa-env.* ]]; then
+        rm -f -- "$ENV_TEMPLATE_TEMP"
+    fi
+    ENV_TEMPLATE_TEMP=""
+}
+
+cleanup_install_temps() {
+    cleanup_env_template
+    cleanup_version_helper
+}
+
+env_template_value() {
+    local key="$1"
+    local value=""
+
+    if [[ "$key" == LISA_* ]]; then
+        if [[ -n "${!key:-}" ]]; then
+            value="${!key}"
+        else
+            local bare_key="${key#LISA_}"
+            if [[ -n "${!bare_key:-}" ]]; then
+                value="${!bare_key}"
+            fi
+        fi
+    elif [[ -n "${!key:-}" ]]; then
+        value="${!key}"
+    fi
+    [[ -n "$value" ]] || return 1
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    printf '%s' "$value"
+    return 0
+}
+
+env_template_key_from_line() {
+    local line="$1"
+    if [[ "$line" =~ ^[[:space:]]*(#)[[:space:]]*([A-Z][A-Z0-9_]*)= ]]; then
+        printf '%s' "${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^[[:space:]]*([A-Z][A-Z0-9_]*)= ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+}
+
+existing_env_has_key() {
+    local env_file="$1"
+    local wanted="$2"
+    local line key
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*([A-Z][A-Z0-9_]*)= ]]; then
+            key="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^[[:space:]]*\#[[:space:]]*([A-Z][A-Z0-9_]*)= ]]; then
+            key="${BASH_REMATCH[1]}"
+        else
+            continue
+        fi
+        [[ "$key" == "$wanted" ]] && return 0
+    done < "$env_file"
+    return 1
+}
+
+create_env_template_file() {
+    local env_file="$1"
+    local template="$ENV_TEMPLATE_TEMP"
+    local tmp_file="$env_file.tmp.$$"
+    local line key value
+
+    : > "$tmp_file"
+    chmod 600 "$tmp_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        key="$(env_template_key_from_line "$line")"
+        if [[ -n "$key" ]] && value="$(env_template_value "$key")"; then
+            printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
+        else
+            printf '%s\n' "$line" >> "$tmp_file"
+        fi
+    done < "$template"
+    mv -f -- "$tmp_file" "$env_file"
+    chmod 600 "$env_file"
+    printf "  Created %s from $template\n" "$env_file"
+}
+
+merge_env_template() {
+    local env_file="$1"
+    local template="$ENV_TEMPLATE_TEMP"
+    local tmp_file="$env_file.tmp.$$"
+    local line key value
+    local -a additions=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        key="$(env_template_key_from_line "$line")"
+        [[ -n "$key" ]] || continue
+        existing_env_has_key "$env_file" "$key" && continue
+
+        if value="$(env_template_value "$key")"; then
+            additions+=("$key=$value")
+        elif [[ "$line" =~ ^[[:space:]]*[A-Z][A-Z0-9_]*= ]]; then
+            additions+=("$line")
+        elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*[A-Z][A-Z0-9_]*= ]]; then
+            additions+=("$line")
+        fi
+    done < "$template"
+
+    [[ ${#additions[@]} -gt 0 ]] || {
+        rm -f -- "$tmp_file"
+        printf "  %s already contains all template keys — preserved\n" "$env_file"
+        return 0
+    }
+
+    cp -p "$env_file" "$tmp_file"
+    printf '\n# Added by Lisa Harness installer\n' >> "$tmp_file"
+    for line in "${additions[@]}"; do
+        printf '%s\n' "$line" >> "$tmp_file"
+    done
+    mv -f -- "$tmp_file" "$env_file"
+    chmod 600 "$env_file"
+    printf "  Merged %d missing template key(s) into %s — existing values preserved\n" \
+        "${#additions[@]}" "$env_file"
+}
+
 generate_env_file() {
     local env_file="$LISA_HOME/.env"
     mkdir -p "$LISA_HOME"
 
-    if [[ -f "$env_file" ]]; then
-        printf "  %s already exists — preserved\n" "$env_file"
-        return
+    if acquire_env_template; then
+        if [[ -f "$env_file" ]]; then
+            merge_env_template "$env_file"
+        else
+            create_env_template_file "$env_file"
+        fi
+    elif [[ -f "$env_file" ]]; then
+        printf "  WARN: Could not obtain %s; existing %s preserved\n" "$ENV_TEMPLATE_URL" "$env_file"
+    else
+        error_exit "Could not obtain $ENV_TEMPLATE_URL for $env_file"
     fi
-
-    # ShellCheck: we intentionally want word splitting below for providers
-    # shellcheck disable=SC2068
-    {
-        printf "# Lisa Harness environment configuration\n"
-        printf "# Generated by: install.sh\n"
-        printf "\n"
-
-        for prov in ${PROVIDERS[@]}; do
-            printf "# %s\n" "$(_provider_label "$prov")"
-
-            local keys
-            keys="$(_provider_keys "$prov")"
-            local defaults
-            defaults="$(_provider_defaults "$prov")"
-
-            old_ifs="$IFS"
-            IFS=','
-            local key_array default_array
-            read -ra key_array <<< "$keys"
-            read -ra default_array <<< "$defaults"
-            IFS="$old_ifs"
-
-            for idx in "${!key_array[@]}"; do
-                local k="${key_array[$idx]}"
-                local d="${default_array[$idx]:-}"
-                if [[ -n "$d" ]]; then
-                    printf "%s=%s\n" "$k" "$d"
-                else
-                    printf "# %s=   <-- fill in your value\n" "$k"
-                fi
-            done
-            printf "\n"
-        done
-    } > "$env_file"
-
-    printf "  Created %s — %d provider(s) configured\n" "$env_file" "${#PROVIDERS[@]}"
 }
 
 generate_session_context() {
@@ -587,27 +679,7 @@ post_install_guidance() {
             [[ "$prov" == "ollama" ]] && continue
             local label
             label="$(_provider_label "$prov")"
-            local keys
-            keys="$(_provider_keys "$prov")"
-            local defaults
-            defaults="$(_provider_defaults "$prov")"
-
-            old_ifs="$IFS"
-            IFS=','
-            local key_array default_array
-            read -ra key_array <<< "$keys"
-            read -ra default_array <<< "$defaults"
-            IFS="$old_ifs"
-
-            local blanks=()
-            for idx in "${!key_array[@]}"; do
-                [[ -z "${default_array[$idx]:-}" ]] && blanks+=("${key_array[$idx]}")
-            done
-            if [[ ${#blanks[@]} -gt 0 ]]; then
-                local joined
-                printf -v joined ', ' "${blanks[@]}"
-                printf "       %s: uncomment and set %s\n" "$label" "${joined#, }"
-            fi
+            printf "       %s: uncomment and set its API-key variables from the template\n" "$label"
         done
         printf "    2. Run: lisa models discover --force && lisa models apply\n"
         printf "       (to refresh your model manifest)\n"
@@ -651,6 +723,7 @@ main() {
     printf "  Lisa Harness Installer\n"
     printf "  ------------------------\n"
     printf "\n"
+    trap cleanup_install_temps EXIT
 
     if { [[ "$CLI_MODE" == ref || "$FRAMEWORK_MODE" == ref ]] ||
          [[ "$SOURCE" == git && ( "$CLI_MODE" == keep || "$FRAMEWORK_MODE" == keep ) ]]; } &&
@@ -671,7 +744,7 @@ main() {
 
     if [[ "$CLI_MODE" != keep || "$FRAMEWORK_MODE" != keep ]]; then
         prepare_version_helper
-        trap cleanup_version_helper EXIT
+        trap cleanup_install_temps EXIT
         run_version_helper validate || error_exit "Invalid version selection"
     fi
 

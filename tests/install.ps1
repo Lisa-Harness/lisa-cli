@@ -87,6 +87,52 @@ try { Set-LisaVersionSelections } catch { $rejected = $true }
 Assert-True $rejected "Conflicting CLI selections must fail"
 $Version = ""
 $Pin = ""
+
+# .env template copy, substitution, merge, and download-failure behavior.
+$envSandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-env-test-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path (Join-Path $envSandbox "repo") | Out-Null
+$templateSandbox = Join-Path $envSandbox "repo"
+Set-Content -LiteralPath (Join-Path $templateSandbox ".env.example") -Value @(
+    "# Lisa template",
+    "# LISA_OPENAI_API_KEY=",
+    "# LISA_OPENAI_BASE_URL=https://api.openai.com/v1/",
+    "MAX_TOOL_ITERATIONS=300",
+    "# LISA_COMMENTED_KEY="
+) -Encoding UTF8
+$script:InstallerDir = $templateSandbox
+$script:LisaHome = Join-Path $envSandbox ".lisa"
+[Environment]::SetEnvironmentVariable("LISA_OPENAI_API_KEY", "test-secret")
+New-LisaEnvFile
+$firstEnv = Get-Content -LiteralPath (Join-Path $script:LisaHome ".env")
+Assert-True ($firstEnv -contains "LISA_OPENAI_API_KEY=test-secret") "First-run template substitution was not applied"
+Assert-True ($firstEnv -contains "MAX_TOOL_ITERATIONS=300") "First-run template defaults were not copied"
+Assert-True ($firstEnv -contains "# LISA_COMMENTED_KEY=") "Commented template placeholder was not preserved"
+
+Set-Content -LiteralPath (Join-Path $script:LisaHome ".env") -Value @(
+    "CUSTOM_SETTING=keep",
+    "# LISA_OPENAI_API_KEY="
+) -Encoding UTF8
+[Environment]::SetEnvironmentVariable("LISA_OPENAI_API_KEY", $null)
+New-LisaEnvFile
+$mergedEnv = Get-Content -LiteralPath (Join-Path $script:LisaHome ".env")
+Assert-True ($mergedEnv -contains "CUSTOM_SETTING=keep") "Existing custom setting was overwritten"
+Assert-True ($mergedEnv -contains "MAX_TOOL_ITERATIONS=300") "Missing template key was not merged"
+$commentedKeyCount = @($mergedEnv | Where-Object { $_ -eq "# LISA_OPENAI_API_KEY=" }).Count
+Assert-True ($commentedKeyCount -eq 1) "Existing commented key was duplicated"
+
+$script:InstallerDir = Join-Path $envSandbox "missing"
+Set-Content -LiteralPath (Join-Path $script:LisaHome ".env") -Value "CUSTOM_SETTING=keep" -Encoding UTF8
+function global:Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile)
+    throw "simulated download failure"
+}
+New-LisaEnvFile
+$preservedEnv = Get-Content -LiteralPath (Join-Path $script:LisaHome ".env")
+Assert-True ($preservedEnv -contains "CUSTOM_SETTING=keep") "Existing env file changed after template download failure"
+Remove-Item -LiteralPath ("Function:\Invoke-WebRequest") -ErrorAction SilentlyContinue
+[Environment]::SetEnvironmentVariable("LISA_OPENAI_API_KEY", $null)
+Remove-Item -LiteralPath $envSandbox -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Output "PowerShell installer tests passed"
 
 # -Clean / -Reset: run against a throwaway data dir with uv stubbed so no real

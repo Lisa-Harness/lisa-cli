@@ -214,6 +214,8 @@ $script:FrameworkMode = "keep"
 $script:FrameworkValue = ""
 $script:VersionHelper = ""
 $script:VersionHelperTemporary = ""
+$script:EnvTemplateTemporary = ""
+$script:EnvTemplateUrl = "https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/.env.example"
 
 function Set-LisaVersionSelections {
     <#
@@ -334,13 +336,13 @@ $script:LisaHome = Get-LisaHome
 # GOOGLE_API_KEY / OLLAMA_HOST / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
 # AWS_REGION.
 $script:ProviderMeta = @{
-    ollama       = @{ Label = "Ollama"; EnvVars = @("LISA_OLLAMA_HOST"); Defaults = @("127.0.0.1:11434") }
-    openai       = @{ Label = "OpenAI"; EnvVars = @("LISA_OPENAI_API_KEY"); Defaults = @("") }
-    azure_openai = @{ Label = "Azure OpenAI"; EnvVars = @("LISA_AZURE_OPENAI_ENDPOINT", "LISA_AZURE_OPENAI_API_KEY", "LISA_AZURE_OPENAI_API_VERSION"); Defaults = @("", "", "2024-10-21") }
-    anthropic    = @{ Label = "Anthropic"; EnvVars = @("LISA_ANTHROPIC_API_KEY", "LISA_ANTHROPIC_BASE_URL", "LISA_ANTHROPIC_VERSION"); Defaults = @("", "https://api.anthropic.com", "2023-06-01") }
-    google       = @{ Label = "Google Gemini"; EnvVars = @("LISA_GOOGLE_API_KEY", "LISA_GOOGLE_API_BASE_URL"); Defaults = @("", "https://generativelanguage.googleapis.com/v1beta/openai/") }
-    openrouter   = @{ Label = "OpenRouter"; EnvVars = @("LISA_OPENROUTER_API_KEY", "LISA_OPENROUTER_BASE_URL"); Defaults = @("", "https://openrouter.ai/api/v1") }
-    aws          = @{ Label = "AWS Bedrock"; EnvVars = @("LISA_AWS_ACCESS_KEY_ID", "LISA_AWS_SECRET_ACCESS_KEY", "LISA_AWS_REGION"); Defaults = @("", "", "us-east-1") }
+    ollama       = @{ Label = "Ollama"; EnvVars = @("LISA_OLLAMA_HOST") }
+    openai       = @{ Label = "OpenAI"; EnvVars = @("LISA_OPENAI_API_KEY") }
+    azure_openai = @{ Label = "Azure OpenAI"; EnvVars = @("LISA_AZURE_OPENAI_ENDPOINT", "LISA_AZURE_OPENAI_API_KEY", "LISA_AZURE_OPENAI_API_VERSION") }
+    anthropic    = @{ Label = "Anthropic"; EnvVars = @("LISA_ANTHROPIC_API_KEY", "LISA_ANTHROPIC_BASE_URL", "LISA_ANTHROPIC_VERSION") }
+    google       = @{ Label = "Google Gemini"; EnvVars = @("LISA_GOOGLE_API_KEY", "LISA_GOOGLE_API_BASE_URL") }
+    openrouter   = @{ Label = "OpenRouter"; EnvVars = @("LISA_OPENROUTER_API_KEY", "LISA_OPENROUTER_BASE_URL") }
+    aws          = @{ Label = "AWS Bedrock"; EnvVars = @("LISA_AWS_ACCESS_KEY_ID", "LISA_AWS_SECRET_ACCESS_KEY", "LISA_AWS_REGION") }
 }
 
 function Invoke-Native {
@@ -668,12 +670,90 @@ function Reset-LisaSeededState {
     }
 }
 
+function Get-LisaEnvTemplate {
+    <#
+    .SYNOPSIS
+        Locate or download the canonical .env.example template.
+    #>
+    [CmdletBinding()]
+    param()
+    Set-StrictMode -Version Latest
+
+    if ($script:InstallerDir) {
+        $candidate = Join-Path $script:InstallerDir ".env.example"
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    $script:EnvTemplateTemporary = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-env-" + [guid]::NewGuid().ToString("N") + ".example")
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $script:EnvTemplateUrl -OutFile $script:EnvTemplateTemporary -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $script:EnvTemplateTemporary)) {
+            throw "download produced no template file"
+        }
+        if ((Get-Item -LiteralPath $script:EnvTemplateTemporary).Length -eq 0) {
+            throw "downloaded template is empty"
+        }
+        return $script:EnvTemplateTemporary
+    }
+    catch {
+        Remove-Item -LiteralPath $script:EnvTemplateTemporary -Force -ErrorAction SilentlyContinue
+        $script:EnvTemplateTemporary = ""
+        throw "Could not download $($script:EnvTemplateUrl): $($_.Exception.Message)"
+    }
+}
+
+function Get-LisaEnvTemplateValue {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Key)
+    Set-StrictMode -Version Latest
+
+    $value = [Environment]::GetEnvironmentVariable($Key)
+    if ([string]::IsNullOrEmpty($value) -and $Key.StartsWith("LISA_")) {
+        $bareKey = $Key.Substring(5)
+        $value = [Environment]::GetEnvironmentVariable($bareKey)
+    }
+    if ($null -eq $value -or [string]::IsNullOrEmpty($value)) { return $null }
+    if ($value.Contains("`n") -or $value.Contains("`r")) { return $null }
+    return $value
+}
+
+function Get-LisaEnvTemplateKey {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Line)
+    Set-StrictMode -Version Latest
+
+    if ($Line -match '^\s*#\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+        return $Matches[1]
+    }
+    if ($Line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Test-LisaEnvHasActiveKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$EnvFile,
+        [Parameter(Mandatory)][string]$Key
+    )
+    Set-StrictMode -Version Latest
+
+    foreach ($line in Get-Content -LiteralPath $EnvFile) {
+        if ($line -match '^\s*#?\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+            if ($Matches[1] -eq $Key) { return $true }
+        }
+    }
+    return $false
+}
+
 function New-LisaEnvFile {
     <#
     .SYNOPSIS
-        Write ~\.lisa\.env (the tool-mode .env location) from the provider
-        metadata - no repo checkout to copy .env.example from. Existing files
-        are preserved.
+        Copy .env.example to ~\.lisa\.env, fill values available in the
+        environment, or merge missing keys into an existing file.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
@@ -685,40 +765,73 @@ function New-LisaEnvFile {
 
     $lisaHome = $script:LisaHome
     $envFile = Join-Path $lisaHome ".env"
-    if (Test-Path $envFile) {
-        Write-Host "  $envFile already exists - preserved" -ForegroundColor Yellow
-        return
-    }
 
     if ((-not (Test-Path $lisaHome)) -and $PSCmdlet.ShouldProcess($lisaHome, "Create data directory")) {
         New-Item -ItemType Directory -Path $lisaHome -Force | Out-Null
     }
 
-    $lines = @(
-        "# Lisa Harness environment configuration",
-        "# Generated by: install.ps1",
-        ""
-    )
-
-    foreach ($providerName in $Provider) {
-        $meta = $script:ProviderMeta[$providerName]
-        $lines += "# $($meta.Label)"
-        for ($i = 0; $i -lt $meta.EnvVars.Count; $i++) {
-            $key = $meta.EnvVars[$i]
-            $default = $meta.Defaults[$i]
-            if ($default) {
-                $lines += "$key=$default"
-            }
-            else {
-                $lines += "# $key=   <-- fill in your value"
-            }
+    try {
+        $template = Get-LisaEnvTemplate
+    }
+    catch {
+        if (Test-Path -LiteralPath $envFile) {
+            Write-Host "  WARN: $($_.Exception.Message); existing $envFile preserved" -ForegroundColor Yellow
+            return
         }
-        $lines += ""
+        throw
     }
 
-    if ($PSCmdlet.ShouldProcess($envFile, "Create provider .env")) {
-        Set-Content -Path $envFile -Value $lines -Encoding UTF8
-        Write-Host "  Created $envFile - $($Provider.Count) provider(s) configured" -ForegroundColor Green
+    if (Test-Path -LiteralPath $envFile) {
+        $additions = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in Get-Content -LiteralPath $template) {
+            $key = Get-LisaEnvTemplateKey -Line $line
+            if (-not $key -or (Test-LisaEnvHasActiveKey -EnvFile $envFile -Key $key)) {
+                continue
+            }
+            $value = Get-LisaEnvTemplateValue -Key $key
+            if ($null -ne $value) {
+                $additions.Add("$key=$value")
+            }
+            elseif ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+                $additions.Add($line)
+            }
+            elseif ($line -match '^\s*#\s*[A-Za-z_][A-Za-z0-9_]*\s*=') {
+                $additions.Add($line)
+            }
+        }
+        if ($additions.Count -eq 0) {
+            Write-Host "  $envFile already contains all template keys - preserved" -ForegroundColor Yellow
+            return
+        }
+        if ($PSCmdlet.ShouldProcess($envFile, "Merge $($additions.Count) missing template key(s)")) {
+            $tmpFile = "$envFile.tmp"
+            Copy-Item -LiteralPath $envFile -Destination $tmpFile -Force
+            Add-Content -LiteralPath $tmpFile -Value "", "# Added by Lisa Harness installer"
+            foreach ($addition in $additions) {
+                Add-Content -LiteralPath $tmpFile -Value $addition
+            }
+            Move-Item -LiteralPath $tmpFile -Destination $envFile -Force
+            Write-Host "  Merged $($additions.Count) missing template key(s) into $envFile - existing values preserved" -ForegroundColor Green
+        }
+        return
+    }
+
+    if ($PSCmdlet.ShouldProcess($envFile, "Create .env from template")) {
+        $tmpFile = "$envFile.tmp"
+        $lines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in Get-Content -LiteralPath $template) {
+            $key = Get-LisaEnvTemplateKey -Line $line
+            $value = if ($key) { Get-LisaEnvTemplateValue -Key $key } else { $null }
+            if ($key -and $null -ne $value) {
+                $lines.Add("$key=$value")
+            }
+            else {
+                $lines.Add($line)
+            }
+        }
+        Set-Content -LiteralPath $tmpFile -Value $lines -Encoding UTF8
+        Move-Item -LiteralPath $tmpFile -Destination $envFile -Force
+        Write-Host "  Created $envFile from $template" -ForegroundColor Green
     }
 }
 
@@ -868,13 +981,8 @@ function Write-PostInstallGuidance {
         Write-Host "    1. Edit $(Join-Path $lisaHome ".env")" -ForegroundColor Yellow
         foreach ($providerName in $Provider) {
             $meta = $script:ProviderMeta[$providerName]
-            $fillThese = @()
-            for ($i = 0; $i -lt $meta.EnvVars.Count; $i++) {
-                if (-not $meta.Defaults[$i]) { $fillThese += $meta.EnvVars[$i] }
-            }
-            if ($fillThese.Count -gt 0) {
-                Write-Host "       $($meta.Label): uncomment and set $($fillThese -join ', ')" -ForegroundColor Yellow
-            }
+            $fillThese = $meta.EnvVars -join ', '
+            Write-Host "       $($meta.Label): uncomment and set $fillThese as needed" -ForegroundColor Yellow
         }
         Write-Host "    2. Run: lisa models discover --force; lisa models apply" -ForegroundColor Yellow
         Write-Host "       (to refresh your model manifest)"
@@ -1025,6 +1133,9 @@ if ($script:ShouldInstall) {
     finally {
         if ($script:VersionHelperTemporary) {
             Remove-Item -LiteralPath $script:VersionHelperTemporary -Force -ErrorAction Continue
+        }
+        if ($script:EnvTemplateTemporary) {
+            Remove-Item -LiteralPath $script:EnvTemplateTemporary -Force -ErrorAction Continue
         }
     }
 }

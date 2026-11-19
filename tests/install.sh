@@ -11,6 +11,9 @@ have_cmd() { command -v "$1" >/dev/null 2>&1; }
 for helper in run_version_helper packs_venv_path remove_path clean_install_state reset_seeded_state; do
     source <(sed -n "/^${helper}() {\$/,/^}\$/p" "$repo_root/install.sh")
 done
+for helper in acquire_env_template cleanup_env_template env_template_value env_template_key_from_line existing_env_has_key create_env_template_file merge_env_template generate_env_file; do
+    source <(sed -n "/^${helper}() {\$/,/^}\$/p" "$repo_root/install.sh")
+done
 
 CLI_REPO_URL="https://github.com/Lisa-Harness/lisa-cli.git"
 LISA_REPO_URL="https://github.com/Lisa-Harness/lisa.git"
@@ -161,5 +164,56 @@ base_home="$LISA_HOME"
 relocated_root="$sandbox/OneDrive/Lisa.Profiles"
 [[ "$(LISA_HOME="$relocated_root/work" LISA_DATA_DIR="$base_home" LISA_PROFILES_DIR="$relocated_root" packs_venv_path)" == "$base_home/venv" ]] ||
     error_exit "Relocated profile must share the base packs venv"
+
+# .env template copy, substitution, merge, and failure behavior.
+env_sandbox="$sandbox/env"
+mkdir -p "$env_sandbox/repo"
+cat > "$env_sandbox/repo/.env.example" <<'ENV_TEMPLATE'
+# Lisa template
+# LISA_OPENAI_API_KEY=
+# LISA_OPENAI_BASE_URL=https://api.openai.com/v1/
+MAX_TOOL_ITERATIONS=300
+# LISA_COMMENTED_KEY=
+ENV_TEMPLATE
+INSTALLER_DIR="$env_sandbox/repo"
+LISA_HOME="$env_sandbox/.lisa"
+unset LISA_OPENAI_API_KEY OPENAI_API_KEY
+rm -rf -- "$LISA_HOME"
+mkdir -p "$LISA_HOME"
+LISA_OPENAI_API_KEY="test-secret"
+generate_env_file
+grep -q '^LISA_OPENAI_API_KEY=test-secret$' "$LISA_HOME/.env" ||
+    error_exit "First-run template substitution was not applied"
+grep -q '^MAX_TOOL_ITERATIONS=300$' "$LISA_HOME/.env" ||
+    error_exit "First-run template defaults were not copied"
+grep -q '^# LISA_COMMENTED_KEY=$' "$LISA_HOME/.env" ||
+    error_exit "Commented template placeholder was not preserved"
+
+cat > "$LISA_HOME/.env" <<'ENV_EXISTING'
+CUSTOM_SETTING=keep
+# LISA_OPENAI_API_KEY=
+ENV_EXISTING
+unset LISA_OPENAI_API_KEY OPENAI_API_KEY
+merge_env_template "$LISA_HOME/.env"
+grep -q '^CUSTOM_SETTING=keep$' "$LISA_HOME/.env" ||
+    error_exit "Existing custom setting was overwritten"
+grep -q '^MAX_TOOL_ITERATIONS=300$' "$LISA_HOME/.env" ||
+    error_exit "Missing active template key was not merged"
+[[ $(grep -c '^# LISA_OPENAI_API_KEY=' "$LISA_HOME/.env") == 1 ]] ||
+    error_exit "Existing commented key was duplicated"
+
+rm -rf -- "$env_sandbox/no-template"
+mkdir -p "$env_sandbox/no-template"
+cat > "$env_sandbox/no-template/.env" <<'ENV_EXISTING'
+CUSTOM_SETTING=keep
+ENV_EXISTING
+LISA_HOME="$env_sandbox/no-template"
+INSTALLER_DIR="$env_sandbox/missing"
+ENV_TEMPLATE_URL="http://127.0.0.1:1/.env.example"
+curl() { return 22; }
+generate_env_file >/dev/null
+grep -q '^CUSTOM_SETTING=keep$' "$LISA_HOME/.env" ||
+    error_exit "Existing env file was changed after template download failure"
+unset -f curl
 
 printf 'Bash installer tests passed\n'
