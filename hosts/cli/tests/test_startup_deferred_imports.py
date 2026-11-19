@@ -246,11 +246,14 @@ def test_every_deferral_carries_a_reason_clause() -> None:
     The Lisa repository rule: import-outside-toplevel is allowed for
     startup-latency deferral only, and every suppression carries a reason
     clause naming the dependency or subsystem being deferred. The
-    deferred call sites in ``main.py`` use ``# lazy:`` marker comments;
+    deferred call sites across ``hosts.cli`` use ``# lazy:`` marker comments;
     this test pins the marker vocabulary so a future edit cannot silently
     drop the rationale.
     """
-    source = Path(cli_main.__file__).read_text(encoding="utf-8")
+    package_root = Path(cli_main.__file__).resolve().parent
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(package_root.rglob("*.py"))
+    )
     for needle, reason in (
         ("from runtime.paths import", "runtime.paths"),
         ("from runtime.config import default_data_dir", "runtime.config"),

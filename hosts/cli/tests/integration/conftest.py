@@ -1,11 +1,7 @@
 """Fixtures for the scripted-model integration suite.
 
-Layer contract (``docs/SPEC/CLI_INTEGRATION_LAYER.md``): the CLI's seam
-surface is small and load-bearing — ``_initialize_runtime`` (runtime
-construction), ``session.provider_gateways_override`` (gateway scripting),
-``_run_prompt_with_teardown`` (the turn), and the durable approval store. The
-scenarios call exactly these, so a decomposition that changes their semantics
-fails here even when every unit-suite monkeypatch keeps passing.
+The load-bearing CLI seams are runtime construction, gateway scripting,
+prompt execution, and the durable approval store.
 
 Fixtures are offline and hermetic: no provider credential is read (the
 gateway seam means no provider client is ever constructed), the runtime's

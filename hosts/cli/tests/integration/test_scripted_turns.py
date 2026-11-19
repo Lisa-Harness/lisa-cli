@@ -1,10 +1,8 @@
 """Integration: scripted-model turns through the un-mocked CLI pipeline.
 
-These tests assert the seams [CLI_INTEGRATION_LAYER.md] names as the module
-boundaries of ``hosts.cli`` — the seams the main.py decomposition must
-preserve. No ``runtime.handle_message`` double, no stub runtime: the kernel
-turn runner, tool registry, approval orchestration, and the CLI's own
-teardown all run as production code.
+The scenarios exercise real runtime construction, the kernel turn runner,
+tool registry, approval orchestration, and CLI teardown with a deterministic
+scripted gateway.
 """
 
 from __future__ import annotations

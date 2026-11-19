@@ -12,7 +12,7 @@ dev = [
     # The scripted-model double the offline integration scenarios import
     # (``e2etest.scripted``). It ships in the published ``lisa-harness-e2e``
     # distribution, so CI resolves it from a PyPI wheel like every other
-    # framework package (see docs/SPEC/CLI_INTEGRATION_LAYER.md).
+    # framework package.
     "lisa-harness-e2e>=0.5.4",
     "mypy>=1.10.0",
     "pytest>=8.0.0",
@@ -158,6 +158,9 @@ ignore = ["PLR0913", "PLC0415", "RUF001", "RUF002", "RUF003"]
 "**/tests/**" = ["PLC0415", "PLR2004", "PLR0917"]
 # Startup ordering and lazy imports keep CLI help fast; Typer owns command signatures.
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
+"**/hosts/cli/application.py" = ["PLR0917"]
+"**/hosts/cli/prompt.py" = ["PLR0917"]
+"**/hosts/cli/commands/*.py" = ["PLR0917"]
 "**/hosts/cli/render.py" = ["PLC0415"]
 # Interactive entry is imported only on the no-args path; the PT prompt
 # glyph is intentional (matches the transport's palette).

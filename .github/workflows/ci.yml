@@ -43,7 +43,7 @@ jobs:
         # re-resolves against the registry but keeps the locked version when
         # one is still available, so the wheel set does not drift between runs.
         # (uv rejects --no-sources together with --frozen, so the lock cannot
-        # be reused verbatim here — see docs/SPEC/CLI_INTEGRATION_LAYER.md.)
+        # be reused verbatim here.)
         run: uv sync --no-sources --extra dev --extra prompt
 
       - name: Format check (ruff)
@@ -227,7 +227,7 @@ jobs:
 
       - name: Run scripted-turn integration scenarios
         # Per-OS turn coverage beyond `lisa verify` diagnostics: real runtime
-        # + scripted model offline (see docs/SPEC/CLI_INTEGRATION_LAYER.md).
+        # + scripted model.
         # The approval scenarios install lisa-pack-bash from PyPI into the
         # test data dir's packs venv; the suite is hermetic (no operator
         # state, no provider credentials).
