@@ -280,6 +280,20 @@ providers:
     memory: lisa-pack-memory
 # tools: { web_search: lisa-pack-tavily }
 routing: { from: { pack: lisa-pack-core, session: default } }
+execution:
+  max_model_calls: 24
+  max_capability_calls: 24
+  max_total_tokens: 250000
+  max_completion_tokens: 24000
+  max_wall_ms: 300000
+  max_session_tokens: 5000000
+  scopes:
+    "lisa-pack-personas:researcher":
+      max_model_calls: 8
+      max_capability_calls: 8
+      max_total_tokens: 120000
+      max_completion_tokens: 12000
+      max_wall_ms: 180000
 ---
 # My Session
 
