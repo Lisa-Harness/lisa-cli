@@ -25,15 +25,32 @@ from rich.console import Console
 
 
 def _make_runtime(tmp_path: Path) -> Any:
-    """Build a minimal test runtime via the shared test factory.
-
-    Uses the default models YAML (gemma3:latest) so the manifest check
-    passes. Does NOT call setup_framework (which triggers a pre-existing
-    operation-catalog validation issue with the markdown pack).
-    """
+    """Build a manifest-backed runtime without starting framework services."""
     from runtime.testing import build_test_runtime
 
-    return build_test_runtime(tmp_path)
+    return build_test_runtime(
+        tmp_path,
+        models_yaml=(
+            "version: 1\n"
+            "mode_models: {default: gpt-4o}\n"
+            "models:\n"
+            "  - model_id: gpt-4o\n"
+            "    provider: openai\n"
+        ),
+    )
+
+
+def _make_manifest(provider: str, model_id: str = "selected-model") -> Any:
+    """Build a typed selected-model manifest for provider-specific checks."""
+    from runtime.model_manifest import load_model_manifest_text
+
+    return load_model_manifest_text(
+        "version: 1\n"
+        f"mode_models: {{default: {model_id}}}\n"
+        "models:\n"
+        f"  - model_id: {model_id}\n"
+        f"    provider: {provider}\n"
+    )
 
 
 class _StubConfig:
@@ -108,6 +125,14 @@ def test_check_python_passes_on_311() -> None:
     assert "3.11.0" in detail
 
 
+def test_check_python_passes_on_future_major() -> None:
+    from hosts.cli import main as cli_main
+
+    with patch("platform.python_version", return_value="4.0.0"):
+        status, _ = cli_main._verify_check_python()
+    assert "PASS" in status
+
+
 def test_check_python_passes_on_312() -> None:
     from hosts.cli import main as cli_main
 
@@ -151,7 +176,7 @@ def test_check_env_ignores_env_in_cwd(tmp_path: Path, monkeypatch: pytest.Monkey
     ):
         runtime = _StubRuntime(data_dir=tmp_path)
         status, detail = cli_main._verify_check_env(runtime)
-    assert "WARN" in status
+    assert "SKIP" in status
     assert str(tmp_path / ".env") not in detail
 
 
@@ -177,8 +202,8 @@ def test_check_env_warns_when_no_env_found(tmp_path: Path, monkeypatch: pytest.M
         monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
         runtime = _StubRuntime(data_dir=tmp_path)
         status, detail = cli_main._verify_check_env(runtime)
-    assert "WARN" in status
-    assert ".env not found" in detail
+    assert "SKIP" in status
+    assert "process configuration" in detail
 
 
 def test_check_env_falls_back_to_base_env_for_profile(
@@ -388,163 +413,230 @@ def test_check_pack_catalog_fails_on_error(tmp_path: Path) -> None:
     assert "catalog broken" in detail
 
 
-# ── _verify_check_provider_keys ───────────────────────────────────────
+# ── selected-provider configuration and Ollama ───────────────────────
 
 
-def test_check_provider_keys_warns_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def _runtime_for_manifest(manifest: Any) -> Any:
+    """Return a stub runtime whose active manifest is already resolved."""
+    runtime = _StubRuntime(data_dir=Path("/tmp/lisa-verify"))
+    runtime.session = SimpleNamespace(manifest=manifest)
+    return runtime
+
+
+def test_selected_openai_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
     from hosts.cli import main as cli_main
 
-    for var in (
-        "LISA_AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "LISA_AZURE_OPENAI_ENDPOINT",
-        "AZURE_OPENAI_ENDPOINT",
-        "LISA_OPENAI_API_KEY",
-        "OPENAI_API_KEY",
-        "LISA_ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "LISA_GOOGLE_API_KEY",
-        "GOOGLE_API_KEY",
-        "LISA_OLLAMA_HOST",
-        "OLLAMA_HOST",
-        "LISA_OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY",
-        "LISA_AWS_ACCESS_KEY_ID",
-        "AWS_ACCESS_KEY_ID",
-        "LISA_AWS_SECRET_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "LISA_AWS_REGION",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    status, detail = cli_main._verify_check_provider_keys()
-    assert "WARN" in status
-    assert "No provider keys" in detail
+    runtime = _runtime_for_manifest(_make_manifest("openai", "gpt-4o"))
+    status, detail = cli_main._verify_check_provider_keys(runtime)
+    assert "FAIL" in status
+    assert "LISA_OPENAI_API_KEY" in detail
 
-
-def test_check_provider_keys_passes_with_openai(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hosts.cli import main as cli_main
-
-    for var in (
-        "LISA_AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "LISA_ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "LISA_GOOGLE_API_KEY",
-        "GOOGLE_API_KEY",
-        "LISA_OLLAMA_HOST",
-        "OLLAMA_HOST",
-        "LISA_OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY",
-        "LISA_AWS_ACCESS_KEY_ID",
-        "AWS_ACCESS_KEY_ID",
-        "LISA_AWS_SECRET_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "LISA_AWS_REGION",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-    ):
-        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LISA_OPENAI_API_KEY", "sk-test1234567890")
-    status, detail = cli_main._verify_check_provider_keys()
+    status, detail = cli_main._verify_check_provider_keys(runtime)
     assert "PASS" in status
-    assert "OpenAI" in detail
-    # Key should be redacted
     assert "sk-test1234567890" not in detail
 
 
-def test_check_provider_keys_reports_azure_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_selected_azure_missing_endpoint_is_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from hosts.cli import main as cli_main
 
-    monkeypatch.setenv("LISA_AZURE_OPENAI_API_KEY", "azurekey1234567890")
-    monkeypatch.setenv("LISA_AZURE_OPENAI_ENDPOINT", "https://myinstance.openai.azure.com")
-    for var in (
-        "LISA_OPENAI_API_KEY",
-        "OPENAI_API_KEY",
-        "LISA_ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "LISA_GOOGLE_API_KEY",
-        "GOOGLE_API_KEY",
-        "LISA_OLLAMA_HOST",
-        "OLLAMA_HOST",
-        "LISA_OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY",
-        "LISA_AWS_ACCESS_KEY_ID",
-        "AWS_ACCESS_KEY_ID",
-        "LISA_AWS_SECRET_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "LISA_AWS_REGION",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    status, detail = cli_main._verify_check_provider_keys()
-    assert "PASS" in status
-    assert "Azure OpenAI" in detail
-    assert "myinstance.openai.azure.com" in detail
+    monkeypatch.setenv("LISA_AZURE_OPENAI_API_KEY", "azure-key")
+    runtime = _runtime_for_manifest(_make_manifest("azure_openai", "gpt-4o"))
+    status, detail = cli_main._verify_check_provider_keys(runtime)
+    assert "FAIL" in status
+    assert "LISA_AZURE_OPENAI_ENDPOINT" in detail
 
 
-def test_check_provider_keys_reports_ollama_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unused_partial_azure_does_not_fail_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from hosts.cli import main as cli_main
 
-    monkeypatch.setenv("LISA_OLLAMA_HOST", "localhost:11434")
-    for var in (
-        "LISA_AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "LISA_OPENAI_API_KEY",
-        "OPENAI_API_KEY",
-        "LISA_ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "LISA_GOOGLE_API_KEY",
-        "GOOGLE_API_KEY",
-        "LISA_OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY",
-        "LISA_AWS_ACCESS_KEY_ID",
-        "AWS_ACCESS_KEY_ID",
-        "LISA_AWS_SECRET_ACCESS_KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "LISA_AWS_REGION",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    status, detail = cli_main._verify_check_provider_keys()
+    monkeypatch.setenv("LISA_AZURE_OPENAI_API_KEY", "azure-key")
+    runtime = _runtime_for_manifest(_make_manifest("openai", "gpt-4o"))
+    monkeypatch.setenv("LISA_OPENAI_API_KEY", "openai-key")
+    status, detail = cli_main._verify_check_provider_keys(runtime)
     assert "PASS" in status
-    assert "Ollama" in detail
-    assert "localhost:11434" in detail
+    assert "partially configured" not in detail
 
 
-def test_check_provider_keys_reports_aws_bedrock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_aws_standard_credential_chain_is_supported() -> None:
     from hosts.cli import main as cli_main
 
-    for var in (
-        "LISA_AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "LISA_AZURE_OPENAI_ENDPOINT",
-        "AZURE_OPENAI_ENDPOINT",
-        "LISA_OPENAI_API_KEY",
-        "OPENAI_API_KEY",
-        "LISA_ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "LISA_GOOGLE_API_KEY",
-        "GOOGLE_API_KEY",
-        "LISA_OLLAMA_HOST",
-        "OLLAMA_HOST",
-        "LISA_OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("LISA_AWS_ACCESS_KEY_ID", "AKIATEST123456789")
-    monkeypatch.setenv("LISA_AWS_SECRET_ACCESS_KEY", "secret")
-    monkeypatch.setenv("LISA_AWS_REGION", "eu-west-1")
-
-    status, detail = cli_main._verify_check_provider_keys()
-
+    runtime = _runtime_for_manifest(_make_manifest("aws", "bedrock-model"))
+    status, detail = cli_main._verify_check_provider_keys(runtime)
     assert "PASS" in status
-    assert "AWS Bedrock" in detail
-    assert "eu-west-1" in detail
-    assert "AKIATEST123456789" not in detail
+    assert "AWS_ACCESS_KEY" not in detail
+
+
+def test_model_declared_env_names_are_required() -> None:
+    from runtime.model_manifest import load_model_manifest_text
+
+    from hosts.cli import main as cli_main
+
+    manifest = load_model_manifest_text(
+        "version: 1\n"
+        "mode_models: {default: custom}\n"
+        "models:\n"
+        "  - model_id: custom\n"
+        "    provider: ollama\n"
+        "    api_key_env: CUSTOM_REQUIRED_KEY\n"
+        "    base_url_env: CUSTOM_REQUIRED_URL\n"
+    )
+    runtime = _runtime_for_manifest(manifest)
+    status, detail = cli_main._verify_check_provider_keys(runtime)
+    assert "FAIL" in status
+    assert "CUSTOM_REQUIRED_KEY" in detail
+    assert "CUSTOM_REQUIRED_URL" in detail
+
+
+def test_unselected_ollama_is_skip_without_any_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hosts.cli import main as cli_main
+
+    runtime = _runtime_for_manifest(_make_manifest("openai", "gpt-4o"))
+    monkeypatch.delenv("LISA_OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    status, detail = cli_main._verify_check_ollama(runtime)
+    assert "SKIP" in status
+    assert "not selected" in detail
+
+
+def test_required_ollama_unreachable_is_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hosts.cli import main as cli_main
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, _url: str) -> Any:
+            raise OSError("connection refused")
+
+    monkeypatch.setattr("httpx.AsyncClient", _Client)
+    runtime = _runtime_for_manifest(_make_manifest("ollama", "gemma3:latest"))
+    status, detail = cli_main._verify_check_ollama(runtime)
+    assert "FAIL" in status
+    assert "Required Ollama" in detail
+
+
+def test_ollama_scheme_is_not_double_prefixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hosts.cli import main as cli_main
+
+    seen: list[str] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"models": [{"name": "gemma3:latest"}]}
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, url: str) -> Any:
+            seen.append(url)
+            return _Response()
+
+    monkeypatch.setenv("LISA_OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setattr("httpx.AsyncClient", _Client)
+    runtime = _runtime_for_manifest(_make_manifest("ollama", "gemma3:latest"))
+    status, _ = cli_main._verify_check_ollama(runtime)
+    assert "PASS" in status
+    assert seen == ["http://127.0.0.1:11434/api/tags"]
+
+
+def test_ollama_manifest_endpoint_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from runtime.model_manifest import load_model_manifest_text
+
+    from hosts.cli import main as cli_main
+
+    seen: list[str] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"models": [{"name": "gemma3:latest"}]}
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, url: str) -> Any:
+            seen.append(url)
+            return _Response()
+
+    monkeypatch.setattr("httpx.AsyncClient", _Client)
+    manifest = load_model_manifest_text(
+        "version: 1\n"
+        "mode_models: {default: gemma3:latest}\n"
+        "models:\n"
+        "  - model_id: gemma3:latest\n"
+        "    provider: ollama\n"
+        "    base_url: http://manifest-host:11434/v1\n"
+    )
+    runtime = _runtime_for_manifest(manifest)
+    status, _ = cli_main._verify_check_ollama(runtime)
+    assert "PASS" in status
+    assert seen == ["http://manifest-host:11434/api/tags"]
+
+
+def test_ollama_selected_model_must_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hosts.cli import main as cli_main
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"models": [{"name": "other-model"}]}
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, _url: str) -> Any:
+            return _Response()
+
+    monkeypatch.setattr("httpx.AsyncClient", _Client)
+    runtime = _runtime_for_manifest(_make_manifest("ollama", "gemma3:latest"))
+    status, detail = cli_main._verify_check_ollama(runtime)
+    assert "FAIL" in status
+    assert "gemma3:latest" in detail
 
 
 # ── _verify_check_paths ───────────────────────────────────────────────
@@ -588,9 +680,9 @@ def _invoke_verify(
 ) -> tuple[int, str]:
     """Invoke _verify_command with a stubbed runtime and captured output.
 
-    Stubs _verify_check_pack_catalog (needs framework setup) and
-    _verify_check_ollama (does real HTTP) so the command runs fully
-    offline. Returns (exit_code, output_text).
+    Stubs _verify_check_pack_catalog (needs framework setup). Provider checks
+    use a manifest-backed OpenAI model and a test credential; Ollama is not
+    selected and therefore must be skipped. Returns (exit_code, output_text).
     """
     from hosts.cli import main as cli_main
 
@@ -609,11 +701,6 @@ def _invoke_verify(
             cli_main,
             "_verify_check_pack_catalog",
             return_value=("[green]PASS[/green]", "1 mode(s): default"),
-        ),
-        patch.object(
-            cli_main,
-            "_verify_check_ollama",
-            return_value=("[yellow]WARN[/yellow]", "Ollama not reachable (test)"),
         ),
     ):
         try:
@@ -635,33 +722,37 @@ def test_verify_summary_all_passed(tmp_path: Path) -> None:
     assert "FAIL" not in output
 
 
-def test_verify_summary_reports_warnings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Warnings produce 'All mandatory checks passed (N warnings)' with exit 0."""
-    # Clear all provider env vars so provider keys check warns.
-    for var in list(os.environ):
-        if var.startswith(
-            (
-                "LISA_",
-                "OPENAI_",
-                "AZURE_",
-                "ANTHROPIC_",
-                "GOOGLE_",
-                "OLLAMA_",
-                "OPENROUTER_",
-                "AWS_",
-            )
-        ):
-            monkeypatch.delenv(var)
-    code, output = _invoke_verify(tmp_path)
+def test_verify_without_provider_keys_does_not_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing optional dotenv/Ollama and unused credentials stay neutral."""
+    monkeypatch.delenv("LISA_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli import main as cli_main
+
+    runtime = build_test_runtime(tmp_path)
+    with patch.object(
+        cli_main,
+        "_verify_check_ollama",
+        return_value=("[dim]SKIP[/dim]", "Ollama is not selected by the active manifest"),
+    ):
+        code, output = _invoke_verify(tmp_path, runtime=runtime)
     assert code == 0
-    assert "warning" in output.lower()
+    assert "WARN" not in output
+    assert "No provider keys configured" not in output
+    assert "SKIP" in output
 
 
 def test_verify_summary_reports_failure_and_nonzero_exit(tmp_path: Path) -> None:
     from hosts.cli import main as cli_main
 
-    with patch.object(
-        cli_main, "_verify_check_manifest", return_value=("[red]FAIL[/red]", "invalid manifest")
+    with (
+        patch.dict(os.environ, {"LISA_OPENAI_API_KEY": "test-key"}),
+        patch.object(
+            cli_main, "_verify_check_manifest", return_value=("[red]FAIL[/red]", "invalid manifest")
+        ),
     ):
         code, output = _invoke_verify(tmp_path)
     assert code == 1
@@ -670,7 +761,8 @@ def test_verify_summary_reports_failure_and_nonzero_exit(tmp_path: Path) -> None
 
 
 def test_verify_reports_all_current_checks(tmp_path: Path) -> None:
-    code, output = _invoke_verify(tmp_path)
+    with patch.dict(os.environ, {"LISA_OPENAI_API_KEY": "test-key"}):
+        code, output = _invoke_verify(tmp_path)
     assert code == 0
     for check in (
         "Python",
@@ -678,7 +770,7 @@ def test_verify_reports_all_current_checks(tmp_path: Path) -> None:
         "Session context",
         "Model manifest",
         "Pack catalog",
-        "Provider keys",
+        "Provider configuration",
         "Ollama",
         "Paths",
     ):

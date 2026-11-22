@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _VERIFY_PASS = "[green]PASS[/green]"
+_VERIFY_SKIP = "[dim]SKIP[/dim]"
 _VERIFY_WARN = "[yellow]WARN[/yellow]"
 _VERIFY_FAIL = "[red]FAIL[/red]"
 _KEY_REDACT_VISIBLE_CHARS = 4
@@ -55,7 +56,7 @@ def _redact_key(value: str) -> str:
 def _verify_check_python() -> tuple[str, str]:
     version = platform.python_version()
     major, minor, *_ = version.split(".")
-    if int(major) >= _MIN_PYTHON_MAJOR and int(minor) >= _MIN_PYTHON_MINOR:
+    if (int(major), int(minor)) >= (_MIN_PYTHON_MAJOR, _MIN_PYTHON_MINOR):
         return _VERIFY_PASS, f"Python {version}"
     return _VERIFY_FAIL, f"Python {version} (need >= 3.11)"
 
@@ -82,7 +83,7 @@ def _verify_check_env(runtime: HostRuntime) -> tuple[str, str]:
     for candidate in reversed(_resolve_env_candidates()):
         if candidate.exists():
             return _VERIFY_PASS, f".env found ({candidate})"
-    return _VERIFY_WARN, ".env not found. Create one at ~/.lisa/.env with your model provider keys."
+    return _VERIFY_SKIP, "No .env file; using the existing process configuration"
 
 
 def _verify_check_manifest(runtime: HostRuntime) -> tuple[str, str]:
@@ -114,102 +115,172 @@ def _verify_check_pack_catalog() -> tuple[str, str]:
         return _VERIFY_FAIL, f"Pack catalog failed to load: {exc}"
 
 
-def _verify_check_ollama() -> tuple[str, str]:
+def _load_verified_manifest(runtime: HostRuntime) -> object:
+    """Load the active manifest once for all selected-provider checks."""
+    loaded = getattr(getattr(runtime, "session", None), "manifest", None)
+    if loaded is not None:
+        return loaded
+    from runtime.model_manifest import load_model_manifest
+
+    return load_model_manifest(runtime.paths.models_path)
+
+
+def _selected_models(runtime: HostRuntime) -> tuple[object, ...]:
+    """Return models required by active mode pins, falling back to all models."""
+    manifest = _load_verified_manifest(runtime)
+    models = tuple(getattr(manifest, "models", ()) or ())
+    mode_models = getattr(manifest, "mode_models", {}) or {}
+    if not mode_models:
+        return models
+    selected: list[object] = []
+    for mode_id, ref in mode_models.items():
+        model = getattr(manifest, "resolve", lambda _ref: None)(ref)
+        if model is None:
+            raise ValueError(f"Mode '{mode_id}' references unknown model '{ref}'")
+        if model not in selected:
+            selected.append(model)
+    return tuple(selected)
+
+
+def _ollama_selected_host(models: tuple[object, ...]) -> str:
+    """Resolve an endpoint declared by selected Ollama models, if any."""
+    import os
+
+    endpoints: list[str] = []
+    for model in models:
+        endpoint = str(getattr(model, "base_url", "")).strip()
+        env_name = str(getattr(model, "base_url_env", "")).strip()
+        if not endpoint and env_name:
+            endpoint = os.getenv(env_name, "").strip()
+        if endpoint and endpoint not in endpoints:
+            endpoints.append(endpoint)
+    if len(endpoints) > 1:
+        raise ValueError("Selected Ollama models declare conflicting endpoints")
+    return endpoints[0] if endpoints else ""
+
+
+def _verify_check_ollama(runtime: HostRuntime | None = None) -> tuple[str, str]:
+    """Check Ollama only when the active manifest selects Ollama models."""
     import os
 
     import httpx
+    from runtime.provider_endpoints import normalize_ollama_host_to_base_url
 
-    configured_host = (
-        os.getenv("LISA_OLLAMA_HOST", "").strip()
-        or os.getenv("OLLAMA_HOST", "").strip()
-        or "127.0.0.1:11434"
-    )
+    if runtime is None:
+        return _VERIFY_SKIP, "Ollama is not selected by the active manifest"
+    try:
+        models = tuple(
+            model
+            for model in _selected_models(runtime)
+            if str(getattr(model, "provider", "")).strip().lower() == "ollama"
+        )
+    except Exception as exc:
+        return _VERIFY_FAIL, f"Cannot resolve selected Ollama models: {exc}"
+    if not models:
+        return _VERIFY_SKIP, "Ollama is not selected by the active manifest"
+    configured_host = _ollama_selected_host(models)
+    if not configured_host:
+        configured_host = (
+            os.getenv("LISA_OLLAMA_HOST", "").strip()
+            or os.getenv("OLLAMA_HOST", "").strip()
+            or "127.0.0.1:11434"
+        )
+    try:
+        configured_host = _ollama_selected_host(models) or configured_host
+        base_url = normalize_ollama_host_to_base_url(configured_host)
+        tags_url = f"{base_url.removesuffix('/v1/').rstrip('/')}/api/tags"
+    except (TypeError, ValueError) as exc:
+        return _VERIFY_FAIL, f"Invalid Ollama endpoint {configured_host!r}: {exc}"
 
     async def _ping() -> tuple[str, str]:
-        try:
-            base_url = f"http://{configured_host}"
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{base_url}/api/tags")
-                if resp.status_code == _HTTP_OK:
-                    data = resp.json()
-                    models = [m.get("name", "?") for m in data.get("models", [])]
-                    if models:
-                        preview = ", ".join(models[:_OLLAMA_MODEL_PREVIEW_LIMIT])
-                        suffix = "..." if len(models) > _OLLAMA_MODEL_PREVIEW_LIMIT else ""
-                        return _VERIFY_PASS, (
-                            f"Ollama reachable, {len(models)} model(s) pulled: {preview}{suffix}"
-                        )
-                    return _VERIFY_WARN, "Ollama reachable but no models pulled"
-                return _VERIFY_WARN, f"Ollama returned HTTP {resp.status_code}"
-        except Exception as exc:
-            return _VERIFY_WARN, f"Ollama not reachable at {configured_host}: {exc}"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(tags_url)
+            response.raise_for_status()
+            payload = response.json()
+            rows = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("Ollama /api/tags returned no models list")
+            available = {
+                str(item.get("name") or item.get("model") or "").strip()
+                for item in rows
+                if isinstance(item, dict)
+            }
+            required = {str(getattr(model, "model_id", "")).strip() for model in models}
+            missing = sorted(ref for ref in required if ref and ref not in available)
+            if missing:
+                return _VERIFY_FAIL, (
+                    "Ollama is reachable but selected model(s) are missing: " + ", ".join(missing)
+                )
+            preview = ", ".join(sorted(available)[:_OLLAMA_MODEL_PREVIEW_LIMIT])
+            return _VERIFY_PASS, (
+                f"Ollama reachable at {configured_host}; selected model(s) available. "
+                f"Catalog: {preview or 'empty'}"
+            )
 
     try:
         return asyncio.run(_ping())
     except Exception as exc:
-        return _VERIFY_WARN, f"Ollama check failed: {exc}"
+        return _VERIFY_FAIL, f"Required Ollama is unavailable at {configured_host}: {exc}"
 
 
-def _verify_check_provider_keys() -> tuple[str, str]:
+def _env_value(*names: str) -> str:
     import os
 
-    parts: list[str] = []
-    # Check LISA_* vars first (the new host's env vars), then fall back to
-    # the bare provider variables accepted by the host gateway provider.
-    azure_key = (
-        os.getenv("LISA_AZURE_OPENAI_API_KEY", "").strip()
-        or os.getenv("AZURE_OPENAI_API_KEY", "").strip()
-    )
-    azure_endpoint = (
-        os.getenv("LISA_AZURE_OPENAI_ENDPOINT", "").strip()
-        or os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
-    )
-    if azure_key and azure_endpoint:
-        parts.append(f"Azure OpenAI: {_redact_key(azure_key)} @ {azure_endpoint}")
-    elif azure_key or azure_endpoint:
-        parts.append("Azure OpenAI: partially configured")
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
-    for provider, variable in (
-        ("OpenAI", "OPENAI_API_KEY"),
-        ("Anthropic", "ANTHROPIC_API_KEY"),
-        ("Google Gemini", "GOOGLE_API_KEY"),
-    ):
-        key = os.getenv(f"LISA_{variable}", "").strip() or os.getenv(variable, "").strip()
-        if key:
-            parts.append(f"{provider}: {_redact_key(key)}")
 
-    ollama_host = os.getenv("LISA_OLLAMA_HOST", "").strip() or os.getenv("OLLAMA_HOST", "").strip()
-    if ollama_host:
-        parts.append(f"Ollama: {ollama_host}")
+def _provider_requirements(provider: str) -> tuple[tuple[str, ...], ...]:
+    """Required environment alternatives for a selected built-in provider."""
+    requirements = {
+        "openai": (("LISA_OPENAI_API_KEY", "OPENAI_API_KEY"),),
+        "anthropic": (("LISA_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),),
+        "google": (("LISA_GOOGLE_API_KEY", "GOOGLE_API_KEY"),),
+        "openrouter": (("LISA_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),),
+        "azure_openai": (
+            ("LISA_AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"),
+            ("LISA_AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT"),
+        ),
+        # AWS deliberately has no mandatory env credentials: boto3's standard
+        # credential chain is supported, and its region has a provider default.
+        "aws": (),
+        "ollama": (),
+    }
+    return requirements.get(provider, ())
 
-    openrouter_key = (
-        os.getenv("LISA_OPENROUTER_API_KEY", "").strip()
-        or os.getenv("OPENROUTER_API_KEY", "").strip()
-    )
-    if openrouter_key:
-        parts.append(f"OpenRouter: {_redact_key(openrouter_key)}")
 
-    aws_access_key = (
-        os.getenv("LISA_AWS_ACCESS_KEY_ID", "").strip()
-        or os.getenv("AWS_ACCESS_KEY_ID", "").strip()
-    )
-    aws_secret_key = (
-        os.getenv("LISA_AWS_SECRET_ACCESS_KEY", "").strip()
-        or os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
-    )
-    aws_region = (
-        os.getenv("LISA_AWS_REGION", "").strip()
-        or os.getenv("AWS_REGION", "").strip()
-        or os.getenv("AWS_DEFAULT_REGION", "").strip()
-    )
-    if aws_access_key and aws_secret_key and aws_region:
-        parts.append(f"AWS Bedrock: {_redact_key(aws_access_key)} @ {aws_region}")
-    elif aws_access_key or aws_secret_key or aws_region:
-        parts.append("AWS Bedrock: partially configured")
-
-    if not parts:
-        return _VERIFY_WARN, "No provider keys configured"
-    return _VERIFY_PASS, "; ".join(parts)
+def _verify_check_provider_keys(runtime: HostRuntime | None = None) -> tuple[str, str]:
+    """Validate only configuration required by selected manifest models."""
+    if runtime is None:
+        return _VERIFY_SKIP, "No active manifest selects provider credentials"
+    try:
+        selected = _selected_models(runtime)
+    except Exception as exc:
+        return _VERIFY_FAIL, f"Cannot resolve selected provider configuration: {exc}"
+    failures: list[str] = []
+    checked: list[str] = []
+    for model in selected:
+        provider = str(getattr(model, "provider", "")).strip().lower()
+        checked.append(f"{getattr(model, 'model_id', '?')} ({provider})")
+        api_key_env = str(getattr(model, "api_key_env", "")).strip()
+        if api_key_env and not _env_value(api_key_env):
+            failures.append(f"{getattr(model, 'model_id', '?')}: {api_key_env} is not set")
+        base_url_env = str(getattr(model, "base_url_env", "")).strip()
+        if base_url_env and not _env_value(base_url_env):
+            failures.append(f"{getattr(model, 'model_id', '?')}: {base_url_env} is not set")
+        failures.extend(
+            f"{provider}: set {alternatives[0]} (or {alternatives[1]})"
+            for alternatives in _provider_requirements(provider)
+            if not api_key_env and not _env_value(*alternatives)
+        )
+    if failures:
+        return _VERIFY_FAIL, "; ".join(dict.fromkeys(failures))
+    if not selected:
+        return _VERIFY_SKIP, "No selected models require provider configuration"
+    return _VERIFY_PASS, f"Selected provider requirements present for {len(checked)} model(s)"
 
 
 def _verify_check_paths(runtime: HostRuntime) -> tuple[str, str]:
@@ -274,8 +345,8 @@ def _verify_command(
         ("Session context", *_verify_check_session_context(runtime)),
         ("Model manifest", *_verify_check_manifest(runtime)),
         ("Pack catalog", *_verify_check_pack_catalog()),
-        ("Provider keys", *_verify_check_provider_keys()),
-        ("Ollama", *_verify_check_ollama()),
+        ("Provider configuration", *_verify_check_provider_keys(runtime)),
+        ("Ollama", *_verify_check_ollama(runtime)),
         ("Paths", *_verify_check_paths(runtime)),
     ]
 

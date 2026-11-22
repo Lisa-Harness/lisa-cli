@@ -339,9 +339,16 @@ lisa --install-completion   # install for your shell (add to rc/profile as neede
 lisa --show-completion      # print the script, to copy or source manually
 ```
 
-`lisa verify` expects a configured model manifest
-`lisa models discover` generates one; use `--force` if one already exists
-`lisa models apply` checks the syntax and router rules before applying
+`lisa verify` expects a configured model manifest. It validates only providers
+selected by that manifest: missing required credentials, endpoints, or model
+availability fail the check. Unused providers are skipped and do not affect the
+exit code. In particular, Ollama is just another provider—an unselected Ollama
+installation or service is never a warning or error. AWS may use the standard
+boto3 credential chain, and a missing `.env` file is neutral when configuration
+is already present in the process environment.
+
+`lisa models discover` generates a manifest; use `--force` if one already exists.
+`lisa models apply` checks the syntax and router rules before applying.
 
 ### Prompting (`prompt` with stdin, the editor, and `--raw`)
 
