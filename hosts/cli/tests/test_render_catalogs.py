@@ -306,19 +306,18 @@ async def test_collect_mcp_tools_no_configs_returns_empty_without_starting() -> 
 
 
 @pytest.mark.asyncio
-async def test_collect_mcp_tools_pool_none_after_start_returns_empty() -> None:
-    """If start() leaves mcp_tool_pool None, the helper returns empty."""
+async def test_collect_mcp_tools_pool_none_after_start_raises() -> None:
+    """A configured pool that start() fails to provide is an error, not empty."""
     from hosts.cli.main import _collect_mcp_tools
 
     runtime = _StubRuntime(warm=1, cold=0, pool=None)
-    health, tools_by_server = await _collect_mcp_tools(runtime)  # type: ignore[arg-type]
-    assert health == {}
-    assert tools_by_server == {}
+    with pytest.raises(RuntimeError, match="no tool pool"):
+        await _collect_mcp_tools(runtime)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
-async def test_collect_mcp_tools_start_failure_returns_empty_and_closes() -> None:
-    """A start() exception is swallowed; aclose still runs in finally."""
+async def test_collect_mcp_tools_start_failure_raises_and_closes() -> None:
+    """A start() exception propagates; aclose still runs (cleanup)."""
     from hosts.cli.main import _collect_mcp_tools
 
     class _BoomRuntime(_StubRuntime):
@@ -326,10 +325,9 @@ async def test_collect_mcp_tools_start_failure_returns_empty_and_closes() -> Non
             raise RuntimeError("server down")
 
     runtime = _BoomRuntime(warm=1, cold=0, pool=None)
-    health, tools_by_server = await _collect_mcp_tools(runtime)  # type: ignore[arg-type]
-    assert health == {}
-    assert tools_by_server == {}
-    assert runtime.closed is True
+    with pytest.raises(RuntimeError, match="server down"):
+        await _collect_mcp_tools(runtime)  # type: ignore[arg-type]
+    assert runtime.closed is False  # start failed before the close path
 
 
 # ── render module exports ─────────────────────────────────────────────

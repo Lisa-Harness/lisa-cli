@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 McpIntrospection = tuple[dict[str, Any], dict[str, "list[MCPToolSpec]"]]
+
+
+class RuntimeTeardownError(RuntimeError):
+    """The one-shot CLI's bounded runtime teardown did not complete cleanly.
+
+    Subprocesses are force-killed before this raises, so no orphans
+    survive; the error exists so commands exit nonzero instead of
+    reporting success over a pool that never closed.
+    """
 
 
 def _resolve_profiled_data_dir(data_dir: str, profile: str) -> str:
@@ -193,6 +203,13 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
     timeout, fall back to terminating every tracked MCP/proxy subprocess
     directly so no orphans survive.
 
+    Teardown is best-effort for the process (children are killed either
+    way), but an incomplete close is never silently treated as success:
+    a timeout or an ``aclose()`` exception raises
+    :class:`RuntimeTeardownError` so the command can exit nonzero —
+    persisted work is unaffected, but the caller knows the pool did not
+    close cleanly.
+
     The bounded close must run ``runtime.aclose()`` in the *calling* task:
     the runtime's MCP teardown exits anyio cancel scopes, and anyio forbids
     exiting a cancel scope from a different task than the one that entered
@@ -206,17 +223,26 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
         async with asyncio.timeout(timeout_s):
             await runtime.aclose()
         return
+    except asyncio.CancelledError:
+        raise
     except TimeoutError:
         logger.warning(
             "Runtime teardown exceeded %.0fs; falling back to direct subprocess termination",
             timeout_s,
         )
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # pylint: disable=broad-except
-        logger.debug("Runtime aclose raised during bounded teardown", exc_info=True)
-        return
+    except Exception as exc:
+        logger.warning("Runtime aclose raised during bounded teardown", exc_info=True)
+        _force_close_all_pools(runtime)
+        raise RuntimeTeardownError(str(exc)) from exc
     # Forced cleanup: kill every subprocess the pools still track.
+    _force_close_all_pools(runtime)
+    raise RuntimeTeardownError(
+        f"Runtime teardown did not complete within {timeout_s:.0f}s"
+    ) from None
+
+
+def _force_close_all_pools(runtime: HostRuntime) -> None:
+    """Schedule forced cleanup of every pool the runtime still tracks."""
     resources = runtime.resources
     pools: list[Any] = []
     proxy_pool = getattr(resources, "_proxy_pool", None)
@@ -225,8 +251,10 @@ async def _aclose_runtime_bounded(runtime: HostRuntime, *, timeout_s: float = 30
     tool_pool = getattr(resources, "_mcp_tool_pool", None)
     if tool_pool is not None:
         pools.append(tool_pool)
-    for pool in pools:
-        await _force_close_pool(pool)
+    loop = asyncio.get_running_loop()
+    pending = [loop.create_task(_force_close_pool(pool)) for pool in pools]
+    for task in pending:
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
 async def _force_close_pool(pool: Any) -> None:
@@ -269,31 +297,34 @@ async def _collect_mcp_tools(
     ``connect_server_ids`` so at most one cold context is ever opened and
     closed in the CLI's task.
 
-    Returns an empty :data:`McpIntrospection` when the runtime has no MCP
-    servers configured or when pool startup fails, so the ``tools``/``mcp``
-    commands degrade to showing only the internal tool catalog instead of
-    crashing.
+    Returns an empty :data:`McpIntrospection` only when the runtime has no
+    MCP servers configured — genuine absence. A configured pool that fails
+    to start, yields no tool pool, or fails ``tools/list`` raises: the
+    ``mcp``/``tools`` commands must report the failure, not render an
+    empty catalog as if no servers existed.
     """
     warm_ids = {c.server_id for c in _mcp_configs(runtime, warm=True) if hasattr(c, "server_id")}
-    if not warm_ids and not _mcp_configs(runtime, warm=False):
+    cold_configs = _mcp_configs(runtime, warm=False)
+    if not warm_ids and not cold_configs:
         return ({}, {})
     allowed = warm_ids | (connect_server_ids or set())
-    health: dict[str, Any] = {}
-    tools_by_server: dict[str, list[MCPToolSpec]] = {}
+    await runtime.start()
+    pool = _mcp_tool_pool(runtime)
+    if pool is None:
+        raise RuntimeError("MCP servers are configured but the runtime provided no tool pool")
     try:
-        await runtime.start()
-        pool = _mcp_tool_pool(runtime)
-        if pool is None:
-            return ({}, {})
         tools = await pool.list_tools(allowed_server_ids=allowed)
         # Capture is_alias flags BEFORE aclose() clears _synthetic_handlers.
         is_alias = {spec.name: pool.is_synthetic_tool(spec.name) for spec in tools}
         for spec in tools:
+            _ = spec  # grouping below keyed by server_id, read once
+        tools_by_server: dict[str, list[MCPToolSpec]] = {}
+        for spec in tools:
             tools_by_server.setdefault(spec.server_id, []).append(spec)
         health = _build_mcp_health(pool, is_alias)
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.debug("MCP tool collection failed: %s", exc)
-        return ({}, {})
-    finally:
-        await _aclose_runtime_bounded(runtime)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await _aclose_runtime_bounded(runtime)
+        raise
+    await _aclose_runtime_bounded(runtime)
     return (health, tools_by_server)

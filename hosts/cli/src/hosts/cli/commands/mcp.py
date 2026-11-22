@@ -77,9 +77,13 @@ def _mcp_command(
     # open/close in the CLI's task is safe (verified), while a second
     # in-process runtime init is not (stale global tool catalog breaks the
     # operation-catalog re-validation on the second boot).
-    mcp_health, mcp_tools_by_server = asyncio.run(
-        _collect_mcp_tools(runtime, connect_server_ids={server_id} if server_id else None)
-    )
+    try:
+        mcp_health, mcp_tools_by_server = asyncio.run(
+            _collect_mcp_tools(runtime, connect_server_ids={server_id} if server_id else None)
+        )
+    except (RuntimeError, OSError, ValueError) as exc:
+        console.print(f"[red]MCP introspection failed: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
     # Deferred render import (Slice C): the kernel.models-typed render
     # helpers load only on the mcp command's own path.
     from hosts.cli.render import (  # lazy: presentation import (Slice C)
@@ -90,7 +94,7 @@ def _mcp_command(
     )
 
     if not mcp_health:
-        console.print("[yellow]No MCP server tools discovered.[/yellow]")
+        console.print("[yellow]No MCP servers are configured.[/yellow]")
         return
     if server_id:
         specs = mcp_tools_by_server.get(server_id, [])

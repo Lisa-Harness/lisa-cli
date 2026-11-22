@@ -402,6 +402,21 @@ def test_bootstrap_env_and_packs_runs_once_and_orders_env_first(
     assert calls == ["env", "inject"]
 
 
+def test_pack_commands_discovery_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken pack discovery is an error, not an empty command registry."""
+    monkeypatch.setattr(cli_main, "_pack_command_specs", None)
+    import kernel.host_command_discovery as discovery_mod
+
+    def _boom(excluded_packs=None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("packs venv is corrupt")
+
+    monkeypatch.setattr(discovery_mod, "discover_pack_host_commands", _boom)
+    with pytest.raises(RuntimeError, match="packs venv is corrupt"):
+        cli_main._pack_commands()
+
+
 def test_pack_commands_bootstraps_env_and_packs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

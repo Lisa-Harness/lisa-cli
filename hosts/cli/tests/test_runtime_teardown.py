@@ -32,13 +32,34 @@ async def test_timed_out_teardown_closes_each_pools_children_once() -> None:
         ),
     )
 
-    await cli_main._aclose_runtime_bounded(runtime)
+    with pytest.raises(cli_main.RuntimeTeardownError, match="did not complete"):
+        await cli_main._aclose_runtime_bounded(runtime)
 
+    # Forced cleanup still ran: children killed, stacks closed.
+    await asyncio.sleep(0)
     proxy_process.kill.assert_called_once_with()
     tool_process.kill.assert_called_once_with()
     exited_process.kill.assert_not_called()
     proxy_stack.aclose.assert_awaited_once_with()
     tool_stack.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_failed_aclose_raises_teardown_error_after_forced_cleanup() -> None:
+    """A non-timeout aclose() exception also surfaces, not just timeouts."""
+    process = Mock(returncode=None)
+    runtime = Mock(
+        spec=HostRuntime,
+        aclose=AsyncMock(side_effect=RuntimeError("pool poisoned")),
+        resources=SimpleNamespace(
+            _proxy_pool=None,
+            _mcp_tool_pool=SimpleNamespace(_processes={"tool": process}, _child_stacks={}),
+        ),
+    )
+    with pytest.raises(cli_main.RuntimeTeardownError, match="pool poisoned"):
+        await cli_main._aclose_runtime_bounded(runtime)
+    await asyncio.sleep(0)
+    process.kill.assert_called_once_with()
 
 
 @pytest.mark.asyncio

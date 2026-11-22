@@ -389,6 +389,38 @@ def test_protocol_failure_exits_1_with_diagnostic(
     assert "Transport protocol failure" in capsys.readouterr().err
 
 
+def test_runtime_teardown_failure_exits_1(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A turn whose pool fails to close exits nonzero with a visible error."""
+    runtime = _make_runtime(tmp_path)
+
+    async def _turn_that_never_closes(_runtime, _message, _transport):
+        return "answer"
+
+    def _fake_init(**_kwargs):
+        return runtime
+
+    async def _failing_close(_runtime, **_kwargs):
+        raise cli_main.RuntimeTeardownError("teardown did not complete within 30s")
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", _fake_init)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _turn_that_never_closes)
+    monkeypatch.setattr(cli_main, "_aclose_runtime_bounded", _failing_close)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    recorded = Console(record=True, file=io.StringIO(), force_terminal=False, stderr=True)
+    with patch.object(cli_main, "console", new=recorded):
+        result = cli_main.app(args=["prompt", "hello"], standalone_mode=False)
+    assert result == 1
+    assert "Runtime teardown failed" in recorded.export_text()
+
+
 # ── Yield fail-fast ───────────────────────────────────────────────
 
 

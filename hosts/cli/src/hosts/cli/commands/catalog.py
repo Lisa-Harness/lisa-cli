@@ -131,19 +131,25 @@ def _models_command(
 
     # Typer parsed/validated the action (Literal) — no normalization needed.
     #
-    # 'show' uses the Rich table renderer; on failure (e.g. no active
-    # manifest yet) it falls back to the core text renderer so the user
-    # gets the same friendly "run discover first" guidance as the REPL.
+    # 'show' renders the Rich table from the active manifest. A missing
+    # manifest raises FileNotFoundError; that one absence is routed to the
+    # core handler for the friendly "run discover first" guidance. Any other
+    # failure (schema, permissions, render) propagates to the startup-error
+    # panel instead of being retried through a second dispatch.
     if action == "show":
+        from runtime.model_manifest import load_model_manifest
+
         try:
+            load_model_manifest(runtime.paths.models_path)
+        except FileNotFoundError:
+            pass
+        else:
             from hosts.cli.render import (  # lazy: presentation import (Slice C)
                 render_models as _render_models,
             )
 
             _render_models(runtime, console=console)
             return
-        except Exception:  # pylint: disable=broad-except
-            action = "show"
 
     # 'reload' and 'edit' only mutate transient in-process state or print
     # guidance — both pointless for a one-shot CLI process whose runtime
@@ -159,7 +165,7 @@ def _models_command(
         )
         return
 
-    # show (fallback), discover, apply, help delegate to the
+    # show (absent manifest), discover, apply, help delegate to the
     # transport-neutral core handler (the same one the REPL /models
     # command uses), so behavior stays identical across hosts. We
     # synthesize the equivalent '/models <sub> [--force]' slash string

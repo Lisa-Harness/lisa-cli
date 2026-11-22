@@ -18,6 +18,7 @@ multiline calls, and attribute chains that regex misses).
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -172,14 +173,24 @@ class _IOLocator(ast.NodeVisitor):
 
 
 def _find_io_violations(source: str) -> list[tuple[int, str]]:
-    """Parse source and return (line_number, source_snippet) for banned calls."""
+    """Parse source and return (line_number, source_snippet) for banned calls.
+
+    A ``SyntaxError`` is a gate failure, not a silent pass: an unparseable
+    file cannot be audited, so the error carries the file for the report.
+    """
     try:
         tree = ast.parse(source, type_comments=True)
-    except SyntaxError:
-        return []
+    except SyntaxError as exc:
+        raise PolicySyntaxError(
+            f"cannot parse {exc.filename or '<unknown>'} at line {exc.lineno}: {exc.msg}"
+        ) from exc
     locator = _IOLocator()
     locator.visit(tree)
     return locator.violations
+
+
+class PolicySyntaxError(RuntimeError):
+    """A scanned source file could not be parsed, so it cannot be audited."""
 
 
 # ---------------------------------------------------------------------------
@@ -253,4 +264,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except PolicySyntaxError as exc:
+        print(f"Direct I/O policy check failed: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None

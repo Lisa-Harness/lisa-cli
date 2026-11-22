@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from rich.console import Console
 from runtime.runtime import HostRuntime
 
@@ -61,17 +62,14 @@ def _invoke_models(
         ),
         patch.object(cli_main, "console", new=Console(quiet=True)),
     ):
-        # When action == "show" and render_models succeeds, the core
-        # handler is NOT called. For non-show actions (or a show fallback
-        # failure) the delegation path runs. We force the show path to
-        # fall through to the core handler by stubbing render_models to
-        # raise, so the 'show' delegation is also observable. The render
-        # helper is imported lazily inside the command (Slice C deferral),
-        # so the patch target is the render module itself.
+        # 'show' probes the manifest directly: a manifest that exists renders
+        # through the Rich table; a genuinely missing manifest (FileNotFoundError
+        # only) falls through to the core handler for the friendly guidance.
+        # Any other load failure propagates — it is a real error, not absence.
         if action in {"", "show"}:
             with patch(
-                "hosts.cli.render.render_models",
-                side_effect=RuntimeError("no manifest"),
+                "runtime.model_manifest.load_model_manifest",
+                side_effect=FileNotFoundError("no manifest"),
             ):
                 cli_main._models_command(
                     action=action,
@@ -212,19 +210,65 @@ def test_models_edit_rejected_with_guidance(tmp_path: Path) -> None:
 def test_models_show_falls_back_to_core_on_render_failure(
     tmp_path: Path,
 ) -> None:
-    """When render_models raises (no active manifest), 'show' delegates to core."""
+    """When the manifest is merely absent, 'show' delegates to core guidance."""
     captured: dict[str, Any] = {}
     stripped = _invoke_models(tmp_path, action="show", captured=captured)
     assert stripped == "/models show"
+
+
+def test_models_show_load_error_propagates(tmp_path: Path) -> None:
+    """A manifest load error other than absence is not retried or hidden."""
+    from hosts.cli import main as cli_main
+
+    runtime = _make_runtime(tmp_path)
+    with (
+        patch.object(
+            cli_main,
+            "_initialize_runtime_or_exit",
+            return_value=runtime,
+        ),
+        patch(
+            "runtime.model_manifest.load_model_manifest",
+            side_effect=ValueError("manifest schema is corrupt"),
+        ),
+        patch.object(cli_main, "console", new=Console(quiet=True)),
+        pytest.raises(ValueError, match="manifest schema is corrupt"),
+    ):
+        cli_main._models_command(
+            action="show",
+            force=False,
+            log_level="",
+            log="",
+            no_log=False,
+            data_dir=str(tmp_path),
+            thread_dir="",
+            no_thread=False,
+            session_context="",
+            timezone="",
+            state_snapshot="",
+            streaming="none",
+            host_log="",
+        )
 
 
 def test_models_show_renders_table_when_manifest_present(
     tmp_path: Path,
 ) -> None:
     """When render_models succeeds, 'show' prints the Rich table and skips core."""
+    from runtime.testing import build_test_runtime
+
     from hosts.cli import main as cli_main
 
-    runtime = _make_runtime(tmp_path)
+    runtime = build_test_runtime(
+        tmp_path,
+        models_yaml=(
+            "version: 1\n"
+            "mode_models: {default: gpt-4o}\n"
+            "models:\n"
+            "  - model_id: gpt-4o\n"
+            "    provider: openai\n"
+        ),
+    )
     rendered: list[bool] = []
 
     def _fake_render_models(_runtime, *, console=None):

@@ -86,8 +86,10 @@ class TestDetection:
         source = "import json\nvalue = json.dumps({'k': 1})\np.read_text()\nhandle.flush()\n"
         assert policy._find_io_violations(source) == []
 
-    def test_syntax_error_yields_no_findings(self) -> None:
-        assert policy._find_io_violations("def broken(:\n") == []
+    def test_syntax_error_is_a_gate_failure(self) -> None:
+        """A syntax error fails the audit: unparseable code cannot be checked."""
+        with pytest.raises(policy.PolicySyntaxError, match="cannot parse"):
+            policy._find_io_violations("def broken(:\n")
 
 
 class TestAllowlist:

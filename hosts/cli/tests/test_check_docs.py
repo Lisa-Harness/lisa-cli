@@ -49,6 +49,23 @@ def _rules(repo: Path) -> set[str]:
     return {finding.rule for finding in findings}
 
 
+def test_git_enumeration_failure_fails_the_gate(tmp_path: Path) -> None:
+    """A failed `git ls-files` fails the gate instead of checking nothing."""
+    import subprocess
+    from types import SimpleNamespace
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(returncode=128, stdout="", stderr="fatal: not a git repo")
+
+    real_run = subprocess.run
+    check_docs.subprocess.run = _boom  # type: ignore[method-assign]
+    try:
+        exit_code = check_docs.main(["--repo-root", str(tmp_path)])
+    finally:
+        check_docs.subprocess.run = real_run  # type: ignore[method-assign]
+    assert exit_code == 2
+
+
 class TestCorpusSelection:
     """The corpus is the maintained documentation, not runtime content."""
 

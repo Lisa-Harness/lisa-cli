@@ -346,6 +346,12 @@ lisa --install-completion   # install for your shell (add to rc/profile as neede
 lisa --show-completion      # print the script, to copy or source manually
 ```
 
+`lisa mcp` distinguishes **no servers configured** (a yellow informational
+line, exit 0) from **introspection failure**: a configured pool that fails to
+start, yields no tool pool, or fails `tools/list` prints `MCP introspection
+failed` and exits `1` — it never renders an empty catalog as if no servers
+existed.
+
 `lisa verify` expects a configured model manifest. It validates only providers
 selected by that manifest: missing required credentials, endpoints, or model
 availability fail the check. Unused providers are skipped and do not affect the
@@ -552,6 +558,16 @@ Counters are omitted when the proxy does not send them, so "no saving on this
 call" is never confused with "saved zero". `savings_field` must name a
 declared header — a footer promising a figure the proxy never sends is a
 declaration error.
+
+#### Incomplete runtime teardown fails the command
+
+The turn's work is already persisted by the time the CLI closes its MCP
+pool, but a pool that fails to close cleanly is no longer reported as
+success: tracked MCP/proxy subprocesses are force-killed first (so no
+orphans survive) and the command then exits `1` with a `Runtime teardown
+failed` error on stderr. A `prompt` turn whose answer was produced and
+persisted can therefore end nonzero solely because teardown did not
+complete within the 30-second grace window.
 
 `--streaming` controls what the box shows: `none` (spinner only), `stage`,
 `text` (the forming answer), or `hybrid` (the model's thinking, default).

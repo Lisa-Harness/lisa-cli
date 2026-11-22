@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,7 +71,11 @@ _RUNTIME_SOURCE_PREFIXES = (
 
 
 def _git_tracked_markdown(repo_root: Path) -> list[str]:
-    """Return the repository's tracked Markdown files as POSIX-relative paths."""
+    """Return the repository's tracked Markdown files as POSIX-relative paths.
+
+    Fails closed: a failed ``git ls-files`` means the gate cannot know the
+    corpus, so it raises instead of silently checking an empty corpus.
+    """
     result = subprocess.run(
         ["git", "-C", str(repo_root), "ls-files", "*.md"],
         capture_output=True,
@@ -78,7 +83,10 @@ def _git_tracked_markdown(repo_root: Path) -> list[str]:
         check=False,
     )
     if result.returncode != 0:
-        return []
+        raise RuntimeError(
+            f"Could not enumerate tracked Markdown files (git ls-files failed): "
+            f"{result.stderr.strip() or f'git exited {result.returncode}'}"
+        )
     return [line for line in result.stdout.splitlines() if line]
 
 
@@ -388,7 +396,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root.resolve()
-    tracked = _git_tracked_markdown(repo_root)
+    try:
+        tracked = _git_tracked_markdown(repo_root)
+    except RuntimeError as exc:
+        print(f"Documentation check failed: {exc}", file=sys.stderr)
+        return 2
     docs = [p for p in tracked if _is_documentation(p)]
 
     # Pre-compute heading anchors for all doc files

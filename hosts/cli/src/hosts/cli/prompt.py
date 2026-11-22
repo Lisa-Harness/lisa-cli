@@ -25,7 +25,11 @@ from hosts.cli.application import (
     policy_app,
     policy_rule_app,
 )
-from hosts.cli.cli_runtime import _aclose_runtime_bounded, _initialize_runtime_or_exit
+from hosts.cli.cli_runtime import (
+    RuntimeTeardownError,
+    _aclose_runtime_bounded,
+    _initialize_runtime_or_exit,
+)
 from hosts.cli.options import (
     DataDirOption,
     HostLogOption,
@@ -702,6 +706,13 @@ def _prompt_command(
         abort_console = Console(stderr=True) if raw else console
         abort_console.print("[red]⏹ Turn aborted by operator (Ctrl-C).[/red]")
         raise typer.Exit(code=_ABORT_EXIT) from None
+    except RuntimeTeardownError as exc:
+        # The turn's work is already persisted; only the pool failed to
+        # close (children force-killed). Surface it — a one-shot command
+        # must not exit 0 over a torn-down-un-cleanly runtime.
+        abort_console = Console(stderr=True) if raw else console
+        abort_console.print(f"[red]Runtime teardown failed: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
     finally:
         transport.stop_activity()
     raise typer.Exit(code=_prompt_exit_code(transport, raw=raw))

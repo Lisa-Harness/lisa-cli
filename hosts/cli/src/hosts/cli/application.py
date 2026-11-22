@@ -106,19 +106,16 @@ def _pack_commands() -> dict[str, Any]:
         # .env). PROMPT_STARTUP Slice C: this runs on the first
         # command-resolution path that needs pack names, not at import.
         _bootstrap_env_and_packs()
-        specs: dict[str, Any] = {}
-        try:
-            from kernel.host_command_discovery import (  # lazy: avoids eager pack scan
-                discover_pack_host_commands,
-            )
+        from kernel.host_command_discovery import (  # lazy: avoids eager pack scan
+            discover_pack_host_commands,
+        )
 
-            for entry in discover_pack_host_commands():
-                for spec in entry.specs:
-                    name = spec.prefix.strip().lstrip("/").split(None, 1)[0]
-                    if name:
-                        specs.setdefault(name, entry)
-        except Exception:  # pylint: disable=broad-except  # packs venv may be absent
-            logger.debug("pack host-command discovery failed", exc_info=True)
+        specs: dict[str, Any] = {}
+        for entry in discover_pack_host_commands():
+            for spec in entry.specs:
+                name = spec.prefix.strip().lstrip("/").split(None, 1)[0]
+                if name:
+                    specs.setdefault(name, entry)
         _pack_command_specs = specs
     return _pack_command_specs
 
@@ -342,11 +339,15 @@ _PENDING_APPROVAL_TARGET = "pending"
 
 
 def _get_version() -> str:
-    try:
-        from importlib.metadata import version as _pkg_version
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
 
+    try:
         return _pkg_version("lisa-cli")
-    except Exception:  # pylint: disable=broad-except
+    except PackageNotFoundError:
+        # Source-checkout runs have no installed distribution; the declared
+        # version is the only honest answer there. Other metadata failures
+        # (corrupt dist-info) propagate instead of lying about the version.
         return "0.5.0"
 
 

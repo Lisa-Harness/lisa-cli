@@ -621,6 +621,13 @@ def test_main_full_run_reports_failed_probe(
         return _FakeCompleted(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(bench.subprocess, "run", lambda *a, **k: fake_gate_runner(None))
+    # The module-root probe shells out too; satisfy verification directly
+    # with a fully resolved set rather than a stubbed-out empty result.
+    monkeypatch.setattr(
+        bench,
+        "_probe_module_paths",
+        lambda _interpreter=None: {"kernel": "k", "runtime": "r", "hosts.cli": "h"},
+    )
     exit_code = bench.main(
         ["--samples", "1", "--lisa", lisa, "--skip-prompt", "--json", str(tmp_path / "o.json")]
     )
@@ -789,27 +796,21 @@ def test_gate_result_carries_failure_fields(bench: ModuleType) -> None:
     assert result.stderr == ""
 
 
-def test_module_paths_from_env_skips_unimportable_modules(
-    bench: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A module that cannot be imported is skipped, not fatal.
+def test_module_paths_from_env_unimportable_module_fails(bench: ModuleType) -> None:
+    """A module that cannot be verified in the child probe is fatal.
 
-    The probe reports the resolved roots of the modules it can import; a
-    missing optional module (kernel/runtime/hosts.cli) is simply omitted
-    from the report instead of aborting the measurement.
+    Module-root verification is a gate, not a hint: if ``runtime`` (or any
+    probed entry module) fails to resolve in the installed CLI's
+    interpreter, the benchmark aborts instead of reporting an
+    unverified tree.
     """
-    import importlib
 
-    real_import_module = importlib.import_module
+    def _probe(_interpreter: str | None = None) -> dict[str, str]:
+        # Simulate a child probe where `runtime` did not resolve.
+        return {"kernel": "/site/kernel/__init__.py", "hosts.cli": "/site/hosts/__init__.py"}
 
-    def _import_module(name: str) -> Any:
-        if name == "runtime":
-            raise ImportError("simulated missing module")
-        return real_import_module(name)
-
-    # The function imports ``importlib`` inside its body, so patching the
-    # module attribute is what the local import resolves to.
-    monkeypatch.setattr(importlib, "import_module", _import_module)
-    paths = bench._module_paths_from_env()
-    assert "runtime" not in paths
-    assert paths, "the remaining modules still resolve"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(bench, "_probe_module_paths", _probe)
+        mp.setattr(bench, "_installed_interpreter", lambda: sys.executable)
+        with pytest.raises(RuntimeError, match="runtime"):
+            bench._module_paths_from_env()

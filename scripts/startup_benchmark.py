@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -283,7 +284,7 @@ def _prompt_probe_sample(
         wall_seconds=sample.wall_seconds,
         exit_code=sample.exit_code,
         import_wall_seconds=0.0,
-        module_paths=_module_paths_from_env(),
+        module_paths=_probe_module_paths(_installed_interpreter()),
         stage_durations=phases["stages"],  # type: ignore[arg-type]
         setup_invocations=phases["setup_invocations"],  # type: ignore[typeddict-item]
         duplicate_setups=phases["duplicate_setups"],  # type: ignore[typeddict-item]
@@ -294,24 +295,71 @@ def _prompt_probe_sample(
 
 
 def _module_paths_from_env() -> dict[str, str]:
-    """Resolve the installed package roots from this (parent) environment.
+    """Verify and return the installed CLI interpreter's package roots.
 
-    Module-root verification (spec §3): the report must state which tree
-    served the samples. The child probes run the installed executable,
-    so the parent resolves the same interpreter's installed roots.
+    Raises :class:`RuntimeError` when any of ``kernel``/``runtime``/
+    ``hosts.cli`` fails to resolve in the installed interpreter — the
+    report must never claim module roots it could not verify (spec §3).
     """
-    import importlib
-
-    paths: dict[str, str] = {}
-    for name in ("kernel", "runtime", "hosts.cli"):
-        try:
-            module = importlib.import_module(name)
-            resolved = str(getattr(module, "__file__", "") or "")
-            if resolved:
-                paths[name] = resolved
-        except ImportError:
-            continue
+    paths = _probe_module_paths(_installed_interpreter())
+    missing = [name for name in ("kernel", "runtime", "hosts.cli") if name not in paths]
+    if missing:
+        raise RuntimeError(
+            f"Module-root verification failed: {', '.join(missing)} did not resolve "
+            "in the installed CLI's interpreter"
+        )
     return paths
+
+
+def _module_probe_source() -> str:
+    """Child probe: import the entry modules and print their ``__file__``."""
+    return (
+        "import json, sys\n"
+        "paths = {}\n"
+        "for name in ('kernel', 'runtime', 'hosts.cli'):\n"
+        "    try:\n"
+        "        module = __import__(name)\n"
+        "        paths[name] = str(getattr(module, '__file__', '') or '')\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "print(json.dumps(paths))\n"
+        "sys.stdout.flush()\n"
+    )
+
+
+def _probe_module_paths(interpreter: str | None = None) -> dict[str, str]:
+    """Run the module-path probe with ``interpreter`` (default: installed)."""
+    python = interpreter or _installed_interpreter()
+    completed = subprocess.run(
+        [python, "-c", _module_probe_source()],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Module-root probe failed (exit {completed.returncode}): "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise RuntimeError(f"Module-root probe returned malformed output: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Module-root probe returned a non-object payload")
+    return payload
+
+
+def _installed_interpreter() -> str:
+    """Return the ``python`` beside the installed ``lisa`` executable."""
+    lisa = shutil.which("lisa")
+    if not lisa:
+        raise RuntimeError(
+            "No installed `lisa` executable on PATH (spec §3: probe the installed CLI)."
+        )
+    candidate = Path(lisa).resolve().parent / "python"
+    return str(candidate) if candidate.exists() else sys.executable
 
 
 def _unwrap_host_log_messages(text: str) -> list[str]:
@@ -554,9 +602,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # The parent must import the harness from the same environment the
-    # installed CLI runs against; its own module roots double as the
-    # report's module-path verification.
-    _module_paths_from_env()
+    # installed CLI runs against; module roots are verified by running the
+    # probe in the installed CLI's own interpreter (spec §3).
+    try:
+        _module_paths_from_env()
+    except RuntimeError as exc:
+        print(f"Module-root verification failed: {exc}", file=sys.stderr)
+        return 2
 
     runs: list[BenchmarkRun] = []
     samples: list[BenchmarkSample] = []
