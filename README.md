@@ -502,7 +502,7 @@ The `$` figure has two forms:
 | Form | Meaning |
 | --- | --- |
 | `$0.0042` | The provider reported its own charge for every call in the turn (OpenRouter returns this as `usage.cost`). Authoritative — it already reflects the provider's real cache read/write rates. |
-| `~$0.0099` | The harness priced the turn itself from the model manifest's per-token rates. Correct arithmetic, list-price only. |
+| `~$0.0099` | The harness priced the turn itself from each model's per-token manifest rates. Correct arithmetic, list-price only. Unknown required pricing omits the estimate; an explicit `0.0` rate means genuinely free, not unknown. |
 
 A turn mixing providers where only some report a cost shows the `~$`
 estimate: summing a partial set of provider charges would understate the

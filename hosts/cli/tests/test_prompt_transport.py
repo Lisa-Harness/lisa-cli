@@ -595,6 +595,75 @@ async def test_footer_omits_cost_without_prices() -> None:
     assert "$" not in buffer.getvalue()
 
 
+@pytest.mark.asyncio
+async def test_quiet_mode_retains_accounting_without_rendering_activity() -> None:
+    """Quiet suppresses activity, not model/tool/usage accounting."""
+    buffer = io.StringIO()
+    transport = PromptTransport(console=Console(file=buffer, force_terminal=False), quiet=True)
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete",
+        {"model_id": "m", "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+    )
+    await transport.on_stage("tool_dispatch", {"tool": "bash_run", "tool_kind": "pack_tool"})
+    await transport.on_stage("tool_dispatch_complete", {"ok": True})
+    await transport.on_response("answer")
+    assert transport._model_call_count == 1
+    assert transport._tool_call_count == 1
+    assert transport._status_turn_tokens == 12
+    assert transport._model_usage["m"]["prompt_tokens"] == 10
+    assert "⚡" not in buffer.getvalue()
+    assert "bash_run" not in buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_malformed_present_numeric_value_is_protocol_error() -> None:
+    """A malformed supplied counter is explicit, not silently converted to zero."""
+    transport, _ = _make_transport()
+    await transport.on_stage("fork_start", {"children": "not-a-number"})
+    assert transport.protocol_errors
+    assert transport.set_turn_outcome(is_error=False) is None
+    assert transport.turn_failed is True
+
+
+@pytest.mark.asyncio
+async def test_multi_model_estimate_uses_each_models_prices() -> None:
+    """Fallback estimation never applies the last model's rates to all calls."""
+    transport, buffer = _make_transport()
+    transport.model_prices = {"a": (0.001, 0.001), "b": (1.0, 1.0)}
+    for model in ("a", "b"):
+        await transport.on_stage("model_call", {"model_id": model})
+        await transport.on_stage(
+            "model_call_complete",
+            {"model_id": model, "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+    await transport.on_response("done")
+    footer = next(line for line in buffer.getvalue().splitlines() if line.startswith("⚡"))
+    assert "~$2.002" in footer
+
+
+@pytest.mark.asyncio
+async def test_free_cache_read_is_not_repriced_as_unknown() -> None:
+    """Explicit zero cache-read pricing is a measured free rate."""
+    transport, buffer = _make_transport()
+    transport.model_prices = {"m": (0.000002, 0.000012)}
+    transport.model_cache_prices = {"m": (0.0, 0.0)}
+    await transport.on_stage("model_call", {"model_id": "m"})
+    await transport.on_stage(
+        "model_call_complete",
+        {
+            "model_id": "m",
+            "prompt_tokens": 1000,
+            "cached_tokens": 600,
+            "completion_tokens": 100,
+            "total_tokens": 1100,
+        },
+    )
+    await transport.on_response("done")
+    footer = next(line for line in buffer.getvalue().splitlines() if line.startswith("⚡"))
+    assert "~$0.002" in footer
+
+
 def test_activity_bar_renders_tool_budget() -> None:
     """A finite tool-call cap renders the ▰▱ bar with used/total counts."""
     buffer = io.StringIO()
@@ -1604,8 +1673,8 @@ async def test_footer_estimate_blends_cache_read_rate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_footer_estimate_falls_back_to_uncached_rate() -> None:
-    """No cache prices in the manifest → every prompt at the uncached rate."""
+async def test_footer_estimate_omitted_when_cache_rate_unknown() -> None:
+    """Unknown cache pricing omits an estimate instead of inventing a rate."""
     transport, buffer = _make_transport()
     transport.model_prices = {"m": (0.000002, 0.000012)}
     await transport.on_stage("model_call", {"model_id": "m"})
@@ -1620,7 +1689,7 @@ async def test_footer_estimate_falls_back_to_uncached_rate() -> None:
     )
     await transport.on_response("done")
     footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))
-    assert "$0.0032" in footer
+    assert "$" not in footer
 
 
 @pytest.mark.asyncio

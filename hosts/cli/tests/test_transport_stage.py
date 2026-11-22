@@ -316,6 +316,7 @@ async def test_footer_marks_estimated_cost_when_provider_reports_none() -> None:
         {
             "prompt_tokens": 1000,
             "completion_tokens": 100,
+            "model_id": "m",
             "total_tokens": 1100,
             "cost_usd": 0.0099,
             "provider_cost_usd": 0.0,
@@ -337,12 +338,12 @@ async def test_footer_ignores_partial_provider_cost_covering_some_calls() -> Non
     await transport.on_stage("model_call", {"model_id": "a", "provider": "openrouter"})
     await transport.on_stage(
         "model_call_complete",
-        {"total_tokens": 100, "cost_usd": 0.01, "provider_cost_usd": 0.01},
+        {"model_id": "a", "total_tokens": 100, "cost_usd": 0.01, "provider_cost_usd": 0.01},
     )
     await transport.on_stage("model_call", {"model_id": "b", "provider": "ollama"})
     await transport.on_stage(
         "model_call_complete",
-        {"total_tokens": 100, "cost_usd": 0.02, "provider_cost_usd": 0.0},
+        {"model_id": "b", "total_tokens": 100, "cost_usd": 0.02},
     )
     await transport.on_response("done")
     footer = next(ln for ln in buffer.getvalue().splitlines() if ln.strip().startswith("⚡"))

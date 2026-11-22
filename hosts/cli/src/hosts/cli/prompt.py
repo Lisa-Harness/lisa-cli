@@ -713,7 +713,11 @@ def _prompt_exit_code(transport: PromptTransport, *, raw: bool) -> int:
         return _APPROVAL_REQUIRED_EXIT
     if transport.yield_unresolved:
         return _YIELD_UNRESOLVED_EXIT
-    if transport.turn_failed:
+    if transport.protocol_errors or transport.turn_failed:
+        if transport.protocol_errors:
+            Console(stderr=True).print(
+                f"[red]Transport protocol failure: {escape(transport.protocol_errors[0])}[/red]"
+            )
         return 1
     if raw and transport.raw_response_missing:
         Console(stderr=True).print("[red]The turn produced no raw response artifact.[/red]")
@@ -751,8 +755,7 @@ async def _run_prompt_with_teardown(
         handle_message,
     )
 
-    transport.model_prices = _collect_model_prices(runtime)
-    transport.model_cache_prices = _collect_model_cache_prices(runtime)
+    transport.model_prices, transport.model_cache_prices = _collect_model_pricing(runtime)
     transport.start_turn(message)
     try:
         await runtime.start()
@@ -777,7 +780,7 @@ async def _run_prompt_with_teardown(
                 await transport.on_response(decision_text)
                 return transport
             if getattr(result, "is_error", False):
-                transport.turn_failed = True
+                transport.set_turn_outcome(is_error=True)
                 await transport.on_error(getattr(result, "text", "") or "Approval decision failed.")
                 return transport
         if message:
@@ -797,46 +800,23 @@ async def _run_prompt_with_teardown(
     return transport
 
 
-def _collect_model_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]]:
-    """Read per-model per-token USD prices from the model manifest.
+def _collect_model_pricing(
+    runtime: HostRuntime,
+) -> tuple[
+    dict[str, tuple[float | None, float | None]],
+    dict[str, tuple[float | None, float | None]],
+]:
+    """Load model prices once, preserving unknown versus explicit zero."""
+    from runtime.model_manifest import load_model_manifest
 
-    Returns ``{model_id: (prompt_price, completion_price)}`` — the same
-    fields ``render_models``'s Cost column formats. Empty dict on any
-    failure: the transport omits the cost footer rather than blocking the
-    turn on an unreadable manifest.
-    """
-    try:
-        from runtime.model_manifest import load_model_manifest
-
-        manifest = load_model_manifest(runtime.paths.models_path)
-    except Exception:  # pylint: disable=broad-except
-        return {}
-    prices: dict[str, tuple[float, float]] = {}
+    loaded = getattr(getattr(runtime, "session", None), "manifest", None)
+    if loaded is None and not runtime.paths.models_path.exists():
+        return {}, {}
+    manifest = loaded if loaded is not None else load_model_manifest(runtime.paths.models_path)
+    prices: dict[str, tuple[float | None, float | None]] = {}
+    cache_prices: dict[str, tuple[float | None, float | None]] = {}
     for model in manifest.models:
-        prompt_price = float(getattr(model, "prompt_price", 0.0) or 0.0)
-        completion_price = float(getattr(model, "completion_price", 0.0) or 0.0)
-        if prompt_price > 0.0 or completion_price > 0.0:
-            prices[str(model.model_id)] = (prompt_price, completion_price)
-    return prices
-
-
-def _collect_model_cache_prices(runtime: HostRuntime) -> dict[str, tuple[float, float]]:
-    """Read per-model per-token USD prompt-cache prices from the manifest.
-
-    Returns ``{model_id: (cache_read_price, cache_write_price)}``. Only
-    models with a nonzero read and/or write price appear; missing keys make
-    the footer's estimate treat every prompt as uncached (legacy behavior).
-    """
-    try:
-        from runtime.model_manifest import load_model_manifest
-
-        manifest = load_model_manifest(runtime.paths.models_path)
-    except Exception:  # pylint: disable=broad-except
-        return {}
-    prices: dict[str, tuple[float, float]] = {}
-    for model in manifest.models:
-        read_price = float(getattr(model, "cache_read_price", 0.0) or 0.0)
-        write_price = float(getattr(model, "cache_write_price", 0.0) or 0.0)
-        if read_price > 0.0 or write_price > 0.0:
-            prices[str(model.model_id)] = (read_price, write_price)
-    return prices
+        model_id = str(model.model_id)
+        prices[model_id] = (model.prompt_price, model.completion_price)
+        cache_prices[model_id] = (model.cache_read_price, model.cache_write_price)
+    return prices, cache_prices

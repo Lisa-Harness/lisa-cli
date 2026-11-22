@@ -19,6 +19,8 @@ from __future__ import annotations
 # pylint: disable=protected-access
 import io
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -86,6 +88,49 @@ def _invoke_prompt(
     with patch.object(cli_main, "console", new=console):
         result: int | None = cli_main.app(args=["prompt", *argv], standalone_mode=False)
     return result
+
+
+def test_collect_model_pricing_loads_once_and_preserves_price_sentinels(
+    tmp_path: Path,
+) -> None:
+    """Pricing preserves explicit zero and unknown values with one manifest read."""
+    from runtime.testing import build_test_runtime
+
+    runtime = build_test_runtime(
+        tmp_path,
+        models_yaml=(
+            "version: 1\n"
+            "mode_models: {default: m}\n"
+            "models:\n"
+            "  - model_id: m\n"
+            "    provider: ollama\n"
+            "    prompt_price: 0.0\n"
+            "    completion_price: 0.00001\n"
+            "    cache_read_price: 0.0\n"
+        ),
+    )
+    with patch(
+        "runtime.model_manifest.load_model_manifest",
+        wraps=__import__(
+            "runtime.model_manifest", fromlist=["load_model_manifest"]
+        ).load_model_manifest,
+    ) as loader:
+        prices, cache_prices = cli_main._collect_model_pricing(runtime)
+    assert loader.call_count == 1
+    assert prices["m"] == (0.0, 0.00001)
+    assert cache_prices["m"] == (0.0, 0.0)
+
+    unknown = SimpleNamespace(
+        model_id="unknown",
+        prompt_price=None,
+        completion_price=None,
+        cache_read_price=None,
+        cache_write_price=None,
+    )
+    runtime.session.manifest = SimpleNamespace(models=(unknown,))
+    prices, cache_prices = cli_main._collect_model_pricing(runtime)
+    assert prices["unknown"] == (None, None)
+    assert cache_prices["unknown"] == (None, None)
 
 
 # ── Stdin attachment ──────────────────────────────────────────────────
@@ -315,6 +360,33 @@ def test_empty_raw_response_exits_1_without_artifact(
     assert result == 1
     assert captured.out == ""
     assert "no raw response artifact" in captured.err
+
+
+def test_protocol_failure_exits_1_with_diagnostic(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Malformed callback data fails the command even if the turn returns success."""
+    from runtime.types import HostCommandResult
+
+    runtime = _make_runtime(tmp_path)
+
+    async def _fake_handle_message(_runtime, _message, transport):
+        await transport.on_stage("fork_start", {"children": "not-a-number"})
+        return HostCommandResult(text="done")
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: runtime)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        result = cli_main.app(args=["prompt", "hello"], standalone_mode=False)
+    assert result == 1
+    assert "Transport protocol failure" in capsys.readouterr().err
 
 
 # ── Yield fail-fast ───────────────────────────────────────────────

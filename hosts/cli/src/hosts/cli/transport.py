@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import sys
 from collections.abc import Callable
 from time import perf_counter
@@ -370,6 +371,67 @@ class _TrailingSpinner:
         return out
 
 
+def _duration_ms(value: Any) -> float:
+    """Validate a duration supplied by a model/tool protocol event."""
+    return float(_payload_number("duration", {"duration_ms": value}, "duration_ms"))  # type: ignore[arg-type]
+
+
+def _payload_number(
+    label: str,
+    data: dict[str, Any],
+    key: str,
+    *,
+    default: float | int | None = None,
+) -> float | int | None:
+    """Read a finite numeric protocol value without inventing missing data."""
+    if key not in data or data[key] is None:
+        return default
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Invalid {label} payload: {key} must be a finite number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"Invalid {label} payload: {key} must be a finite number")
+    return value
+
+
+def _payload_nonnegative_int(
+    label: str,
+    data: dict[str, Any],
+    key: str,
+    *,
+    default: int | None = None,
+) -> int | None:
+    """Read an integer counter while rejecting lossy or negative values."""
+    value = _payload_number(label, data, key, default=default)
+    if value is None:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"Invalid {label} payload: {key} must be an integer")
+    if value < 0:
+        raise ValueError(f"Invalid {label} payload: {key} must be non-negative")
+    return int(value)
+
+
+def _payload_int(label: str, data: dict[str, Any], key: str, default: int) -> int:
+    """Read a signed integer protocol field without lossy coercion."""
+    if key not in data or data[key] is None:
+        return default
+    value = _payload_number(label, data, key)
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"Invalid {label} payload: {key} must be an integer")
+    return int(value)  # type: ignore[arg-type]
+
+
+def _payload_mapping(label: str, data: dict[str, Any], key: str) -> dict[str, Any]:
+    """Read a structured payload map, or raise on a malformed supplied value."""
+    value = data.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Invalid {label} payload: {key} must be a mapping")
+    return value
+
+
 class PromptTransport:
     """Vertically efficient transport for the ``prompt`` command.
 
@@ -428,6 +490,7 @@ class PromptTransport:
         #: uses the response flag to prevent an empty/failed artifact.
         self.turn_failed: bool = False
         self.raw_response_missing: bool = False
+        self.protocol_errors: list[str] = []
         # Pending approval payload captured from ``data["approval"]`` on the
         # final response. When non-None the approval panel just rendered;
         # the command path reads it for exit-code decisions. Cleared on the
@@ -474,11 +537,11 @@ class PromptTransport:
         # Per-model per-token prices (USD) injected by the command path:
         # ``{model_id: (prompt_price, completion_price)}``. Empty = the
         # footer omits the cost estimate (manifest unreadable/unknown model).
-        self.model_prices: dict[str, tuple[float, float]] = {}
-        # Per-model prompt-cache prices (USD/token) keyed the same way; the
-        # footer's estimate blends the read rate for cache-hit prompts.
-        # Empty/missing keys = the estimate treats every prompt as uncached.
-        self.model_cache_prices: dict[str, tuple[float, float]] = {}
+        self.model_prices: dict[str, tuple[float | None, float | None]] = {}
+        # Cache prices preserve the manifest's sentinel: None = unknown,
+        # 0.0 = explicitly free. Unknown pricing omits an estimate; it never
+        # falls back to another rate.
+        self.model_cache_prices: dict[str, tuple[float | None, float | None]] = {}
         # Whether any on_text_chunk visible-answer delta arrived this turn —
         # informational only: the answer renders once, fully (markdown), from
         # on_response regardless.
@@ -521,7 +584,7 @@ class PromptTransport:
         self._scrollback_rule_printed = False
 
     def _init_status_counters(self) -> None:
-        """Zero the per-turn token/cost counters shared by the footer.
+        """Reset outcome and per-turn token/cost counters shared by the footer.
 
         ``start_thinking`` re-runs this for each turn; constructing the
         transport runs it once for the pre-turn state.
@@ -550,6 +613,10 @@ class PromptTransport:
         # footer then renders no proxy segment at all.
         self._status_proxy_telemetry: dict[str, int] = {}
         self._status_reasoning_chars: int = 0
+        self._model_usage: dict[str, dict[str, Any]] = {}
+        self.protocol_errors = []
+        self.turn_failed = False
+        self.raw_response_missing = False
 
     def _reset_model_status(self) -> None:
         self._status_current_model: str = ""
@@ -578,7 +645,7 @@ class PromptTransport:
 
     def set_turn_outcome(self, *, is_error: bool) -> None:
         """Record the structured outcome returned by the host dispatcher."""
-        self.turn_failed = is_error
+        self.turn_failed = is_error or bool(self.protocol_errors)
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: pin the prompt, arm the activity display.
@@ -694,6 +761,7 @@ class PromptTransport:
         self._status_provider_cost_calls = 0
         self._status_proxy_telemetry = {}
         self._status_reasoning_chars = 0
+        self._model_usage = {}
         self._fork_children = {}
         self._fork_total = 0
         self._tool_call_stack = []
@@ -745,22 +813,33 @@ class PromptTransport:
     # ── Stage events ────────────────────────────────────────────────
 
     async def on_stage(self, label: str, data: dict[str, Any] | None = None) -> None:
-        """Update counters + activity line; print tool rows only on completion."""
-        if self.quiet:
+        """Process every stage; quiet mode suppresses rendering, not accounting."""
+        if not isinstance(label, str) or not label.strip():
+            self._record_protocol_error("Stage label must be a nonempty string")
             return
-        data = data or {}
+        if data is not None and not isinstance(data, dict):
+            self._record_protocol_error(f"Invalid {label} payload: expected a mapping")
+            return
+        try:
+            self._process_stage(label, data or {})
+        except (TypeError, ValueError) as exc:
+            self._record_protocol_error(str(exc))
+
+    def _record_protocol_error(self, message: str) -> None:
+        """Retain malformed protocol events for the command's failure outcome."""
+        self.protocol_errors.append(message)
+        logger.error("transport protocol error: %s", message)
+
+    def _process_stage(self, label: str, data: dict[str, Any]) -> None:
         prev_mode = self._current_mode
-        # Budget caps ride every kernel stage payload (emit_stage setdefaults
-        # them). Capture for the activity-line progress bars; 0 = unlimited.
         for cap_field, payload_key in (
             ("_cap_max_iterations", "max_iterations"),
             ("_cap_max_tool_calls", "max_tool_calls"),
             ("_cap_max_handoffs", "max_handoffs"),
         ):
-            cap_raw = data.get(payload_key)
-            if isinstance(cap_raw, int) and cap_raw > 0:
+            cap_raw = _payload_nonnegative_int(label, data, payload_key)
+            if cap_raw:
                 setattr(self, cap_field, cap_raw)
-        # The first real stage event ends the boot phase.
         self._phase_label = ""
         if label.startswith("model_call"):
             self._handle_model_stage(label, data)
@@ -768,16 +847,16 @@ class PromptTransport:
             self._handle_tool_stage(label, data)
         elif label.startswith("fork_"):
             self._handle_fork_stage(label, data)
-        # else: bookkeeping-only events update nothing visible in prompt mode.
 
-        if self._current_mode and self._current_mode != prev_mode:
+        if not self.quiet and self._current_mode and self._current_mode != prev_mode:
             self._handoff_count += 1
             handoff = Text("↦ ", style=STYLE_ROW_TRANSITION)
             handoff.append(
                 f"{prev_mode or 'start'} → {self._current_mode}", style=STYLE_ROW_TRANSITION
             )
             self._print_event_line(handoff)
-        self._redraw_activity()
+        if not self.quiet:
+            self._redraw_activity()
 
     # ── Streaming / response ───────────────────────────────────────
 
@@ -1041,10 +1120,9 @@ class PromptTransport:
             # A new model call resets the stall clock: pre-call silence is
             # transport warmup, not a stalled stream.
             self._last_delta_perf = 0.0
-            with contextlib.suppress(TypeError, ValueError):
-                iter_raw = data.get("_state.iteration") or data.get("iteration")
-                if iter_raw not in (None, "", 0):
-                    self._iteration_current = int(iter_raw)
+            iteration = _payload_nonnegative_int(label, data, "iteration")
+            if iteration:
+                self._iteration_current = iteration
             max_iter_raw = data.get("max_iterations")
             if isinstance(max_iter_raw, int) and max_iter_raw > 0:
                 self._iteration_max = max_iter_raw
@@ -1052,10 +1130,9 @@ class PromptTransport:
                 self._current_mode = str(data["mode_id"])
             return
         if label == "model_call_complete":
-            d_raw = data.get("duration_ms")
-            if d_raw not in (None, "", 0):
-                with contextlib.suppress(TypeError, ValueError):
-                    self._iteration_durations.append(float(d_raw))
+            duration = _payload_number(label, data, "duration_ms")
+            if duration:
+                self._iteration_durations.append(float(duration))
             self._accumulate_call_usage(data)
             return
         if label == "model_call_failed":
@@ -1145,6 +1222,12 @@ class PromptTransport:
         if self._tool_call_stack:
             self._tool_call_stack.pop()
         glyph = _TOOL_STATUS_GLYPH.get(status, _TOOL_STATUS_GLYPH[""])
+        if self.quiet:
+            self._active_label = ""
+            self._last_tool_data = None
+            self._last_tool_streaming = False
+            self._last_tool_output_lines = 0
+            return
         row_data = self._last_tool_data or data
         summary = self._result_shape_summary(row_data, data)
         row = self._render_tool_dispatch(
@@ -1172,11 +1255,11 @@ class PromptTransport:
         """
         if label == "fork_start":
             self._fork_children = {}
-            self._fork_total = int(data.get("children", 0)) or 0
+            self._fork_total = _payload_nonnegative_int(label, data, "children", default=0) or 0
             self._print_event_line(self._render_fork_stage())
             return
         if label == "fork_child_start":
-            idx = int(data.get("child_index", -1))
+            idx = _payload_int(label, data, "child_index", -1)
             if idx >= 0:
                 self._fork_children[idx] = {
                     "mode_id": data.get("mode_id", ""),
@@ -1187,7 +1270,7 @@ class PromptTransport:
                 self._active_label = f"fork #{idx} {data.get('mode_id', '')}".strip()
             return
         if label == "fork_child_complete":
-            idx = int(data.get("child_index", -1))
+            idx = _payload_int(label, data, "child_index", -1)
             if idx >= 0:
                 existing = self._fork_children.get(idx, {})
                 existing.update(
@@ -1222,10 +1305,11 @@ class PromptTransport:
         if row_data.get("stream_output") and self._last_tool_output_lines > 0:
             n = self._last_tool_output_lines
             return f"⎿ {n} line{'s' if n != 1 else ''}"
-        with contextlib.suppress(TypeError, ValueError):
-            chars = int(complete.get("result_chars") or 0)
-            if chars > 0:
-                return f"⎿ {_format_tokens(chars)} chars"
+        chars = _payload_nonnegative_int(
+            "tool_dispatch_complete", complete, "result_chars", default=0
+        )
+        if chars:
+            return f"⎿ {_format_tokens(chars)} chars"
         preview = str(complete.get("result_preview") or "").strip()
         if preview and preview != "Done":
             return f"⎿ {_format_tokens(len(preview))} chars"
@@ -1902,41 +1986,70 @@ class PromptTransport:
           canonical estimate and the provider's own reported charge.
         """
 
-        total_raw = data.get("_state.total_tokens") or data.get("total_tokens")
-        if total_raw not in (None, "", 0):
-            with contextlib.suppress(TypeError, ValueError):
-                self._status_turn_tokens += int(total_raw)
-        prompt_now = 0
-        with contextlib.suppress(TypeError, ValueError):
-            prompt_now = int(data.get("prompt_tokens") or 0)
-            self._status_prompt_tokens += prompt_now
-        completion_now = 0
-        with contextlib.suppress(TypeError, ValueError):
-            completion_now = int(data.get("completion_tokens") or 0)
-            self._status_completion_tokens += completion_now
-        cached_now = 0
-        with contextlib.suppress(TypeError, ValueError):
-            cached_now = int(data.get("cached_tokens") or 0)
-            self._status_cached_tokens += cached_now
+        total_raw = data.get("_state.total_tokens")
+        if total_raw is None:
+            total_raw = data.get("total_tokens")
+        total_now = _payload_nonnegative_int(
+            "model_call_complete", {"total": total_raw}, "total", default=0
+        )
+        prompt_now = (
+            _payload_nonnegative_int("model_call_complete", data, "prompt_tokens", default=0) or 0
+        )
+        completion_now = (
+            _payload_nonnegative_int("model_call_complete", data, "completion_tokens", default=0)
+            or 0
+        )
+        cached_now = (
+            _payload_nonnegative_int("model_call_complete", data, "cached_tokens", default=0) or 0
+        )
+        cost_now = _payload_number("model_call_complete", data, "cost_usd")
+        provider_now = _payload_number("model_call_complete", data, "provider_cost_usd")
+        model_id = str(data.get("model_id") or self._status_current_model)
+        # Older runtimes did not stamp model_id on every completion. Keep the
+        # legacy last-model association for that protocol version; current
+        # payloads always carry their own model id.
+        if not model_id and len(self._model_usage) == 1:
+            model_id = next(iter(self._model_usage))
+        if not model_id:
+            raise ValueError("Invalid model_call_complete payload: model_id is required")
+        self._status_turn_tokens += total_now or 0
+        self._status_prompt_tokens += prompt_now
+        self._status_completion_tokens += completion_now
+        self._status_cached_tokens += cached_now
         self._status_billed_tokens += max(0, prompt_now - cached_now) + completion_now
-        with contextlib.suppress(TypeError, ValueError):
-            self._status_cost_usd += float(data.get("cost_usd") or 0.0)
-        provider_now = 0.0
-        with contextlib.suppress(TypeError, ValueError):
-            provider_now = float(data.get("provider_cost_usd") or 0.0)
-        if provider_now > 0.0:
-            self._status_provider_cost_usd += provider_now
+        if cost_now is not None:
+            self._status_cost_usd += float(cost_now)
+        if provider_now is not None:
+            self._status_provider_cost_usd += float(provider_now)
+        if "provider_cost_usd" in data:
             self._status_provider_cost_calls += 1
+        usage = self._model_usage.setdefault(
+            model_id,
+            {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "cost_usd": 0.0,
+                "has_canonical_cost": False,
+            },
+        )
+        usage["prompt_tokens"] += prompt_now
+        usage["completion_tokens"] += completion_now
+        usage["cached_tokens"] += cached_now
+        if cost_now is not None:
+            usage["cost_usd"] += float(cost_now)
+            usage["has_canonical_cost"] = True
         # Proxy counters are summed without interpreting them: the key set is
         # whatever the serving proxy declared, and the footer renders only the
         # ones it knows how to label.
-        telemetry = data.get("proxy_telemetry")
-        if isinstance(telemetry, dict):
-            for key, raw in telemetry.items():
-                with contextlib.suppress(TypeError, ValueError):
-                    self._status_proxy_telemetry[str(key)] = self._status_proxy_telemetry.get(
-                        str(key), 0
-                    ) + max(0, int(raw))
+        telemetry = _payload_mapping("model_call_complete", data, "proxy_telemetry")
+        for key, raw in telemetry.items():
+            value = _payload_nonnegative_int(
+                "model_call_complete proxy_telemetry", {str(key): raw}, str(key), default=0
+            )
+            self._status_proxy_telemetry[str(key)] = self._status_proxy_telemetry.get(
+                str(key), 0
+            ) + (value or 0)
 
     def _resolve_turn_cost(self) -> tuple[float, bool]:
         """Return ``(usd, authoritative)`` for the turn's cost segment.
@@ -1978,18 +2091,29 @@ class PromptTransport:
         cache-hit prompt tokens are priced at the cache-read rate instead
         of the uncached prompt rate.
         """
-        prices = self.model_prices.get(self._status_current_model)
-        if not prices:
-            return 0.0
-        prompt_price, completion_price = prices
-        cache_prices = self.model_cache_prices.get(self._status_current_model) or (0.0, 0.0)
-        cache_read_price, _cache_write_price = cache_prices
-        cached = min(self._status_cached_tokens, self._status_prompt_tokens)
-        uncached_prompt = self._status_prompt_tokens - cached
-        prompt_read = uncached_prompt * prompt_price + cached * (cache_read_price or prompt_price)
-        cost = prompt_read + self._status_completion_tokens * completion_price
-        # Sub-cent figures round to zero display; keep one significant digit.
-        return round(cost, 4)
+        total = 0.0
+        for model_id, usage in self._model_usage.items():
+            prices = self.model_prices.get(model_id)
+            if prices is None:
+                return 0.0
+            prompt_price, completion_price = prices
+            if prompt_price is None or completion_price is None:
+                return 0.0
+            cached = min(usage["cached_tokens"], usage["prompt_tokens"])
+            if cached:
+                cache_prices = self.model_cache_prices.get(model_id)
+                if cache_prices is None or cache_prices[0] is None:
+                    return 0.0
+                cache_read_price = cache_prices[0]
+            else:
+                cache_read_price = 0.0
+            uncached_prompt = usage["prompt_tokens"] - cached
+            total += (
+                uncached_prompt * prompt_price
+                + cached * cache_read_price
+                + usage["completion_tokens"] * completion_price
+            )
+        return round(total, 4)
 
     # ── Model/tool row rendering (shared with event lines) ──────────
 
@@ -2020,7 +2144,7 @@ class PromptTransport:
             out.append(f" {status_glyph}", style=STYLE_ROW_ERROR)
         duration = (complete or data).get("duration_ms")
         if status_glyph and duration not in (None, "", 0):
-            out.append(f" {round(float(duration))}ms", style=STYLE_TEXT_MUTED)
+            out.append(f" {round(_duration_ms(duration))}ms", style=STYLE_TEXT_MUTED)
         return out
 
     def _render_tool_dispatch(
@@ -2064,7 +2188,7 @@ class PromptTransport:
             duration = (complete or data).get("duration_ms")
             tail = status_glyph
             if duration not in (None, "", 0):
-                tail += f" {round(float(duration))}ms"
+                tail += f" {round(_duration_ms(duration))}ms"
             self._append_aligned_status(out, tail, status_style, suffix=summary)
             if summary:
                 out.append(" ", style=STYLE_TEXT_MUTED)
@@ -2096,7 +2220,7 @@ class PromptTransport:
         if status_glyph == "…":
             out.append(" · running", style=STYLE_TEXT_MUTED)
         elif duration not in (None, "", 0):
-            out.append(f" · {round(float(duration))}ms", style=STYLE_TEXT_MUTED)
+            out.append(f" · {round(_duration_ms(duration))}ms", style=STYLE_TEXT_MUTED)
         if summary:
             out.append(f" · {summary.removeprefix('⎿ ')}", style=STYLE_TEXT_MUTED)
         return out
