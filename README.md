@@ -449,10 +449,11 @@ request.)
 
 A model yield — the turn ends with the model asking you a question instead of
 producing a result — is the same contract: the question prints to stderr, stdout
-gets nothing, and the process exits with code `4`. The raw-mode contract tells
-the model to make the best-supported inference from the provided material and
-state assumptions in a trailing comment instead of asking; when even that is
-impossible, re-run with the missing information included in the prompt.
+gets nothing, and the process exits with code `4`. Missing required information
+must fail rather than trigger a guessed artifact; re-run with the missing
+information included in the prompt. Runtime/provider failures and empty raw
+responses exit with code `1`, write diagnostics to stderr, and produce no raw
+artifact on stdout.
 
 ### Live activity display
 

@@ -69,11 +69,10 @@ _RAW_CONTRACT = (
     "Emit ONLY the requested result — no preamble, no closing commentary, no "
     "restating the task, no follow-up questions, and do not wrap the whole "
     "output in a markdown code fence. "
-    "Do NOT call the yield/ask tool and do not end with a question: if required "
-    "input is missing, make the best-supported inference from the provided "
-    "material and state the assumption in a trailing comment (e.g. '# NOTE: ...'), "
-    "then still emit the full result. A question or an empty response is a "
-    "failed turn."
+    "Do NOT call the yield/ask tool and do not end with a question. If required "
+    "input is missing, stop without emitting an artifact and report what is "
+    "missing on the error channel; never guess or invent a substitute result. "
+    "A question or an empty response is a failed turn."
 )
 
 
@@ -255,7 +254,7 @@ async def _decide_approval_turn(
     request_id: str,
     approve: bool,
     remember: str,
-) -> str:
+) -> tuple[str, bool]:
     """Decide one approval through the typed core, then close the pool.
 
     Mirrors ``_run_host_command_turn``: no transport rendering — the
@@ -284,7 +283,7 @@ async def _decide_approval_turn(
         )
     finally:
         await _aclose_runtime_bounded(runtime)
-    return getattr(result, "text", "") or str(result)
+    return (getattr(result, "text", "") or str(result)), bool(getattr(result, "is_error", False))
 
 
 def _run_decision(
@@ -304,12 +303,12 @@ def _run_decision(
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
         return
-    text = asyncio.run(
+    text, failed = asyncio.run(
         _decide_approval_turn(runtime, request_id=request_id, approve=approve, remember=remember)
     )
     if text:
         console.print(text)
-    raise typer.Exit(code=0)
+    raise typer.Exit(code=1 if failed else 0)
 
 
 def _run_host_command(command: str, **runtime_kwargs: Any) -> None:
@@ -663,7 +662,7 @@ def _prompt_command(
             )
         transport.start_activity()
         full_message = _compose_prompt_message(full_instruction, payload)
-        if raw:
+        if raw and full_message.strip():
             full_message = f"{_RAW_CONTRACT}\n\n{full_message}"
         runtime = _initialize_runtime_or_exit(
             log_level=log_level,
@@ -705,17 +704,21 @@ def _prompt_command(
         raise typer.Exit(code=_ABORT_EXIT) from None
     finally:
         transport.stop_activity()
+    raise typer.Exit(code=_prompt_exit_code(transport, raw=raw))
+
+
+def _prompt_exit_code(transport: PromptTransport, *, raw: bool) -> int:
+    """Map structured terminal outcomes to the documented process statuses."""
     if transport.approval_unresolved:
-        # The approval request id is durable; the operator must decide it in
-        # an interactive session. Exit non-zero so pipelines never mistake an
-        # un-decided approval for a completed turn.
-        raise typer.Exit(code=_APPROVAL_REQUIRED_EXIT)
+        return _APPROVAL_REQUIRED_EXIT
     if transport.yield_unresolved:
-        # The model ended in a yield (ask-the-operator). The question was
-        # printed to stderr; stdout got nothing. Exit non-zero so pipelines
-        # never mistake the question for the requested artifact.
-        raise typer.Exit(code=_YIELD_UNRESOLVED_EXIT)
-    raise typer.Exit(code=0)
+        return _YIELD_UNRESOLVED_EXIT
+    if transport.turn_failed:
+        return 1
+    if raw and transport.raw_response_missing:
+        Console(stderr=True).print("[red]The turn produced no raw response artifact.[/red]")
+        return 1
+    return 0
 
 
 async def _run_prompt_with_teardown(
@@ -734,7 +737,9 @@ async def _run_prompt_with_teardown(
     the decided prefix (default prefix when no explicit value is given).
 
     Returns the transport so the caller can inspect post-turn state
-    (``approval_unresolved``). The caller starts its activity display before
+    (``approval_unresolved``, ``yield_unresolved``, and ``turn_failed``).
+    A failed pre-armed decision never continues into a model turn. The
+    caller starts its activity display before
     runtime construction and owns cleanup if construction fails.
 
     In raw mode the transport console moves to stderr so the prompt/activity
@@ -768,12 +773,16 @@ async def _run_prompt_with_teardown(
                 # Decision-only run: surface the decision's reply text and
                 # stop — there is no turn to run.
                 decision_text = getattr(result, "text", "") or str(result)
-                transport.stop_activity()
-                await _aclose_runtime_bounded(runtime)
+                transport.set_turn_outcome(is_error=bool(getattr(result, "is_error", False)))
                 await transport.on_response(decision_text)
                 return transport
+            if getattr(result, "is_error", False):
+                transport.turn_failed = True
+                await transport.on_error(getattr(result, "text", "") or "Approval decision failed.")
+                return transport
         if message:
-            await handle_message(runtime, message, transport)
+            result = await handle_message(runtime, message, transport)
+            transport.set_turn_outcome(is_error=bool(getattr(result, "is_error", False)))
     finally:
         transport.stop_activity()
         # Bounded teardown: the prompt command previously awaited bare

@@ -424,6 +424,10 @@ class PromptTransport:
         self.approval_unresolved: bool = False
         self.yield_unresolved: bool = False
         self.yield_question: str = ""
+        #: Structured turn outcome recorded by the command path. Raw mode
+        #: uses the response flag to prevent an empty/failed artifact.
+        self.turn_failed: bool = False
+        self.raw_response_missing: bool = False
         # Pending approval payload captured from ``data["approval"]`` on the
         # final response. When non-None the approval panel just rendered;
         # the command path reads it for exit-code decisions. Cleared on the
@@ -571,6 +575,10 @@ class PromptTransport:
         # into the stall segment when a generation goes quiet (the
         # ``_STALL_AFTER_S`` / ``_STALL_ALERT_S`` thresholds).
         self._last_delta_perf: float = 0.0
+
+    def set_turn_outcome(self, *, is_error: bool) -> None:
+        """Record the structured outcome returned by the host dispatcher."""
+        self.turn_failed = is_error
 
     def start_turn(self, message: str) -> None:
         """Begin prompt-mode rendering: pin the prompt, arm the activity display.
@@ -842,18 +850,29 @@ class PromptTransport:
         if yield_question:
             self._render_yield_question(yield_question, dict(data or {}))
             return
+        self.raw_response_missing = self.raw and not bool(text.strip())
+        if self.turn_failed or self.raw_response_missing:
+            if not self.quiet:
+                if self.raw_response_missing and not self.turn_failed:
+                    self.console.print("[red]The turn produced no raw response artifact.[/red]")
+                self._print_footer()
+            return
         if text:
-            if self.raw:
-                sys.stdout.write(text)
-                if not text.endswith("\n"):
-                    sys.stdout.write("\n")
-                sys.stdout.flush()
-            else:
-                self._render_response_text(text)
+            self._write_response_artifact(text)
         # The footer is activity output: in raw mode it prints on the
         # transport console (stderr) so stdout stays machine-readable.
         if not self.quiet:
             self._print_footer()
+
+    def _write_response_artifact(self, text: str) -> None:
+        """Write a successful, nonempty response to its selected channel."""
+        if self.raw:
+            sys.stdout.write(text)
+            if not text.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            self._render_response_text(text)
 
     def _render_yield_question(self, yield_question: str, data: dict[str, Any]) -> None:
         """Stash + render a model yield (stdout gets nothing).

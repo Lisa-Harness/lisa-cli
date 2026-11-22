@@ -275,8 +275,9 @@ app = typer.Typer(
     help="Run the Lisa framework terminal host.",
     epilog=(
         "Scripting: `lisa prompt --raw 'task'` writes the response verbatim to "
-        "stdout. Exit codes: 0 success · 2 usage/missing input · 3 unresolved "
-        "approval · 4 model asked a question · 130 Ctrl-C."
+        "stdout. Exit codes: 0 success · 1 turn/provider failure · "
+        "2 usage/missing input · 3 unresolved approval · 4 model asked a "
+        "question · 130 Ctrl-C."
     ),
     # Frame locals can carry provider keys and .env values — never print
     # them on an unhandled error (matches the rich.traceback install above).
@@ -302,7 +303,8 @@ _PANEL_APPROVALS = "Approvals"
 _PROMPT_EPILOG = (
     "Scripting contract — [bold]stdout[/bold] carries only the response in "
     "--raw mode; activity goes to stderr. [bold]Exit codes:[/bold] 0 success · "
-    "2 usage or missing input · 3 unresolved approval (id is durable; retry with "
+    "1 turn/provider failure or empty raw artifact · 2 usage or missing input · "
+    "3 unresolved approval (id is durable; retry with "
     "`lisa prompt --approve <id> 'continue'`) · 4 the model asked a question "
     "(printed to stderr; re-run with the answer) · 130 operator Ctrl-C."
 )

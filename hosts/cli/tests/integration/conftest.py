@@ -113,6 +113,11 @@ class RecordingTransport:
         self.model_prices: dict[str, tuple[float, float]] = {}
         self.model_cache_prices: dict[str, tuple[float, float]] = {}
         self.streaming_mode: str = "none"
+        self.turn_failed: bool = False
+        self.raw_response_missing: bool = False
+
+    def set_turn_outcome(self, *, is_error: bool) -> None:
+        self.turn_failed = is_error
 
     def start_turn(self, message: str) -> None:
         self.started_message = message

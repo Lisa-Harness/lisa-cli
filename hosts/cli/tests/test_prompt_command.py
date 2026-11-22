@@ -190,6 +190,16 @@ def test_raw_wraps_stdin_payload_too(tmp_path: Any, monkeypatch: pytest.MonkeyPa
     assert msg.rstrip().endswith("fix it")
 
 
+def test_raw_without_user_input_exits_2_without_model_call(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw contract is never fabricated into a prompt by itself."""
+    captured: dict[str, Any] = {}
+    result = _invoke_prompt(monkeypatch, tmp_path, ["-r"], captured=captured)
+    assert result == 2
+    assert "message" not in captured
+
+
 def test_raw_transport_gets_stderr_console(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """In raw mode the transport console is NOT the shared console; else it is."""
     from hosts.cli.transport import PromptTransport as _OT
@@ -209,6 +219,102 @@ def test_raw_transport_gets_stderr_console(tmp_path: Any, monkeypatch: pytest.Mo
     created.clear()
     _invoke_prompt(monkeypatch, tmp_path, ["no raw"], captured=captured)
     assert created["console"] is captured["console"]
+
+
+# ── Turn failure and raw-artifact fail-fast ─────────────────────────
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_turn_error_exits_1_in_normal_and_quiet_modes(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    quiet: bool,
+) -> None:
+    """A typed runtime failure never returns a successful process status."""
+    from runtime.types import HostCommandResult
+
+    runtime = _make_runtime(tmp_path)
+    text = "Turn failed: provider authentication failed"
+
+    async def _fake_handle_message(_runtime, _message, transport):
+        await transport.on_error(text)
+        return HostCommandResult(text=text, is_error=True)
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: runtime)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    argv = ["prompt", *(["--quiet"] if quiet else []), "hello"]
+    output = Console(record=True, file=io.StringIO(), width=120)
+    with patch.object(cli_main, "console", new=output):
+        result = cli_main.app(args=argv, standalone_mode=False)
+    assert result == 1
+    assert "provider authentication failed" in output.export_text()
+
+
+def test_raw_turn_error_exits_1_and_emits_no_stdout_artifact(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Raw stdout carries only successful artifacts, never failure prose."""
+    from runtime.types import HostCommandResult
+
+    runtime = _make_runtime(tmp_path)
+    text = "Turn failed: provider authentication failed"
+
+    async def _fake_handle_message(_runtime, _message, transport):
+        await transport.on_error(text)
+        return HostCommandResult(text=text, is_error=True)
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: runtime)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        result = cli_main.app(args=["prompt", "--raw", "hello"], standalone_mode=False)
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert "provider authentication failed" in captured.err
+
+
+@pytest.mark.parametrize("text", ["", "  \n\t"])
+def test_empty_raw_response_exits_1_without_artifact(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+) -> None:
+    """An empty raw response is a failed turn, not a successful empty file."""
+    from runtime.types import HostCommandResult
+
+    runtime = _make_runtime(tmp_path)
+
+    async def _fake_handle_message(_runtime, _message, transport):
+        await transport.on_response(text)
+        return HostCommandResult(text=text)
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: runtime)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "handle_message", _fake_handle_message)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        result = cli_main.app(args=["prompt", "--raw", "hello"], standalone_mode=False)
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert "no raw response artifact" in captured.err
 
 
 # ── Yield fail-fast ───────────────────────────────────────────────
@@ -386,6 +492,21 @@ async def test_prompt_transport_raw_writes_verbatim_stdout(
     assert "⚡" in captured.err
     # No markdown re-render artifacts.
     assert "─" not in captured.out
+
+
+@pytest.mark.asyncio
+async def test_raw_failed_response_never_writes_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A structured failure suppresses raw response text at the transport."""
+    transport = PromptTransport(
+        console=Console(stderr=True, force_terminal=False, width=120), raw=True
+    )
+    transport.set_turn_outcome(is_error=True)
+    await transport.on_response("Turn failed: unavailable")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert transport.turn_failed is True
 
 
 def test_ctrl_c_abort_prints_notice_and_exits_130(

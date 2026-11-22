@@ -27,6 +27,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import typer
 from rich.console import Console
 
 from hosts.cli import main as cli_main
@@ -264,6 +265,40 @@ def test_top_level_bare_approve_targets_single_pending(
     assert captured["decisions"] == [("", True, "")]
 
 
+def test_top_level_decision_failure_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typed standalone decision failure must not return success."""
+    from hosts.cli import main as cli_main
+
+    async def _failed_decision(*_args, **_kwargs):
+        return ("approval request not found", True)
+
+    monkeypatch.setattr(cli_main, "_decide_approval_turn", _failed_decision)
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: object())
+    with (
+        patch.object(cli_main, "console", new=Console(quiet=True)),
+        pytest.raises(typer.Exit) as exc_info,
+    ):
+        cli_main._run_decision(  # typer command kwargs mirror production
+            "missing",
+            approve=True,
+            remember="",
+            log_level="",
+            log_path="",
+            no_log=False,
+            data_dir="",
+            profile="",
+            overlays_dir="",
+            thread_dir="",
+            no_thread=False,
+            session_context="",
+            timezone="",
+            state_snapshot_path="",
+            streaming="",
+            host_log_path="",
+        )
+    assert exc_info.value.exit_code == 1
+
+
 def test_top_level_deny_dispatches_typed_decision_without_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -401,6 +436,54 @@ def test_prearm_decision_only_no_message_is_valid(
     assert _exit_code(result) == 0
     assert captured["decisions"] == [("abc123def456", True)]
     assert captured.get("messages", []) == []
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_raw_prearm_decision_only_never_starts_model_turn(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, raw: bool
+) -> None:
+    """Raw instructions never turn a decision-only invocation into a turn."""
+    captured: dict[str, Any] = {}
+    result = _invoke_prompt(
+        monkeypatch,
+        tmp_path,
+        ["--approve", "abc123def456", *(["--raw"] if raw else [])],
+        captured=captured,
+    )
+    assert _exit_code(result) == 0
+    assert captured["decisions"] == [("abc123def456", True)]
+    assert captured.get("messages", []) == []
+
+
+def test_failed_prearm_decision_exits_1_and_skips_model_turn(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed approval cannot authorize continuation into a model turn."""
+    from runtime.types import HostCommandResult
+
+    runtime = _make_runtime(tmp_path)
+    calls: list[str] = []
+
+    async def _failed_decision(*_args, **_kwargs):
+        return HostCommandResult(text="approval request not found", is_error=True)
+
+    async def _unexpected_turn(_runtime, message, _transport):
+        calls.append(message)
+
+    monkeypatch.setattr(cli_main, "_initialize_runtime_or_exit", lambda **_kwargs: runtime)
+    import runtime.handle_message as hm_module
+
+    monkeypatch.setattr(hm_module, "decide_pending_approval", _failed_decision)
+    monkeypatch.setattr(hm_module, "handle_message", _unexpected_turn)
+    stdin_obj: Any = io.StringIO()
+    stdin_obj.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(sys, "stdin", stdin_obj)
+    with patch.object(cli_main, "console", new=Console(quiet=True)):
+        result = cli_main.app(
+            args=["prompt", "--approve", "missing", "continue"], standalone_mode=False
+        )
+    assert _exit_code(result) == 1
+    assert calls == []
 
 
 def test_no_message_no_stdin_no_decision_still_exits_2(
