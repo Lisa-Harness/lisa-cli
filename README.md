@@ -106,6 +106,13 @@ back only as the starter session re-requests them.
 re-runs model discovery and rewrites the starter session. Use it alone to
 regenerate configuration, or with `--clean` for a full teardown.
 
+Both installers copy the canonical [`config/session_context.md`](config/session_context.md)
+when creating a new starter session, including its execution budgets. Existing
+session files are preserved. Installation fails if the installed CLI cannot
+launch, model discovery/apply does not produce a nonempty active manifest, or
+final `lisa verify` fails. `--no-verify` skips only the final diagnostic pass;
+it does not suppress model-bootstrap failures.
+
 ### Or install with uv
 
 1. Install via `uv`

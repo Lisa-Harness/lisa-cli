@@ -182,6 +182,8 @@ LISA_REPO_URL="https://github.com/Lisa-Harness/lisa.git"
 LISA_HOME="${LISA_DATA_DIR:-$HOME/.lisa}"
 ENV_TEMPLATE_URL="https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/.env.example"
 ENV_TEMPLATE_TEMP=""
+SESSION_TEMPLATE_URL="https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/config/session_context.md"
+SESSION_TEMPLATE_TEMP=""
 
 # Provider metadata: labels used by the install guidance.
 # The CLI host reads LISA_* with fallbacks to bare OPENAI_API_KEY /
@@ -449,6 +451,33 @@ cleanup_env_template() {
 cleanup_install_temps() {
     cleanup_env_template
     cleanup_version_helper
+    if [[ -n "$SESSION_TEMPLATE_TEMP" && "$SESSION_TEMPLATE_TEMP" == "${TMPDIR:-/tmp}"/lisa-session.* ]]; then
+        rm -f -- "$SESSION_TEMPLATE_TEMP"
+    fi
+    SESSION_TEMPLATE_TEMP=""
+}
+
+acquire_session_template() {
+    local candidate=""
+    if [[ -n "$INSTALLER_DIR" && -f "$INSTALLER_DIR/config/session_context.md" ]]; then
+        candidate="$INSTALLER_DIR/config/session_context.md"
+    fi
+    if [[ -n "$candidate" ]]; then
+        SESSION_TEMPLATE_TEMP="$candidate"
+        return 0
+    fi
+    SESSION_TEMPLATE_TEMP="$(mktemp "${TMPDIR:-/tmp}/lisa-session.XXXXXXXX")"
+    if ! curl -fsSL "$SESSION_TEMPLATE_URL" -o "$SESSION_TEMPLATE_TEMP"; then
+        rm -f -- "$SESSION_TEMPLATE_TEMP"
+        SESSION_TEMPLATE_TEMP=""
+        return 1
+    fi
+    [[ -s "$SESSION_TEMPLATE_TEMP" ]] || {
+        rm -f -- "$SESSION_TEMPLATE_TEMP"
+        SESSION_TEMPLATE_TEMP=""
+        return 1
+    }
+    return 0
 }
 
 env_template_value() {
@@ -576,73 +605,25 @@ generate_env_file() {
 }
 
 generate_session_context() {
-    # Seed a minimal-but-useful starter session (personal DM, memory
-    # capability, web search, personas, markdown operations). The required
-    # external packs auto-install from GitHub on first use. An existing
-    # file is preserved — this is a first-run convenience, not a policy
-    # override.
+    # Copy the canonical starter session. Existing user-authored context is
+    # preserved; a missing or empty template is a hard installation failure.
     local ctx="$LISA_HOME/config/session_context.md"
     if [[ -f "$ctx" ]]; then
         printf "  %s already exists — preserved\n" "$ctx"
         return 0
     fi
     mkdir -p "$LISA_HOME/config"
-    cat > "$ctx" <<'SESSION_CONTEXT'
----
-schema_version: 2
-name: my-session
-surface:
-  type: personal_dm
-  id: host-console
-  memory_scope: personal
-resources:
-  packs:
-    configuration: {}
-    required:
-      - lisa-pack-markdown
-      - lisa-pack-personas
-    # - lisa-pack-tavily
-# Web search requires a web search provider pack, e.g., lisa-pack-tavily.
-# Add one above then designate it as the web_search tool below.
-# Then remove the hint from the bottom of the text below that.
-providers:
-  capabilities:
-    memory: lisa-pack-memory
-# tools: { web_search: lisa-pack-tavily }
-routing: { from: { pack: lisa-pack-core, session: default } }
-execution:
-  max_model_calls: 24
-  max_capability_calls: 24
-  max_total_tokens: 250000
-  max_completion_tokens: 24000
-  max_wall_ms: 300000
-  max_session_tokens: 5000000
-  scopes:
-    "lisa-pack-personas:researcher":
-      max_model_calls: 8
-      max_capability_calls: 8
-      max_total_tokens: 120000
-      max_completion_tokens: 12000
-      max_wall_ms: 180000
----
-# My Session
-
-The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
-However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
-The user should be reminded to remove this text once they have installed a web search provider pack.
-SESSION_CONTEXT
+    acquire_session_template || error_exit "Could not obtain $SESSION_TEMPLATE_URL for $ctx"
+    cp -- "$SESSION_TEMPLATE_TEMP" "$ctx"
     printf "  Created %s (starter: memory, web search, personas, markdown)\n" "$ctx"
 }
 
+
 bootstrap_models() {
-    # First-run model bootstrap: discover what the configured providers can
-    # see (writes state/models.proposed.yaml), then promote it to the active
-    # config/models.yaml. Graceful at every step:
-    #   - reinstall: an existing active manifest skips the bootstrap
-    #   - no provider reachable: discover writes no proposal — print the
-    #     recovery commands instead of failing
-    #   - stale proposal from an earlier run: --force re-discovers so a
-    #     re-run after pulling models actually picks them up
+    # First-run model bootstrap: discover providers, promote the proposal,
+    # and require a nonempty active manifest. An existing active manifest is
+    # preserved and checked by the final verification pass. Discovery/apply
+    # failures are fatal: a partial installation must not report success.
     local active="$LISA_HOME/config/models.yaml"
     local proposal="$LISA_HOME/state/models.proposed.yaml"
     local count
@@ -654,23 +635,17 @@ bootstrap_models() {
     fi
 
     printf "  Discovering models from configured provider(s)...\n"
-    lisa models discover --force || true
+    lisa models discover --force || error_exit "Model discovery failed. Configure provider credentials/endpoints, then rerun: lisa models discover --force && lisa models apply"
 
     if [[ ! -f "$proposal" ]]; then
-        printf "  No models discovered yet (no provider reachable or configured).\n"
-        printf "  After installing Ollama models or filling in your API keys, run:\n"
-        printf "    lisa models discover --force && lisa models apply\n"
-        printf "  (lisa verify will flag the missing manifest until then — expected.)\n"
-        return 0
+        error_exit "No models were discovered. Configure provider credentials/endpoints, then run: lisa models discover --force && lisa models apply"
     fi
 
     printf "  Promoting discovered models to active manifest...\n"
-    if ! lisa models apply; then
-        printf "  WARN: models apply did not complete; run manually:\n"
-        printf "    lisa models apply\n"
-        return 0
-    fi
+    lisa models apply || error_exit "Model apply failed; fix the proposal and run: lisa models apply"
+    [[ -f "$active" ]] || error_exit "Model apply completed without creating $active"
     count=$(grep -c 'model_id:' "$active" 2>/dev/null || true)
+    [[ "${count:-0}" -gt 0 ]] || error_exit "Active model manifest $active contains no models"
     printf "  OK: %s ready (%s model(s))\n" "$active" "${count:-0}"
 }
 
@@ -778,7 +753,9 @@ main() {
     step "$s" "$total" "Installing lisa CLI (uv tool, source: $SOURCE)..."
     install_lisa
     local lisa_version
-    lisa_version=$(lisa --version 2>/dev/null | tail -1 || echo "installed")
+    if ! lisa_version=$(lisa --version 2>&1); then
+        error_exit "The installed lisa executable failed to launch: $lisa_version"
+    fi
     printf "  OK: %s\n" "$lisa_version"
 
     s=$((s + 1))
@@ -797,7 +774,7 @@ main() {
     if ! $SKIP_DIAGNOSTICS; then
         step "$s" "$total" "Running diagnostics..."
         printf "\n"
-        lisa verify || true
+        lisa verify || error_exit "lisa verify failed; resolve the reported configuration errors and rerun"
         printf "\n"
     else
         step "$s" "$total" "Done."

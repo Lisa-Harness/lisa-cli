@@ -28,7 +28,20 @@ def _wheel(directory: Path, name: str, version: str) -> Path:
             f"Requires-Dist: {member}>=0.5.2\n" for member, _ in update.FRAMEWORK_MEMBERS
         )
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(f"{normalized}.py", "def main():\n    print('fixture')\n")
+        archive.writestr(
+            f"{normalized}.py",
+            "import os\n"
+            "from pathlib import Path\n"
+            "def main():\n"
+            "    print('fixture')\n"
+            "    data = Path(os.environ['LISA_DATA_DIR'])\n"
+            "    manifest = 'version: 1\\nmode_models: {default: fixture}\\n"
+            "models:\\n  - model_id: fixture\\n    provider: ollama\\n'\n"
+            "    (data / 'state').mkdir(parents=True, exist_ok=True)\n"
+            "    (data / 'config').mkdir(parents=True, exist_ok=True)\n"
+            "    (data / 'state/models.proposed.yaml').write_text(manifest)\n"
+            "    (data / 'config/models.yaml').write_text(manifest)\n",
+        )
         archive.writestr(f"{dist}/METADATA", metadata + "\n")
         archive.writestr(
             f"{dist}/WHEEL",

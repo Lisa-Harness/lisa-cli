@@ -133,6 +133,85 @@ Remove-Item -LiteralPath ("Function:\Invoke-WebRequest") -ErrorAction SilentlyCo
 [Environment]::SetEnvironmentVariable("LISA_OPENAI_API_KEY", $null)
 Remove-Item -LiteralPath $envSandbox -Recurse -Force -ErrorAction SilentlyContinue
 
+# Canonical starter session is copied exactly and existing files survive.
+$script:InstallerDir = $repoRoot
+$script:LisaHome = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-session-test-" + [guid]::NewGuid().ToString("N"))
+New-LisaSessionContext
+$expectedSession = [System.IO.File]::ReadAllText((Join-Path $repoRoot "config\session_context.md"))
+$actualSession = [System.IO.File]::ReadAllText((Join-Path $script:LisaHome "config\session_context.md"))
+Assert-True ($expectedSession -eq $actualSession) "PowerShell did not copy the canonical starter session"
+Assert-True ($actualSession.Contains("execution:")) "Canonical session lost execution budgets"
+[System.IO.File]::WriteAllText((Join-Path $script:LisaHome "config\session_context.md"), "custom user context`n")
+New-LisaSessionContext
+$preservedSession = [System.IO.File]::ReadAllText((Join-Path $script:LisaHome "config\session_context.md"))
+Assert-True ($preservedSession -eq "custom user context`n") "Existing session context was overwritten"
+Remove-Item -LiteralPath $script:LisaHome -Recurse -Force -ErrorAction SilentlyContinue
+
+# Model discovery/apply failures are transactional.
+$script:LisaHome = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-model-test-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path (Join-Path $script:LisaHome "state") | Out-Null
+function global:lisa { $global:LASTEXITCODE = 1; return 1 }
+$discoveryFailed = $false
+try { Update-LisaModelManifest } catch { $discoveryFailed = $true }
+Assert-True $discoveryFailed "Model discovery failure must fail installation"
+Remove-Item -LiteralPath ("Function:\lisa") -ErrorAction SilentlyContinue
+function global:lisa {
+    $global:LASTEXITCODE = if ($args[1] -eq "apply") { 1 } else { 0 }
+    return $global:LASTEXITCODE
+}
+Set-Content -LiteralPath (Join-Path $script:LisaHome "state\models.proposed.yaml") -Value "proposal"
+$applyFailed = $false
+try { Update-LisaModelManifest } catch { $applyFailed = $true }
+Assert-True $applyFailed "Model apply failure must fail installation"
+Remove-Item -LiteralPath ("Function:\lisa") -ErrorAction SilentlyContinue
+function global:lisa { $global:LASTEXITCODE = 0; return 0 }
+$missingActiveFailed = $false
+try { Update-LisaModelManifest } catch { $missingActiveFailed = $true }
+Assert-True $missingActiveFailed "Apply without an active manifest must fail installation"
+Remove-Item -LiteralPath ("Function:\lisa") -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $script:LisaHome -Recurse -Force -ErrorAction SilentlyContinue
+
+# Top-level orchestration: failed verification prevents the success banner,
+# while skipped diagnostics still require model discovery to succeed.
+function global:Install-UvIfMissing {}
+function global:Install-LisaTool {}
+function global:New-LisaEnvFile {}
+function global:New-LisaSessionContext {}
+function global:Write-PostInstallGuidance { Write-Host "UNEXPECTED SUCCESS" }
+function global:uv { $global:LASTEXITCODE = 0; return "uv 0.0.0" }
+function global:lisa {
+    if ($args[0] -eq "--version") { $global:LASTEXITCODE = 0; return "lisa v0.5.0" }
+    if ($args[0] -eq "verify") { $global:LASTEXITCODE = 1; return 1 }
+    $global:LASTEXITCODE = 0
+    return 0
+}
+function global:Invoke-Native {
+    param([string]$FilePath, [string[]]$ArgumentList)
+    if ($ArgumentList[1] -eq "discover") {
+        New-Item -ItemType Directory -Force -Path (Join-Path $script:LisaHome "state") | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:LisaHome "state\models.proposed.yaml") -Value "proposal"
+        return 0
+    }
+    if ($ArgumentList[1] -eq "apply") {
+        New-Item -ItemType Directory -Force -Path (Join-Path $script:LisaHome "config") | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:LisaHome "config\models.yaml") -Value "model_id: test"
+        return 0
+    }
+    if ($ArgumentList[0] -eq "verify") { return 1 }
+    return 0
+}
+$script:LisaHome = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-main-test-" + [guid]::NewGuid().ToString("N"))
+$SkipDiagnostics = $false
+$verifyFailed = $false
+try { Install-LisaHarness } catch { $verifyFailed = $true }
+Assert-True $verifyFailed "Final verification failure must fail installation"
+$SkipDiagnostics = $true
+function global:Update-LisaModelManifest { throw "simulated model bootstrap failure" }
+$bootstrapFailed = $false
+try { Install-LisaHarness } catch { $bootstrapFailed = $true }
+Assert-True $bootstrapFailed "SkipDiagnostics must not suppress model bootstrap failure"
+Remove-Item -LiteralPath $script:LisaHome -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Output "PowerShell installer tests passed"
 
 # -Clean / -Reset: run against a throwaway data dir with uv stubbed so no real

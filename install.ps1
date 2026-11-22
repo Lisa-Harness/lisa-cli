@@ -216,6 +216,8 @@ $script:VersionHelper = ""
 $script:VersionHelperTemporary = ""
 $script:EnvTemplateTemporary = ""
 $script:EnvTemplateUrl = "https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/.env.example"
+$script:SessionTemplateUrl = "https://raw.githubusercontent.com/Lisa-Harness/lisa-cli/main/config/session_context.md"
+$script:SessionTemplateTemporary = ""
 
 function Set-LisaVersionSelections {
     <#
@@ -835,78 +837,76 @@ function New-LisaEnvFile {
     }
 }
 
+function Get-LisaSessionTemplate {
+    <#
+    .SYNOPSIS
+        Locate or download the canonical starter session template.
+    #>
+    [CmdletBinding()]
+    param()
+    Set-StrictMode -Version Latest
+
+    if ($script:InstallerDir) {
+        $candidate = Join-Path $script:InstallerDir "config\session_context.md"
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    $script:SessionTemplateTemporary = Join-Path ([System.IO.Path]::GetTempPath()) ("lisa-session-" + [guid]::NewGuid().ToString("N") + ".md")
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $script:SessionTemplateUrl -OutFile $script:SessionTemplateTemporary -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $script:SessionTemplateTemporary)) {
+            throw "download produced no session template"
+        }
+        if ((Get-Item -LiteralPath $script:SessionTemplateTemporary).Length -eq 0) {
+            throw "downloaded session template is empty"
+        }
+        return $script:SessionTemplateTemporary
+    }
+    catch {
+        Remove-Item -LiteralPath $script:SessionTemplateTemporary -Force -ErrorAction SilentlyContinue
+        $script:SessionTemplateTemporary = ""
+        throw "Could not download $($script:SessionTemplateUrl): $($_.Exception.Message)"
+    }
+}
+
 function New-LisaSessionContext {
     <#
     .SYNOPSIS
-        Seed a minimal-but-useful starter session context. Existing files are
-        preserved - this is a first-run convenience, not a policy override.
+        Copy the canonical starter session. Existing user files are preserved.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
         Justification = 'Installer UX is deliberately host-colored output.')]
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
-        Justification = 'Creates one session context file; plural is a legacy artifact.')]
     param()
     Set-StrictMode -Version Latest
 
     $configDir = Join-Path $script:LisaHome "config"
     $ctxFile = Join-Path $configDir "session_context.md"
-    if (Test-Path $ctxFile) {
+    if (Test-Path -LiteralPath $ctxFile) {
         Write-Host "  $ctxFile already exists - preserved" -ForegroundColor Yellow
         return
     }
-
-    if (-not (Test-Path $configDir)) {
+    if (-not (Test-Path -LiteralPath $configDir)) {
         New-Item -ItemType Directory -Path $configDir -Force | Out-Null
     }
-
-    # The required external packs auto-install from GitHub on first use.
-    $content = @'
----
-schema_version: 2
-name: my-session
-surface:
-  type: personal_dm
-  id: host-console
-  memory_scope: personal
-resources:
-  packs:
-    configuration: {}
-    required:
-      - lisa-pack-markdown
-      - lisa-pack-personas
-    # - lisa-pack-tavily
-# Web search requires a web search provider pack, e.g., lisa-pack-tavily
-# Add one above then designate it as the web_search tool below
-providers:
-  capabilities:
-    memory: lisa-pack-memory
-# tools: { web_search: lisa-pack-tavily }
-routing: { from: { pack: lisa-pack-core, session: default } }
----
-# My Session
-
-The user is running you via the CLI host at github.com/Lisa-Harness/lisa-cli.
-However they have not yet installed any web search provider packs (e.g., lisa-pack-tavily).
-The user should be reminded to remove this text once they have installed a web search provider pack.
-'@
+    $template = Get-LisaSessionTemplate
     if ($PSCmdlet.ShouldProcess($ctxFile, "Seed starter session context")) {
-        # UTF8 without BOM on PS5.1 (Set-Content -Encoding UTF8 emits a BOM
-        # there, and the kernel front-matter parser does not strip one).
+        # Preserve exact bytes and avoid a BOM on Windows PowerShell 5.1.
+        $content = [System.IO.File]::ReadAllText($template)
         [System.IO.File]::WriteAllText($ctxFile, $content, [System.Text.UTF8Encoding]::new($false))
         Write-Host "  Created $ctxFile (starter: memory, web search, personas, markdown)" -ForegroundColor Green
     }
 }
 
+
 function Update-LisaModelManifest {
     <#
     .SYNOPSIS
-        First-run model bootstrap: discover what providers can see (writes
-        state\models.proposed.yaml), then promote it to the active
-        config\models.yaml. Graceful at every step: reinstall (existing
-        active manifest skips), no provider reachable (print recovery
-        commands), stale proposal (--force re-discovers so a re-run after
-        pulling models actually picks them up). Non-fatal throughout.
+        First-run model bootstrap: discover providers, promote the proposal,
+        and require a nonempty active manifest. Existing active manifests are
+        preserved and checked by final verification. Discovery/apply failures
+        are fatal so a partial installation never reports success.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
@@ -923,39 +923,36 @@ function Update-LisaModelManifest {
     $proposalFile = Join-Path $lisaHome "state\models.proposed.yaml"
 
     if (Test-Path $activeFile) {
-        $count = (Select-String -LiteralPath $activeFile -Pattern "model_id:" -AllMatches -ErrorAction SilentlyContinue).Count
+        $count = @([System.IO.File]::ReadAllLines($activeFile) | Where-Object { $_ -match "model_id:" } | Measure-Object).Count
         Write-Host "  Existing $activeFile ($count model(s)) - skipping model bootstrap" -ForegroundColor Yellow
         return
     }
 
     Write-Verbose "Discovering models from configured provider(s)"
-    if (Get-Command lisa -ErrorAction SilentlyContinue) {
-        # Best-effort: never fail the install on a discovery hiccup, and don't
-        # leak its exit code to callers. --force overwrites a stale proposal
-        # from an earlier run so re-runs actually re-discover.
-        $null = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "discover", "--force")
+    if (-not (Get-Command lisa -ErrorAction SilentlyContinue)) {
+        throw "lisa is not on PATH; cannot discover models"
     }
-    else {
-        Write-Verbose "lisa not on PATH; skipping discover"
+    $exitCode = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "discover", "--force")
+    if ($exitCode -ne 0) {
+        throw "Model discovery failed (exit $exitCode). Configure provider credentials/endpoints, then rerun: lisa models discover --force; lisa models apply"
     }
-
-    if (-not (Test-Path $proposalFile)) {
-        Write-Host "  No models discovered yet (no provider reachable or configured)." -ForegroundColor Yellow
-        Write-Host "  After installing Ollama models or filling in your API keys, run:"
-        Write-Host "    lisa models discover --force; lisa models apply"
-        Write-Host "  (lisa verify will flag the missing manifest until then - expected.)"
-        return
+    if (-not (Test-Path -LiteralPath $proposalFile)) {
+        throw "No models were discovered. Configure provider credentials/endpoints, then run: lisa models discover --force; lisa models apply"
     }
 
     Write-Verbose "Promoting discovered models to active manifest"
-    $null = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "apply")
-    if (Test-Path $activeFile) {
-        $count = (Select-String -LiteralPath $activeFile -Pattern "model_id:" -AllMatches -ErrorAction SilentlyContinue).Count
-        Write-Host "  OK: $activeFile ready ($count model(s))" -ForegroundColor Green
+    $exitCode = Invoke-Native -FilePath "lisa" -ArgumentList @("models", "apply")
+    if ($exitCode -ne 0) {
+        throw "Model apply failed (exit $exitCode); fix the proposal and run: lisa models apply"
     }
-    else {
-        Write-Warning "models apply did not complete; run manually: lisa models apply"
+    if (-not (Test-Path -LiteralPath $activeFile)) {
+        throw "Model apply completed without creating $activeFile"
     }
+    $count = @([System.IO.File]::ReadAllLines($activeFile) | Where-Object { $_ -match "model_id:" } | Measure-Object).Count
+    if ($count -lt 1) {
+        throw "Active model manifest $activeFile contains no models"
+    }
+    Write-Host "  OK: $activeFile ready ($count model(s))" -ForegroundColor Green
 }
 
 function Write-PostInstallGuidance {
@@ -1074,7 +1071,10 @@ function Install-LisaHarness {
     if (-not $lisaCmd) {
         throw "lisa was installed but is not on PATH. Add $(Join-Path $HOME ".local\bin") to your PATH, then reopen your shell."
     }
-    $lisaVersion = (& lisa --version 2>$null | Select-Object -Last 1)
+    $lisaVersion = (& lisa --version 2>&1 | Select-Object -Last 1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "The installed lisa executable failed to launch (exit $LASTEXITCODE): $lisaVersion"
+    }
     Write-Host "  OK: $lisaVersion" -ForegroundColor Green
 
     $stepNo++
@@ -1093,7 +1093,10 @@ function Install-LisaHarness {
     if (-not $SkipDiagnostics) {
         Write-Step -Step $stepNo -Total $total -Message "Running diagnostics..."
         Write-Host ""
-        $null = Invoke-Native -FilePath "lisa" -ArgumentList @("verify")
+        $verifyExit = Invoke-Native -FilePath "lisa" -ArgumentList @("verify")
+        if ($verifyExit -ne 0) {
+            throw "lisa verify failed (exit $verifyExit); resolve the reported configuration errors and rerun"
+        }
         Write-Host ""
     }
     else {
@@ -1136,6 +1139,9 @@ if ($script:ShouldInstall) {
         }
         if ($script:EnvTemplateTemporary) {
             Remove-Item -LiteralPath $script:EnvTemplateTemporary -Force -ErrorAction Continue
+        }
+        if ($script:SessionTemplateTemporary) {
+            Remove-Item -LiteralPath $script:SessionTemplateTemporary -Force -ErrorAction Continue
         }
     }
 }

@@ -8,7 +8,7 @@ bash -n "$repo_root/install.sh"
 source <(sed -n '/^install_lisa() {$/,/^}$/p' "$repo_root/install.sh")
 error_exit() { printf '%s\n' "$1" >&2; exit 1; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-for helper in run_version_helper packs_venv_path remove_path clean_install_state reset_seeded_state; do
+for helper in run_version_helper packs_venv_path remove_path clean_install_state reset_seeded_state acquire_session_template cleanup_install_temps generate_session_context bootstrap_models; do
     source <(sed -n "/^${helper}() {\$/,/^}\$/p" "$repo_root/install.sh")
 done
 for helper in acquire_env_template cleanup_env_template env_template_value env_template_key_from_line existing_env_has_key create_env_template_file merge_env_template generate_env_file; do
@@ -215,5 +215,95 @@ generate_env_file >/dev/null
 grep -q '^CUSTOM_SETTING=keep$' "$LISA_HOME/.env" ||
     error_exit "Existing env file was changed after template download failure"
 unset -f curl
+
+# Canonical starter session is copied exactly and existing files survive.
+INSTALLER_DIR="$repo_root"
+LISA_HOME="$sandbox/session/.lisa"
+generate_session_context
+cmp "$repo_root/config/session_context.md" "$LISA_HOME/config/session_context.md" ||
+    error_exit "Bash did not copy the canonical starter session"
+grep -q '^execution:$' "$LISA_HOME/config/session_context.md" ||
+    error_exit "Canonical starter session lost execution budgets"
+printf 'custom user context\n' > "$LISA_HOME/config/session_context.md"
+generate_session_context
+grep -q '^custom user context$' "$LISA_HOME/config/session_context.md" ||
+    error_exit "Existing session context was overwritten"
+
+# Model bootstrap failures are transactional, never successful no-ops.
+LISA_HOME="$sandbox/models/.lisa"
+mkdir -p "$LISA_HOME/state"
+lisa() { return 1; }
+if (bootstrap_models >/dev/null 2>&1); then
+    error_exit "Model discovery failure must fail installation"
+fi
+unset -f lisa
+
+lisa() {
+    [[ "$1 $2" == "models discover" ]] && return 0
+    [[ "$1 $2" == "models apply" ]] && return 1
+    return 2
+}
+: > "$LISA_HOME/state/models.proposed.yaml"
+if (bootstrap_models >/dev/null 2>&1); then
+    error_exit "Model apply failure must fail installation"
+fi
+unset -f lisa
+
+lisa() {
+    [[ "$1 $2" == "models discover" ]] && return 0
+    [[ "$1 $2" == "models apply" ]] && return 0
+    return 2
+}
+if (bootstrap_models >/dev/null 2>&1); then
+    error_exit "Apply without an active manifest must fail installation"
+fi
+unset -f lisa
+
+# Top-level orchestration: verify failures cannot print success, and skipping
+# diagnostics does not suppress model bootstrap failures.
+source <(sed -n '/^main() {$/,/^}$/p' "$repo_root/install.sh")
+source <(sed -n '/^post_install_guidance() {$/,/^}$/p' "$repo_root/install.sh")
+cleanup_install_temps() { :; }
+install_uv() { :; }
+install_lisa() { :; }
+generate_env_file() { :; }
+generate_session_context() { :; }
+post_install_guidance() { printf 'UNEXPECTED SUCCESS\n'; }
+uv() { printf 'uv 0.0.0\n'; }
+lisa() {
+    if [[ "$1" == --version ]]; then printf 'lisa v0.5.0\n'; return 0; fi
+    if [[ "$1 $2" == "models discover" ]]; then
+        printf 'model_id: test\n' > "$LISA_HOME/state/models.proposed.yaml"
+        return 0
+    fi
+    if [[ "$1 $2" == "models apply" ]]; then
+        mkdir -p "$LISA_HOME/config"
+        printf 'model_id: test\n' > "$LISA_HOME/config/models.yaml"
+        return 0
+    fi
+    if [[ "$1" == verify ]]; then return 1; fi
+    return 2
+}
+SOURCE=pypi
+CLI_MODE=keep
+FRAMEWORK_MODE=keep
+DO_CLEAN=false
+DO_RESET=false
+SKIP_DIAGNOSTICS=false
+LISA_HOME="$sandbox/main/.lisa"
+mkdir -p "$LISA_HOME/state"
+if (main > "$sandbox/main-output" 2>&1); then
+    error_exit "Final verification failure must fail installation"
+fi
+grep -q 'UNEXPECTED SUCCESS' "$sandbox/main-output" &&
+    error_exit "Success banner printed after verification failure"
+unset -f lisa
+
+SKIP_DIAGNOSTICS=true
+lisa() { return 1; }
+if (main >/dev/null 2>&1); then
+    error_exit "--no-verify must not suppress model discovery failure"
+fi
+unset -f lisa
 
 printf 'Bash installer tests passed\n'
