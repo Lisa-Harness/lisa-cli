@@ -256,7 +256,7 @@ def test_every_deferral_carries_a_reason_clause() -> None:
     )
     for needle, reason in (
         ("from runtime.paths import", "runtime.paths"),
-        ("from runtime.config import default_data_dir", "runtime.config"),
+        ("from hosts.cli.bootstrap import _resolve_data_dir", "data-dir resolution"),
         ("from hosts.cli.render import", "render"),
         ("from rich.traceback import install", "crash rendering"),
     ):

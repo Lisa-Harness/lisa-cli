@@ -12,9 +12,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# session. The framework functions remain the resolution authority for
-# every command that builds a runtime; the local mirrors below
-# re-implement only the import-free env contract ``default_data_dir``,
+# The framework functions remain the resolution authority for every command
+# that builds a runtime. The local mirrors below re-implement only the
+# import-free env contract ``default_data_dir``,
 # ``profile_data_dir``, and ``framework_root`` document, and
 # ``tests/test_startup_deferred_imports.py`` locks the mirror to the
 # framework's own functions so drift fails CI.
@@ -61,6 +61,29 @@ def _mirror_profile_data_dir(profile: str) -> Path:
     if override:
         return (Path(override).expanduser() / name).resolve()
     return (_mirror_default_data_dir() / "profiles" / name).resolve()
+
+
+def _resolve_data_dir(data_dir: str | Path = "", profile: str = "") -> Path:
+    """Resolve one effective data dir without importing the framework.
+
+    Precedence is explicit CLI data dir > explicit CLI profile >
+    ``LISA_DATA_DIR`` > ``LISA_PROFILE`` > ``~/.lisa``. Use this for every
+    CLI-owned artifact as well as runtime construction so history, hints,
+    intake state, models, policy, and approvals cannot land in different
+    profiles within one invocation.
+    """
+    override = str(data_dir).strip()
+    if override:
+        return Path(override).expanduser()
+    name = profile.strip()
+    if not name:
+        override = os.getenv("LISA_DATA_DIR", "").strip()
+        if override:
+            return Path(override).expanduser()
+        name = os.getenv("LISA_PROFILE", "").strip()
+    if name:
+        return _mirror_profile_data_dir(name)
+    return _mirror_default_data_dir()
 
 
 def _mirror_framework_root() -> Path:
@@ -138,7 +161,7 @@ def _framework_root_from_installed_runtime() -> Path | None:
 
 
 try:
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values
 
     def _env_data_dir() -> Path:
         """Resolve the .env data dir from the env: LISA_DATA_DIR > LISA_PROFILE.
@@ -167,79 +190,56 @@ try:
     def _env_candidates() -> tuple[Path, tuple[Path, ...]]:
         """Return (data-dir .env candidate, full low→high precedence order).
 
-        The data-dir slot resolves from the current environment
-        (:func:`_env_data_dir`). A profile (or relocated data dir) gets a
-        lower-precedence fallback to the base data dir's ~/.lisa/.env right
-        after its own candidate: profiles isolate derived state, but the
-        base .env is the operator's only config spot in tool-install mode,
-        and a profile without its own .env must not leave it unloaded. A
-        real profile .env still wins — later candidates are more
-        authoritative (``override=True`` in :func:`_load_env_candidates`).
-        With no LISA_DATA_DIR / LISA_PROFILE the base dir IS ~/.lisa and
-        the fallback collapses to the same path, so it is not listed twice.
+        Only explicitly configured locations participate. In particular, the
+        current working directory is never an implicit configuration source:
+        merely entering a downloaded checkout must not let it select a packs
+        venv (an executable-code trust root) for the next CLI invocation.
+
+        The base data-dir .env provides shared settings. A profile .env and
+        then the installed framework's own .env are progressively more
+        specific sources. The original process environment is applied last
+        and remains authoritative over every file.
         """
         env_dir = _env_data_dir()
         base_dir = _mirror_default_data_dir()
-        candidates = (
-            Path.cwd() / ".env",
+        base_env = base_dir / ".env"
+        candidates: list[Path] = []
+        for candidate in (
+            base_env,
             env_dir / ".env",
             _FRAMEWORK_ROOT / ".env",
-            _FRAMEWORK_ROOT / "hosts" / "little_lisa" / ".env",
-        )
-        base_env = base_dir / ".env"
-        if env_dir != base_dir and env_dir / ".env" != base_env:
-            return base_env, (
-                candidates[0],
-                candidates[1],
-                base_env,
-                *candidates[2:],
-            )
-        return base_env, candidates
+        ):
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return env_dir / ".env", tuple(candidates)
 
-    # Module-level search order, shared with _verify_check_env (which calls
-    # _env_candidates so monkeypatched tests and the loader stay in sync).
-    # Ordered lowest-precedence first; _load_env_candidates applies them in
-    # this order so later (more authoritative) entries win.
-    #
-    # CWD first is deliberate — repo-mode dev sessions expect the checkout's
-    # own .env to be the base. It is NOT an early-return: loading only the
-    # first hit let an incidental CWD .env (a stale repo copy, or any
-    # directory the operator happens to be in) shadow the machine-level
-    # data-dir .env completely. That silently dropped every setting the
-    # authoritative file carries but the shadowing one lacks — the
-    # 2026-09-21 headroom incident: HEADROOM_MCP_BIN expanded to "" from the
-    # repo .env, so the pack's optional BINARY server failed to compile and
-    # `lisa prompt` died with a Startup Error panel.
-    #
-    # TEST CONTRACT: the lazy load still runs before any fixture can
-    # intervene on the first CLI path that needs it, so operator .env
-    # values DO land in os.environ inside test processes the same way the
-    # import-time load did. hosts/cli/tests/conftest.py scrubs them
-    # (autouse _hermetic_env) — tests own their environment; anything
-    # ambient is treated as noise, not config.
+    # Static trust anchors, ordered lowest→highest precedence. The original
+    # process environment is restored last and therefore wins over every file.
     _FRAMEWORK_ROOT = _mirror_framework_root()
     (_BASE_ENV_CANDIDATE, _ENV_SEARCH_CANDIDATES) = _env_candidates()
 
     def _load_env_candidates(candidates: tuple[Path, ...]) -> Path | None:
-        """Load every existing candidate .env; return the last one loaded.
+        """Merge trusted candidates in memory, then apply them once.
 
-        Later candidates are more authoritative than earlier ones: they are
-        applied with ``override=True`` so a machine-level data-dir .env can
-        fill in (and correct) whatever a lower-precedence file got wrong.
-        Within a single file the first definition still wins, so the
-        documented "``LISA_DATA_DIR`` above wins when both are set" behavior
-        is preserved by ``python-dotenv``'s own no-override default.
+        Later files override earlier files only for keys absent from the
+        original process environment. No intermediate file is exported, so a
+        lower-precedence file can never influence resolution of a later one.
         """
+        original = dict(os.environ)
+        merged: dict[str, str] = {}
         loaded: Path | None = None
         for candidate in candidates:
             if not candidate.exists():
                 continue
-            if loaded is not None:
-                # More authoritative than everything loaded so far.
-                load_dotenv(dotenv_path=candidate, override=True)
-            else:
-                load_dotenv(dotenv_path=candidate, override=False)
+            merged.update(
+                {
+                    key: value
+                    for key, value in dotenv_values(candidate, interpolate=False).items()
+                    if key not in original and value is not None
+                }
+            )
             loaded = candidate
+        os.environ.update(merged)
         return loaded
 
     def _load_env_once() -> None:

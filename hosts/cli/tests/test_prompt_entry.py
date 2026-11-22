@@ -438,10 +438,26 @@ def test_history_path_profile_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path
     from hosts.cli import entry as entry_mod
 
     monkeypatch.setattr(
-        "runtime.config.profile_data_dir", lambda name: tmp_path / "profiles" / name
+        "hosts.cli.bootstrap._mirror_profile_data_dir",
+        lambda name: tmp_path / "profiles" / name,
     )
     path = entry_mod.prompt_history_path("", "work")
     assert path == tmp_path / "profiles" / "work" / "state" / "prompt_history.txt"
+
+
+def test_environment_profile_isolates_history_and_hint_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """LISA_PROFILE applies to CLI-owned files as well as runtime state."""
+    from hosts.cli import entry as entry_mod
+
+    profile_dir = tmp_path / "profiles" / "isolated"
+    monkeypatch.setenv("LISA_PROFILE", "isolated")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.setattr(entry_mod, "_resolve_data_dir", lambda *_args: profile_dir)
+    assert entry_mod.prompt_history_path("", "") == profile_dir / "state" / "prompt_history.txt"
+    assert entry_mod.settings_file_path("", "") == profile_dir / "config" / "prompt_hints.yaml"
 
 
 def test_history_path_framework_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:

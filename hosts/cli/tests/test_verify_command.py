@@ -136,21 +136,23 @@ def test_check_python_fails_on_39() -> None:
 # ── _verify_check_env ─────────────────────────────────────────────────
 
 
-def test_check_env_passes_when_env_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """CWD/.env resolves dynamically via _resolve_env_candidates; PASS."""
+def test_check_env_ignores_env_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CWD/.env is untrusted input, not an implicit configuration source."""
     from hosts.cli import main as cli_main
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("LISA_OPENAI_API_KEY=test\n", encoding="utf-8")
-    # The default search points at this machine's real ~/.lisa; chdir alone
-    # must be enough for the CWD candidate to win first.
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.delenv("LISA_PROFILE", raising=False)
     monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
-    runtime = _StubRuntime(data_dir=tmp_path)
-    status, detail = cli_main._verify_check_env(runtime)
-    assert "PASS" in status
-    assert str(tmp_path / ".env") in detail
+    with (
+        patch.object(cli_main, "_mirror_default_data_dir", lambda: tmp_path / "lisa_home"),
+        patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
+    ):
+        runtime = _StubRuntime(data_dir=tmp_path)
+        status, detail = cli_main._verify_check_env(runtime)
+    assert "WARN" in status
+    assert str(tmp_path / ".env") not in detail
 
 
 def test_check_env_warns_when_no_env_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,7 +222,7 @@ def test_check_env_profile_env_beats_base_fallback(
     (base_dir / ".env").write_text("BASE=1\n", encoding="utf-8")
     profile_dir = tmp_path / "profiles" / "taxes"
     profile_dir.mkdir(parents=True)
-    (profile_dir / ".env").write_text("PROFILE=1\n", encoding="utf-8")
+    (profile_dir / ".env").write_text("SHARED=profile\n", encoding="utf-8")
     monkeypatch.setenv("LISA_PROFILE", "taxes")
     monkeypatch.delenv("LISA_DATA_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -234,7 +236,11 @@ def test_check_env_profile_env_beats_base_fallback(
         patch.object(cli_main, "_FRAMEWORK_ROOT", tmp_path / "framework"),
     ):
         runtime = _StubRuntime(data_dir=base_dir)
+        loaded = cli_main._load_env_candidates(cli_main._resolve_env_candidates())
         status, detail = cli_main._verify_check_env(runtime)
+    assert loaded == profile_dir / ".env"
+    assert os.environ["SHARED"] == "profile"
+    assert os.environ["BASE"] == "1"
     assert "PASS" in status
     assert str(profile_dir / ".env") in detail
 
@@ -261,11 +267,9 @@ def test_check_env_data_dir_override_skips_redundant_base(
     ):
         candidates = cli_main._resolve_env_candidates()
     assert candidates == (
-        tmp_path / ".env",
-        data_dir / ".env",
         fake_base_dir / ".env",
+        data_dir / ".env",
         tmp_path / "framework" / ".env",
-        tmp_path / "framework" / "hosts" / "little_lisa" / ".env",
     )
 
 

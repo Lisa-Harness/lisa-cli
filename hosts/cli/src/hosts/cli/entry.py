@@ -54,6 +54,8 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
+from hosts.cli.bootstrap import _resolve_data_dir
+
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding import KeyBindings
 
@@ -187,14 +189,7 @@ def settings_file_path(data_dir: str | Path, profile: str) -> Path:
     other authored config (models.yaml, policy.yaml). Profile resolution
     mirrors :func:`prompt_history_path`.
     """
-    from runtime.config import profile_data_dir  # lazy: import cost
-
-    base = str(data_dir).strip() or ""
-    if not base and profile.strip():
-        base = str(profile_data_dir(profile.strip()))
-    if not base:
-        base = os.getenv("LISA_DATA_DIR", "") or str(Path.home() / ".lisa")
-    return Path(base).expanduser() / "config" / _PROMPT_HINTS_FILE
+    return _resolve_data_dir(data_dir, profile) / "config" / _PROMPT_HINTS_FILE
 
 
 def load_hint_fragments(data_dir: str | Path, profile: str) -> dict[str, str | None]:
@@ -292,14 +287,7 @@ def prompt_history_path(data_dir: str | Path, profile: str) -> Path:
     the profile dir; empty hands the decision to the framework's default
     (``LISA_DATA_DIR`` > ``~/.lisa``).
     """
-    base = str(data_dir).strip() or ""
-    if not base and profile.strip():
-        from runtime.config import profile_data_dir  # lazy: import cost
-
-        base = str(profile_data_dir(profile.strip()))
-    if not base:
-        base = os.getenv("LISA_DATA_DIR", "") or str(Path.home() / ".lisa")
-    return Path(base).expanduser() / "state" / "prompt_history.txt"
+    return _resolve_data_dir(data_dir, profile) / "state" / "prompt_history.txt"
 
 
 def read_prompt_message(

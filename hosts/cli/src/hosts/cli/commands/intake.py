@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import typer
 from rich.markup import escape
 
 from hosts.cli.application import _PANEL_LIFECYCLE, app, console
-from hosts.cli.cli_runtime import _resolve_profiled_data_dir
+from hosts.cli.bootstrap import _resolve_data_dir
 from hosts.cli.options import DataDirOption, HostLogOption, LogLevelOption, ProfileOption
 
 
@@ -31,16 +30,7 @@ def _intake_command(
     loops, and writes the merged UnifiedState to ``<data-dir>/state/state.json``.
     The next turn reads that state so the model has fresh ambient data.
     """
-    # Deferred config import (Slice C): ``runtime.config`` drags the
-    # framework's eager ``runtime/__init__`` chain; the intake command
-    # is the only consumer of the platform default data dir.
-    from runtime.config import default_data_dir  # lazy: runtime.config (Slice C)
-
-    resolved_data_dir = (
-        Path(_resolve_profiled_data_dir(data_dir, profile)).expanduser()
-        if _resolve_profiled_data_dir(data_dir, profile)
-        else default_data_dir()
-    )
+    resolved_data_dir = _resolve_data_dir(data_dir, profile)
     try:
         from runtime.intake import run_intake
     except ImportError:

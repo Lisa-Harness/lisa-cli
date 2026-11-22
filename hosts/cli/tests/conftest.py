@@ -7,18 +7,12 @@ autouse ``_hermetic_env`` fixture removes all Lisa/provider configuration
 variables from ``os.environ`` before each test, so a test sees the
 framework defaults unless it sets a variable itself.
 
-Why: the CLI host loads an operator ``.env`` before the first path that
-needs operator configuration (``hosts.cli.main`` runs ``load_dotenv`` in
-its lazy bootstrap, reached on the first pack-command resolution or
-runtime construction — during collection for any test importing the CLI,
-searching ``Path.cwd()/.env`` first), so ambient operator configuration
-— provider keys, ``LISA_DATA_DIR``, a stale ``LISA_SESSION_CONTEXT_PATH``
-— lands in ``os.environ`` before any test code runs. Tests then failed on the
-operator's machine but passed on CI (the 2026-09-19 once-decisions
-incident: 22/22 red because ``.env`` pointed the session context at a
-deleted file). A dedicated test ``.env`` cannot fix this — the operator
-file wins the search order, and the load precedes any fixture — so the
-suite instead declares that tests own their environment.
+Why: trusted data-dir/profile/framework ``.env`` files can still provide
+operator configuration before test collection. Tests own their environment
+instead of inheriting provider keys, custom data dirs, or a stale
+``LISA_SESSION_CONTEXT_PATH`` from the operator's machine. The current
+working directory is deliberately not a dotenv source, so merely entering a
+checkout cannot select configuration or a packs venv for tests or users.
 
 Tests that need a variable set it explicitly (``monkeypatch.setenv``);
 tests that need to observe the "no keys" path rely on the scrub rather

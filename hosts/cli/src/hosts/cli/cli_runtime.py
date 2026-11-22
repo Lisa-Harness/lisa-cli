@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 
 from hosts.cli.application import console
-from hosts.cli.bootstrap import _bootstrap_env_and_packs
+from hosts.cli.bootstrap import _bootstrap_env_and_packs, _resolve_data_dir
 
 if TYPE_CHECKING:
     from kernel.models import McpServerHealth
@@ -32,14 +32,9 @@ def _resolve_profiled_data_dir(data_dir: str, profile: str) -> str:
     in one place. An invalid profile name raises ``ValueError``, which
     ``_initialize_runtime_or_exit`` renders as a startup-error panel.
     """
-    if data_dir.strip():
-        return data_dir
-    name = profile.strip()
-    if not name:
+    if not data_dir.strip() and not profile.strip():
         return ""
-    from runtime.config import profile_data_dir
-
-    return str(profile_data_dir(name))
+    return str(_resolve_data_dir(data_dir, profile))
 
 
 def _initialize_runtime(

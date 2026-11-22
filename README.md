@@ -31,6 +31,18 @@ variables and their documented bare-name fallbacks are substituted when the
 template is copied. On reinstall, existing values are preserved and missing
 template keys are merged.
 
+Configuration is loaded only from the effective data directory, its base
+data-dir fallback, and the installed framework checkout. The current working
+directory is **not** an implicit `.env` source: a downloaded or untrusted
+checkout cannot select a packs venv (which contains executable Python code)
+merely because you run `lisa` inside it. For a checkout-local development
+configuration, set `LISA_DATA_DIR` explicitly to the desired trusted data
+directory.
+
+Within trusted configuration, the base `.env` provides shared values, a
+profile `.env` takes precedence over the base file, and values already set
+in the calling process environment take precedence over every file.
+
 ### Run the installer
 
 Linux or Mac:
@@ -710,8 +722,10 @@ lisa --profile ansible verify     # works on every subcommand
 ```
 
 Precedence: `--data-dir` (explicit) > `LISA_DATA_DIR` > `--profile` /
-`LISA_PROFILE` > `~/.lisa`. A fresh profile starts empty (defaults, like a
-fresh install); seed it from the base dir when you want a head start:
+`LISA_PROFILE` > `~/.lisa`. Prompt history, hint settings, intake state,
+models, policy, approvals, and threads all follow the same effective data
+directory. A fresh profile starts empty (defaults, like a fresh install);
+seed it from the base dir when you want a head start:
 
 ```bash
 mkdir -p ~/.lisa/profiles/ansible/config

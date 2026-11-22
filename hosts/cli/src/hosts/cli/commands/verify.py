@@ -77,7 +77,9 @@ def _verify_check_env(runtime: HostRuntime) -> tuple[str, str]:
     # / LISA_PROFILE set after import — and under test monkeypatching — are
     # honored; the order mirrors the import-time construction including the
     # profile→base .env fallback, so verify reports what startup really loads.
-    for candidate in _resolve_env_candidates():
+    # Candidates are ordered lowest→highest precedence: report the file whose
+    # values actually win, not the lowest-precedence file that merely exists.
+    for candidate in reversed(_resolve_env_candidates()):
         if candidate.exists():
             return _VERIFY_PASS, f".env found ({candidate})"
     return _VERIFY_WARN, ".env not found. Create one at ~/.lisa/.env with your model provider keys."

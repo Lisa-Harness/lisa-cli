@@ -35,7 +35,7 @@ def test_profile_resolves_to_profiles_root(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.delenv("LISA_PROFILE", raising=False)
     monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
     base = tmp_path / ".lisa"
-    with patch("runtime.config.default_data_dir", return_value=base):
+    with patch.object(cli_main, "_mirror_default_data_dir", lambda: base):
         got = cli_main._resolve_profiled_data_dir("", "taxes")
     assert Path(got) == (base / "profiles" / "taxes").resolve()
 
@@ -161,6 +161,7 @@ def test_intake_command_resolves_profiled_data_dir(
     monkeypatch.setitem(sys.modules, "runtime.intake", mod)
     with (
         patch("runtime.config.default_data_dir", return_value=base),
+        patch.object(cli_main, "_mirror_default_data_dir", lambda: base),
         patch.object(cli_main, "console", Console(quiet=True)),
     ):
         cli_main._intake_command(
@@ -170,3 +171,34 @@ def test_intake_command_resolves_profiled_data_dir(
             host_log="",
         )
     assert Path(captured["data_dir"]) == (base / "profiles" / "taxes").resolve()
+
+
+def test_intake_command_honors_environment_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """LISA_PROFILE selects the intake destination without a CLI profile flag."""
+    import sys
+    import types
+
+    from hosts.cli import main as cli_main
+
+    captured: dict = {}
+
+    async def _fake_intake(*, data_dir):
+        captured["data_dir"] = data_dir
+
+        class _State:
+            context_items: list = []  # noqa: RUF012
+
+        return _State()
+
+    monkeypatch.setenv("LISA_PROFILE", "taxes")
+    monkeypatch.delenv("LISA_DATA_DIR", raising=False)
+    monkeypatch.delenv("LISA_PROFILES_DIR", raising=False)
+    mod = types.ModuleType("runtime.intake")
+    mod.run_intake = _fake_intake
+    monkeypatch.setitem(sys.modules, "runtime.intake", mod)
+    monkeypatch.setattr(cli_main, "console", Console(quiet=True))
+    cli_main._intake_command(data_dir="", profile="", log_level="", host_log="")
+    expected = cli_main._mirror_profile_data_dir("taxes")
+    assert Path(captured["data_dir"]) == expected
