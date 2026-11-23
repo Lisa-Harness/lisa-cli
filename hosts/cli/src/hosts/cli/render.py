@@ -446,10 +446,21 @@ def _format_approval_expiry(seconds: int | float | str | None) -> str:
     return f"expires in {hours}h {minutes}m"
 
 
+def _approval_decision_hints(body: Text, request_id: str) -> None:
+    """Append the in-session decision hint block (one line per choice)."""
+    del request_id  # in-session decisions target the pending id by context
+    body.append("\nDecide in this session:\n", style=STYLE_TEXT_MUTED)
+    body.append("  [a] allow once · ", style=STYLE_TEXT_PRIMARY)
+    body.append("[r] allow + remember prefix · ", style=STYLE_TEXT_PRIMARY)
+    body.append("[d] deny · ", style=STYLE_TEXT_PRIMARY)
+    body.append("empty = defer\n", style=STYLE_TEXT_MUTED)
+
+
 def render_approval_panel(
     payload: dict[str, object],
     *,
     console: Console | None = None,
+    interactive: bool = False,
 ) -> Panel:
     """Render the approval panel for a pending action.
 
@@ -457,10 +468,13 @@ def render_approval_panel(
     turn response (``lisa.approval.v1``). It shows the tool/pack and effect
     tier, the proposed command, the sandbox containment badge, and the
     decision hints. The host decides approve/ask/deny and owns the policy
-    write; this function only renders — it never decides. The hints are
-    the ``lisa approve <id>`` / ``lisa deny <id>`` commands, so the operator
-    can decide from the same shell that raised the request (the CLI has no
-    interactive loop; keystroke hints went with the retired REPL).
+    write; this function only renders — it never decides.
+
+    The hints differ by surface: the one-shot prompt run has no interactive
+    loop, so it points at the ``lisa approve <id>`` commands (decide from
+    the same shell that raised the request, exit code 3 tells pipelines an
+    approval is pending); a persistent interactive session decides in place,
+    so its hints name the in-session keystrokes instead.
     """
 
     target = f"{payload.get('pack_id') or ''}:{payload.get('target_id') or ''}".strip(":")
@@ -506,19 +520,22 @@ def render_approval_panel(
     if expiry:
         body.append(expiry + "\n", style=STYLE_TEXT_MUTED)
 
-    body.append("\nDecide from the same shell, without a session:\n", style=STYLE_TEXT_MUTED)
-    body.append(
-        f"  lisa approve {request_id}                # run it\n",
-        style=STYLE_TEXT_PRIMARY,
-    )
-    body.append(
-        f"  lisa approve {request_id} --remember <prefix>\n",
-        style=STYLE_TEXT_MUTED,
-    )
-    body.append(
-        f"  lisa deny {request_id}   ·   lisa policy\n",
-        style=STYLE_TEXT_MUTED,
-    )
+    if interactive:
+        _approval_decision_hints(body, request_id)
+    else:
+        body.append("\nDecide from the same shell, without a session:\n", style=STYLE_TEXT_MUTED)
+        body.append(
+            f"  lisa approve {request_id}                # run it\n",
+            style=STYLE_TEXT_PRIMARY,
+        )
+        body.append(
+            f"  lisa approve {request_id} --remember <prefix>\n",
+            style=STYLE_TEXT_MUTED,
+        )
+        body.append(
+            f"  lisa deny {request_id}   ·   lisa policy\n",
+            style=STYLE_TEXT_MUTED,
+        )
 
     panel = Panel(
         body,

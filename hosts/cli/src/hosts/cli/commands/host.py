@@ -26,6 +26,50 @@ from hosts.cli.options import (
 )
 
 
+@app.command(
+    "interactive",
+    rich_help_panel="Session",
+    help=(
+        "Run a persistent interactive session: one runtime, many turns. "
+        "Approvals and model questions are decided in place. "
+        "Ctrl-C stops a running turn; /quit or Ctrl-D exits."
+    ),
+)
+def _interactive_command(
+    log_level: LogLevelOption = "",
+    log: LogOption = "",
+    no_log: NoLogOption = False,
+    data_dir: DataDirOption = "",
+    profile: ProfileOption = "",
+    overlays_dir: OverlaysDirOption = "",
+    thread_dir: ThreadDirOption = "",
+    no_thread: NoThreadOption = False,
+    session_context: SessionContextOption = "",
+    timezone: TimezoneOption = "",
+    state_snapshot: StateSnapshotOption = "",
+    streaming: StreamingOption = "",
+    host_log: HostLogOption = "",
+) -> None:
+    """Dispatch the persistent interactive session (engine + surface in hosts.cli.interactive)."""
+    from hosts.cli.interactive import interactive_command
+
+    interactive_command(
+        log_level=log_level,
+        log=log,
+        no_log=no_log,
+        data_dir=data_dir,
+        profile=profile,
+        overlays_dir=overlays_dir,
+        thread_dir=thread_dir,
+        no_thread=no_thread,
+        session_context=session_context,
+        timezone=timezone,
+        state_snapshot=state_snapshot,
+        streaming=streaming,
+        host_log=host_log,
+    )
+
+
 def _render_markdown_response(response_text: str, *, title: str) -> None:
     """Print a transport-neutral host-command reply as a Rich panel.
 

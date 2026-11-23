@@ -115,6 +115,11 @@ ignore = ["PLR0913", "PLC0415", "RUF001", "RUF002", "RUF003"]
 "**/hosts/cli/main.py" = ["E402", "PLC0415", "PLR0917"]
 "**/hosts/cli/application.py" = ["PLR0917"]
 "**/hosts/cli/prompt.py" = ["PLR0917"]
+# The interactive surface's Typer command mirrors the shared runtime options
+# like every other host command; the engine module uses the same lazy-import
+# pattern for cycle-breaking and startup latency.
+"**/hosts/cli/interactive.py" = ["PLR0917"]
+"**/hosts/cli/session.py" = ["PLC0415"]
 "**/hosts/cli/commands/*.py" = ["PLR0917"]
 "**/hosts/cli/render.py" = ["PLC0415"]
 "**/hosts/cli/entry.py" = ["PLC0415", "RUF001"]

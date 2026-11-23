@@ -658,6 +658,13 @@ class PromptTransport:
         self._prompt_message = message.strip()
         self._activity_rows = []
         self._activity_history_elided = 0
+        # Per-turn outcome flags: an interactive session reuses one transport
+        # across turns, so a decision from the previous turn must not bleed
+        # into this one (the one-shot command path reads these exactly once).
+        self.approval_unresolved = False
+        self.pending_approval = None
+        self.yield_unresolved = False
+        self.yield_question = ""
         self._screen_tool_contexts = []
         self._activity_scroll_top = None
         self._scrollback_flushed_rows = 0

@@ -328,6 +328,7 @@ lisa                                # show usage
 lisa --help                         # also works after subcommands, e.g., prompt --help
 lisa verify                         # runs the diagnostic check including model availability
 lisa update                         # upgrade the installed CLI (uv tool upgrade)
+lisa interactive                    # persistent session: one runtime, many turns
 lisa prompt                         # run a turn with input via the turn editor
 lisa prompt "Hi"                    # run a turn with the CLI args as the input
 fortune | lisa prompt               # run a turn with stdin as the input
@@ -362,6 +363,43 @@ is already present in the process environment.
 
 `lisa models discover` generates a manifest; use `--force` if one already exists.
 `lisa models apply` checks the syntax and router rules before applying.
+
+### Interactive session (`lisa interactive`)
+
+`lisa interactive` is the persistent surface: one runtime boots, serves any
+number of turns on the same warm MCP pool, and closes when you leave.
+`lisa prompt` stays the one-shot pipeline interface — same flags, same
+exit codes, unchanged.
+
+```bash
+lisa interactive                 # persistent session in the current profile
+lisa interactive --streaming hybrid
+```
+
+In the session:
+
+- Input uses the same editor as `lisa prompt` — Enter adds a line, Ctrl-J
+  sends (or `--swap-keys`/`LISA_PROMPT_KEYS` for Enter-sends), Alt+Up
+  recalls history, and `$(command)` expands. `/help` and `/quit` are the
+  only session-local slash controls.
+- **Ctrl-C while a turn runs** cancels that turn and returns to the
+  prompt; the pool stays warm, so the next turn starts immediately.
+- **Ctrl-C at the prompt** aborts entry first; a second consecutive press
+  exits (exit code 130, matching the one-shot abort contract).
+- **Approvals are decided in place.** When a turn pauses on an approval,
+  answer at the prompt: `a` allow once · `r <prefix>` allow and remember
+  the prefix · `d` deny · empty defers (the request id is durable;
+  `lisa approve <id>` from another shell still works). The decided turn
+  then continues on the same runtime.
+- **Model questions resume in session.** When the model asks a question
+  instead of finishing, type the answer as your next message — the turn
+  resumes from it rather than the one-shot exit-4 dead end.
+- A pack change that needs a restart ends the session with a notice;
+  relaunch `lisa interactive` to pick it up.
+
+Host operations are unchanged: typed subcommands (`lisa settings`,
+`lisa models`, `lisa policy`, …) run in a separate process; the session
+does not fork their behavior into a slash grammar.
 
 ### Prompting (`prompt` with stdin, the editor, and `--raw`)
 
