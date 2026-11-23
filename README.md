@@ -382,8 +382,14 @@ In the session:
   sends (or `--swap-keys`/`LISA_PROMPT_KEYS` for Enter-sends), Alt+Up
   recalls history, and `$(command)` expands. `/help` and `/quit` are the
   only session-local slash controls.
-- **Ctrl-C while a turn runs** cancels that turn and returns to the
-  prompt; the pool stays warm, so the next turn starts immediately.
+- **Esc stops the running turn cooperatively.** The kernel honors the stop
+  request at its next iteration boundary: the current step finishes, loop
+  state is preserved, and your next message redirects the turn. Nothing
+  is force-killed, so the warm pool stays valid. While the turn is
+  stopping, the status line shows `⏹ stopping…`.
+- **Ctrl-C while a turn runs** cancels the in-flight turn (for a wedged
+  turn a cooperative stop cannot reach) and returns to the prompt; the
+  pool stays warm, so the next turn starts immediately.
 - **Ctrl-C at the prompt** aborts entry first; a second consecutive press
   exits (exit code 130, matching the one-shot abort contract).
 - **Approvals are decided in place.** When a turn pauses on an approval,

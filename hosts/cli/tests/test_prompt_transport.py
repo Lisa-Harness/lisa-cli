@@ -743,6 +743,30 @@ def test_parse_scroll_keys_handles_split_sequences() -> None:
     assert pending == b""
 
 
+def test_parse_scroll_keys_lone_esc_is_stop() -> None:
+    """A lone Esc byte (no CSI/SS3 continuation) dispatches the stop action."""
+    actions, pending = _parse_scroll_keys(b"\x1b")
+    assert actions == ["stop"]
+    assert pending == b""
+    # Esc between other keys still reads as stop.
+    actions, _ = _parse_scroll_keys(b"x\x1by")
+    assert actions == ["stop"]
+
+
+def test_parse_scroll_keys_arrow_keys_never_stop() -> None:
+    """Esc-prefixed sequences (arrows, PgUp, Home) stay their own actions."""
+    actions, pending = _parse_scroll_keys(b"\x1b[A\x1b[B\x1b[5~\x1b[H")
+    assert actions == ["up", "down", "pgup", "home"]
+    assert pending == b""
+
+
+def test_parse_scroll_keys_esc_then_arrow_is_stop_then_scroll() -> None:
+    """A fast Esc-then-arrow sequence parses as both actions, in order."""
+    actions, pending = _parse_scroll_keys(b"\x1b\x1b[A")
+    assert actions == ["stop", "up"]
+    assert pending == b""
+
+
 # ── scroll key reader (tty stdin) ─────────────────────────────────────
 
 
@@ -984,6 +1008,54 @@ def test_scrolling_reveals_oldest_rows_and_end_resumes_tail() -> None:
     assert transport._activity_scroll_top is None
     tail = _rendered_plain(console, transport._activity_history(max_rows=10))
     assert "tool row new" in tail
+
+
+# ── cooperative stop (activity key seam) ──────────────────────────────
+
+
+def test_stop_action_without_handler_is_inert() -> None:
+    """A one-shot transport has no stop seam: Esc changes nothing."""
+    transport, _console = _make_tty_transport()
+    transport._screen_mode = True
+    transport._append_activity_row(Text("working"))
+    transport._scroll_activity("stop")
+    assert transport._stop_requested is False
+
+
+def test_stop_action_invokes_the_handler_once() -> None:
+    """With a wired seam, Esc flags the request and calls the stop callback."""
+    transport, _console = _make_tty_transport()
+    transport._screen_mode = True
+    transport._append_activity_row(Text("working"))
+    calls: list[str] = []
+    transport.set_stop_handler(lambda: calls.append("stop"))
+    transport._scroll_activity("stop")
+    assert calls == ["stop"]
+    assert transport._stop_requested is True
+
+
+def test_stop_request_clears_on_next_turn_start() -> None:
+    """A new turn resets the stop flag — the signal was consumed by the turn."""
+    transport, _console = _make_tty_transport()
+    transport.set_stop_handler(lambda: None)
+    transport._stop_requested = True
+    transport.start_turn("next message")
+    assert transport._stop_requested is False
+
+
+def test_status_line_shows_stop_hint_and_stopping_segment() -> None:
+    """Idle+armed shows the Esc hint; after Esc the stopping segment shows."""
+    transport, console = _make_tty_transport()
+    transport._screen_mode = True
+    transport._key_reader = object()  # simulate an active reader
+    transport.set_stop_handler(lambda: None)
+
+    idle = _rendered_plain(console, transport._compose_status_body(width=80))
+    assert "Esc stop" in idle
+
+    transport._scroll_activity("stop")
+    stopping = _rendered_plain(console, transport._compose_status_body(width=80))
+    assert "⏹ stopping…" in stopping
 
 
 def test_scrolled_view_expands_collapsed_tool_output() -> None:

@@ -321,6 +321,16 @@ def test_substitution_failure_keeps_session(surface: Any) -> None:
     assert code == 0
 
 
+def test_loop_cancellation_exits_cleanly(surface: Any) -> None:
+    """A task-level cancellation (SIGINT mid-turn) exits 0 with the pool closed."""
+
+    async def _cancelled_reader() -> Any:
+        raise asyncio.CancelledError()
+
+    code = _run_surface(surface, _cancelled_reader)
+    assert code == 0
+
+
 def test_render_outcome_lines(surface: Any) -> None:
     """Outcome renderers map each engine kind to its operator notice."""
     from rich.console import Console as _Console
@@ -331,11 +341,72 @@ def test_render_outcome_lines(surface: Any) -> None:
         force_terminal=False,
     )
     interactive_mod._render_outcome(console, _outcome("paused"))
+    interactive_mod._render_outcome(console, _outcome("stopped", operator_exit="stopped"))
+    interactive_mod._render_outcome(console, _outcome("stopped", operator_exit="terminated"))
     interactive_mod._render_outcome(console, _outcome("cancelled"))
     interactive_mod._render_outcome(console, _outcome("error"))
     interactive_mod._render_outcome(console, _outcome("ok"))
     interactive_mod._render_restart_notice(console, "pack install")
     interactive_mod._model_hint(surface.runtime)
+
+
+def test_stopped_outcome_rendering_distinguishes_terminate() -> None:
+    """Stopped prints the redirect hint; terminated prints the no-resume hint."""
+    import io
+
+    from rich.console import Console as _Console
+
+    stream = io.StringIO()
+    console = _Console(file=stream, width=120, force_terminal=False)
+    interactive_mod._render_outcome(console, _outcome("stopped", operator_exit="stopped"))
+    stopped_text = stream.getvalue()
+    assert "next message redirects" in stopped_text
+
+    stream2 = io.StringIO()
+    console2 = _Console(file=stream2, width=120, force_terminal=False)
+    interactive_mod._render_outcome(console2, _outcome("stopped", operator_exit="terminated"))
+    assert "terminated" in stream2.getvalue()
+
+
+def test_session_wires_transport_stop_handler(surface: Any) -> None:
+    """The surface maps the transport's stop seam onto the engine's stop request."""
+    wired: dict[str, Any] = {}
+    sessions: list[Any] = []
+
+    class _RecordingTransport(_NullTransport):
+        def __init__(self, console: Any = None, **kwargs: Any) -> None:
+            super().__init__(console, **kwargs)
+            wired["transport"] = self
+
+        def set_stop_handler(self, handler: Any) -> None:
+            wired["handler"] = handler
+
+    class _WiringSession(surface.session_cls):  # type: ignore[misc]
+        def __init__(self, *, runtime: Any = None, transport: Any = None) -> None:
+            super().__init__(runtime=runtime, transport=transport)
+            sessions.append(self)
+
+        def request_stop(self) -> None:
+            wired["stopped"] = True
+
+    import hosts.cli.transport as transport_mod
+
+    original_transport = transport_mod.PromptTransport
+    original_session = interactive_mod.InteractiveSession
+    transport_mod.PromptTransport = _RecordingTransport
+    interactive_mod.InteractiveSession = _WiringSession
+    try:
+        reader = _scripted_reader(["quit"])
+        code = _run_surface(surface, reader)
+        assert code == 0
+        assert "handler" in wired, "the surface must wire the stop seam"
+        # The wired handler routes to the session's cooperative stop.
+        assert callable(wired["handler"])
+        wired["handler"]()
+        assert wired.get("stopped") is True
+    finally:
+        transport_mod.PromptTransport = original_transport
+        interactive_mod.InteractiveSession = original_session
 
 
 def test_model_hint_with_manifest(surface: Any) -> None:

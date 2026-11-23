@@ -17,9 +17,14 @@ outcome instead so a caller can render it and continue the session:
   runtime and its pool stay alive; the operator can try again.
 * ``"cancelled"`` — the operator interrupted the turn. In-flight awaits are
   cancelled, the per-turn runtime state is reset, and the pool is reused.
-* ``"paused"`` — the turn ended through an operator pause/stop signal or a
-  cap that degraded to one; conversation state is preserved and the next
+* ``"paused"`` — the turn ended through an operator pause signal or a cap
+  that degraded to one; conversation state is preserved and the next
   message resumes from it.
+* ``"stopped"`` — the operator asked the turn to stop (Esc /
+  :meth:`InteractiveSession.request_stop`) and the kernel honored it at
+  an iteration boundary. Same preservation as ``paused``; the exit
+  discriminator on the outcome says ``stopped`` (resume by redirecting)
+  or ``terminated`` (workflow marked complete, no resume).
 * ``"approval"`` — the turn paused pending an approval decision. The engine
   hands the structured approval payload to the caller; the caller collects a
   decision and calls :meth:`InteractiveSession.decide_approval`, which runs
@@ -73,11 +78,13 @@ class TurnOutcome:
     """The structural result of one engine turn.
 
     ``kind`` is one of ``ok``, ``error``, ``cancelled``, ``paused``,
-    ``approval``, or ``yield`` (see the module docstring). The remaining
-    fields carry what the surface needs to render and continue: the
-    response text, the raw result ``data``, the structured approval payload
-    on an approval pause, the model's question on a yield, the operator-exit
-    discriminator, and whether the runtime is asking for a restart.
+    ``stopped``, ``approval``, or ``yield`` (see the module docstring).
+    The remaining fields carry what the surface needs to render and
+    continue: the response text, the raw result ``data``, the structured
+    approval payload on an approval pause, the model's question on a
+    yield, the operator-exit discriminator (``stopped``/``terminated``
+    on a cooperative stop), and whether the runtime is asking for a
+    restart.
     """
 
     kind: str = "ok"
@@ -113,6 +120,45 @@ class InteractiveSession:
     def turn_running(self) -> bool:
         """True while a turn (or approval decision) is executing."""
         return self._turn_active
+
+    def request_stop(self) -> None:
+        """Ask the running turn to stop cooperatively (kernel operator signal).
+
+        The signal is polled once per turn-loop iteration by the kernel
+        (``TurnHooks.operator_signal`` → :class:`runtime.operator_signal.OperatorSignal`):
+        the turn finishes its current step, the kernel persists the loop
+        state, and the outcome comes back classified ``paused`` with
+        ``operator_exit="stopped"`` (or ``"terminated"`` for the terminal
+        variant). No state is destroyed — the next message resumes from
+        the preserved loop — and nothing here forces an exception, so the
+        warm MCP pool stays valid.
+
+        This is the *only* supported stop path for arbitrary in-flight
+        tools: a hard cancel of an unknown tool's coroutine says nothing
+        about the tool's own children or the turn's persisted state, so
+        the engine never does it implicitly (Milestone 2's contract).
+        """
+        session = getattr(self.runtime, "session", None)
+        if session is None or not hasattr(session, "operator_signal_value"):
+            return
+        from runtime.operator_signal import OperatorSignal
+
+        session.operator_signal_value = OperatorSignal.STOP
+
+    def request_terminate(self) -> None:
+        """Ask the running turn to stop AND mark the workflow complete.
+
+        The terminal variant of :meth:`request_stop`: same cooperative
+        polling, but the kernel marks the WorkflowPosition complete — no
+        resume. Use for "abandon this task"; use :meth:`request_stop` for
+        "stop here, I'll redirect".
+        """
+        session = getattr(self.runtime, "session", None)
+        if session is None or not hasattr(session, "operator_signal_value"):
+            return
+        from runtime.operator_signal import OperatorSignal
+
+        session.operator_signal_value = OperatorSignal.TERMINATE
 
     async def start(self) -> None:
         """Start the runtime's MCP pool inside the session's event loop.
@@ -161,7 +207,7 @@ class InteractiveSession:
             self._turn_active = False
         outcome = self._outcome_from_result(result)
         self._record_session_turn(
-            succeeded=outcome.kind in {"ok", "paused", "approval", "yield"},
+            succeeded=outcome.kind in {"ok", "paused", "stopped", "approval", "yield"},
             started_perf=started_perf,
         )
         self._pending_approval = None
@@ -287,7 +333,9 @@ class InteractiveSession:
         elif yielded_question:
             kind = "yield"
             self._pending_yield_question = yielded_question
-        elif operator_exit in {"paused", "stopped", "terminated"}:
+        elif operator_exit in {"stopped", "terminated"}:
+            kind = "stopped"
+        elif operator_exit == "paused":
             kind = "paused"
         elif bool(getattr(result, "is_error", False)):
             kind = "error"

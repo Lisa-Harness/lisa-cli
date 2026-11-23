@@ -20,7 +20,11 @@ it arrives; on a tty lines join the bounded middle transcript as they
 arrive, so failures retain their output context without a separate output
 box. Older transcript rows scroll out of view and are counted; when stdin
 is a tty, ↑/↓, PgUp/PgDn, and Home/End scroll back through the full
-transcript (End resumes following the tail).
+transcript (End resumes following the tail). In an interactive session
+with a stop seam wired (``set_stop_handler``), a lone ``Esc`` requests a
+cooperative stop: the kernel honors the operator signal at the next
+iteration boundary, the turn ends with its operator-exit discriminator,
+and the loop state is preserved for the next message.
 
 Raw mode (``raw=True``) writes the response verbatim to raw stdout — no
 Rule header, no Markdown re-render — so redirected/piped output stays
@@ -161,7 +165,16 @@ _SCROLL_KEYS: dict[bytes, str] = {
 
 
 def _parse_scroll_keys(buf: bytes) -> tuple[list[str], bytes]:
-    """Split ``buf`` into scroll actions; return them and any partial escape."""
+    """Split ``buf`` into key actions; return them and any partial escape.
+
+    A LONE ``Esc`` — at the end of the buffer with no ``[``/``O``
+    continuation behind it — is dispatched as the ``stop`` action: the
+    operator's stop-requested key while a turn runs (Milestone 2).
+    Terminals deliver arrow/PgUp sequences as one read, so a trailing
+    Esc here means the key arrived alone; only an Esc *followed by*
+    ``[``/``O`` stays a (possibly partial) sequence, so arrow keys never
+    trigger a stop.
+    """
     actions: list[str] = []
     i = 0
     while i < len(buf):
@@ -170,13 +183,20 @@ def _parse_scroll_keys(buf: bytes) -> tuple[list[str], bytes]:
             continue
         end = i + 1
         if end >= len(buf):
-            return actions, buf[i:]
+            # Bare Esc at the end of the read: the key arrived alone.
+            actions.append("stop")
+            return actions, b""
         if buf[end] in b"[O":
             end += 1
             while end < len(buf) and not _CSI_FINAL_MIN <= buf[end] <= _CSI_FINAL_MAX:
                 end += 1
             if end >= len(buf):
                 return actions, buf[i:]
+        else:
+            # Bare Esc mid-buffer: not a CSI/SS3 prefix — a lone keypress.
+            actions.append("stop")
+            i += 1
+            continue
         action = _SCROLL_KEYS.get(buf[i : end + 1])
         if action:
             actions.append(action)
@@ -582,6 +602,16 @@ class PromptTransport:
         self._scrollback_flushed_rows = 0
         self._scrollback_prompt_printed = False
         self._scrollback_rule_printed = False
+        # ── Operator stop seam (interactive sessions only) ───────────
+        #: Surface-assigned callback for the activity keys' ``stop`` action
+        #: (lone Esc): the interactive session wires its cooperative stop
+        #: request here. ``None`` (the one-shot prompt path) leaves Esc
+        #: inert — a pipeline must never stop itself.
+        self._stop_handler: Callable[[], None] | None = None
+        #: True between the operator's Esc and the turn actually ending —
+        #: drives the "⏹ stopping…" status segment so the request is visibly
+        #: acknowledged; cleared at the next turn start.
+        self._stop_requested: bool = False
 
     def _init_status_counters(self) -> None:
         """Reset outcome and per-turn token/cost counters shared by the footer.
@@ -665,6 +695,9 @@ class PromptTransport:
         self.pending_approval = None
         self.yield_unresolved = False
         self.yield_question = ""
+        # A new turn clears any stop request from the previous turn — the
+        # one-shot operator signal was consumed by the turn that ended.
+        self._stop_requested = False
         self._screen_tool_contexts = []
         self._activity_scroll_top = None
         self._scrollback_flushed_rows = 0
@@ -696,6 +729,14 @@ class PromptTransport:
         activity.start(refresh=True)
         self._activity = activity
         self._key_reader = _ScrollKeyReader.start(self._scroll_activity)
+
+    def set_stop_handler(self, handler: Callable[[], None] | None) -> None:
+        """Wire (or clear) the operator-stop seam for the activity keys.
+
+        The interactive session assigns ``session.request_stop``; the
+        one-shot prompt path never does, so lone Esc stays inert there.
+        """
+        self._stop_handler = handler
 
     def stop_activity(self) -> None:
         reader = self._key_reader
@@ -1690,7 +1731,20 @@ class PromptTransport:
         return Group(*window)
 
     def _scroll_activity(self, action: str) -> None:
-        """Apply one scroll action to the middle transcript and redraw."""
+        """Apply one key action from the activity key reader.
+
+        Scroll actions move the pinned middle transcript; the ``stop``
+        action routes to the operator-stop seam (set once by the surface
+        — the kernel polls it at the next iteration boundary and ends the
+        turn cooperatively, preserving loop state and the warm pool).
+        """
+        if action == "stop":
+            if self._stop_handler is None:
+                return
+            self._stop_requested = True
+            self._redraw_activity(refresh=True)
+            self._stop_handler()
+            return
         rows = max(1, self._activity_view_rows)
         width = max(1, (self.console.size.width or self._ACTIVITY_WIDTH) - 2)
         total = len(self._activity_lines(width=width, output_budget=None))
@@ -1761,6 +1815,10 @@ class PromptTransport:
         self._append_stall_part(parts)
         if self._phase_label and not parts:
             parts.append(Text(self._phase_label, style=STYLE_STAGE))
+        if self._stop_requested:
+            parts.append(Text("⏹ stopping…", style=STYLE_ROW_TRANSITION))
+        elif self._stop_handler is not None and self._key_reader is not None:
+            parts.append(Text("Esc stop", style=STYLE_TEXT_MUTED))
         if self._iteration_max:
             parts.append(
                 Text(f"iter {self._iteration_current}/{self._iteration_max}", style=STYLE_STAGE)

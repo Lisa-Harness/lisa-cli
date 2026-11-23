@@ -158,3 +158,54 @@ def test_failed_turn_does_not_poison_the_next(
     _run(scenario())
     # One model call failed inside the turn; the recovery turn's reply arrived.
     assert "recovered" in transport.responses
+
+
+# ── Scenario 3: cooperative stop mid-turn ────────────────────────────
+
+
+def test_cooperative_stop_ends_turn_and_preserves_session(
+    offline_runtime_factory: Any,
+    scripted_gateway: Any,
+    scenario_plan: Path,
+    tmp_path: Path,
+) -> None:
+    """request_stop() mid-turn: the kernel honors it at the next iteration.
+
+    The scripted model calls a tool once; the gateway sets the operator
+    signal between calls (what the Esc key does in a real session), so the
+    turn loop observes STOP at its next iteration boundary. The outcome
+    classifies ``stopped`` with the operator-exit discriminator, the loop
+    state is preserved (thread entry recorded), and the SAME runtime serves
+    the next ordinary turn — the pool was never torn down.
+    """
+    from runtime.operator_signal import OperatorSignal
+
+    def respond(turn: Any) -> Any:
+        if turn.count("web_search") == 0:
+            # Between iterations: simulate the operator pressing Esc.
+            runtime.session.operator_signal_value = OperatorSignal.STOP
+            return Reply.call("web_search", query="probe")
+        raise AssertionError("the turn must stop before the next model call")
+
+    gateway = scripted_gateway(respond)
+    runtime = offline_runtime_factory(tmp_path, session_plan=str(scenario_plan))
+    runtime.session.provider_gateways_override = gateway
+    transport = _RecordingTransport()
+    session = InteractiveSession(runtime=runtime, transport=transport)
+
+    async def scenario() -> None:
+        await session.start()
+        outcome = await session.run_turn("search then keep going")
+        assert outcome.kind == "stopped", f"expected cooperative stop, got {outcome.kind}"
+        assert outcome.operator_exit == "stopped"
+        # The session stays usable on the same warm runtime.
+        runtime.session.provider_gateways_override = scripted_gateway(
+            lambda turn: Reply.text("still alive after stop")
+        )
+        after = await session.run_turn("continue fresh")
+        assert after.kind == "ok", f"post-stop turn failed: {after.text[:200]}"
+        await session.aclose()
+        return after
+
+    after = _run(scenario())
+    assert "still alive after stop" in after.text

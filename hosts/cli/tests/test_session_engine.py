@@ -197,6 +197,129 @@ def test_ok_turn_classification(stub_runtime: Any, monkeypatch: pytest.MonkeyPat
     asyncio.run(scenario())
 
 
+def test_stop_request_sets_operator_signal(stub_runtime: Any) -> None:
+    """request_stop writes the kernel-polled STOP operator signal."""
+    from runtime.operator_signal import OperatorSignal
+
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        assert stub_runtime.session.operator_signal_value == OperatorSignal.NONE
+        session.request_stop()
+        assert stub_runtime.session.operator_signal_value == OperatorSignal.STOP
+
+    asyncio.run(scenario())
+
+
+def test_terminate_request_sets_terminal_signal(stub_runtime: Any) -> None:
+    """request_terminate writes the TERMINATE signal (workflow marked complete)."""
+    from runtime.operator_signal import OperatorSignal
+
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        session.request_terminate()
+        assert stub_runtime.session.operator_signal_value == OperatorSignal.TERMINATE
+
+    asyncio.run(scenario())
+
+
+def test_stopped_exit_classifies_as_stopped(
+    stub_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _stopped_turn(runtime: Any, message: str, transport: Any) -> Any:
+        return _result(operator_exit="stopped")
+
+    _patch_handle(monkeypatch, _stopped_turn)
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        outcome = await session.run_turn("work")
+        assert outcome.kind == "stopped"
+        assert outcome.operator_exit == "stopped"
+
+    asyncio.run(scenario())
+
+
+def test_stop_requests_tolerate_a_sessionless_runtime() -> None:
+    """A runtime without a session seam: the stop requests are no-ops."""
+
+    class _BareRuntime:
+        async def start(self) -> None:
+            return None
+
+    session = InteractiveSession(
+        runtime=_BareRuntime(),
+        transport=_RecordingTransport(),  # type: ignore[arg-type]
+    )
+    session.request_stop()
+    session.request_terminate()
+
+    # And a session without the operator-signal attribute:
+    class _PartialSession:
+        pass
+
+    class _PartialRuntime:
+        session = _PartialSession()  # type: ignore[assignment]
+        services = None  # type: ignore[assignment]
+
+        async def start(self) -> None:
+            return None
+
+    partial = InteractiveSession(
+        runtime=_PartialRuntime(),
+        transport=_RecordingTransport(),  # type: ignore[arg-type]
+    )
+    partial.request_stop()
+    partial.request_terminate()
+
+
+def test_terminated_exit_classifies_as_stopped(
+    stub_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _terminated_turn(runtime: Any, message: str, transport: Any) -> Any:
+        return _result(operator_exit="terminated")
+
+    _patch_handle(monkeypatch, _terminated_turn)
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        outcome = await session.run_turn("work")
+        assert outcome.kind == "stopped"
+        assert outcome.operator_exit == "terminated"
+
+    asyncio.run(scenario())
+
+
+def test_stop_signal_cleared_before_next_turn(
+    stub_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_turn clears a stale STOP signal so it cannot leak into the next turn."""
+
+    async def _observing_turn(runtime: Any, message: str, transport: Any) -> Any:
+        from runtime.operator_signal import OperatorSignal
+
+        assert runtime.session.operator_signal_value == OperatorSignal.NONE
+        return _result()
+
+    _patch_handle(monkeypatch, _observing_turn)
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        from runtime.operator_signal import OperatorSignal
+
+        await session.start()
+        stub_runtime.session.operator_signal_value = OperatorSignal.STOP
+        outcome = await session.run_turn("next")
+        assert outcome.kind == "ok"
+
+    asyncio.run(scenario())
+
+
 def test_error_turn_is_classified_not_raised(
     stub_runtime: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

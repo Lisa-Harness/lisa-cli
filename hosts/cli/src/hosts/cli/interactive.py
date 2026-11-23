@@ -22,8 +22,20 @@ file, same grapheme-safe editing, same ``$(...)`` expansion.
 
 Interruption and exit
 ---------------------
-While a turn runs, Ctrl-C cancels the in-flight turn and returns to the
-prompt; the pool stays warm and per-turn state is reset by the engine.
+While a turn runs, two stop paths exist, deliberately different:
+
+* **Esc — cooperative stop.** The activity key reader maps a lone Esc to
+  :meth:`InteractiveSession.request_stop` (an
+  :class:`runtime.operator_signal.OperatorSignal` the kernel polls once
+  per iteration). The turn finishes its current step, the kernel
+  preserves the loop state, and the outcome classifies ``stopped``; the
+  next message redirects the turn. Nothing is force-killed, so the warm
+  pool stays valid — this is the supported stop for arbitrary in-flight
+  tools (Milestone 2's safe-lifecycle contract).
+* **Ctrl-C — cancel.** The in-flight turn's awaits are cancelled, the
+  engine resets per-turn state, and the prompt returns. Use when the
+  turn itself is wedged (a cooperative stop would never be polled).
+
 While the editor is open, Ctrl-C aborts entry; a second consecutive Ctrl-C
 aborts the session (the one-shot prompt's contract, so a hurried exit can
 never leak a stray keystroke to the shell). EOF (Ctrl-D on an empty
@@ -90,7 +102,7 @@ _HELP_WORDS = {"/help"}
 #: Session-local banner hints (the editor's own hint line carries the key
 #: model; these name what is unique to the persistent session).
 _BANNER_HINTS = (
-    "/help · /quit · Ctrl-C stops a running turn · Ctrl-D exits",
+    "/help · /quit · Esc stops a running turn · Ctrl-D exits",
     "approvals are decided in place; the request id survives if you defer",
 )
 
@@ -114,10 +126,11 @@ def _print_help(console: Console) -> None:
                     "Session controls:",
                     "  /help               this list",
                     "  /quit               end the session (also: exit, quit, Ctrl-D)",
-                    "  Ctrl-C              stop the running turn; session stays alive",
+                    "  Esc                 stop the running turn; next message redirects it",
+                    "  Ctrl-C              cancel the running turn; session stays alive",
                     "  Ctrl-C at prompt    first aborts entry; second exits",
                     "  Approvals           a = allow · r <prefix> = allow + remember",
-                    "                     d = deny · Enter = allow · empty = defer",
+                    "                     d = deny · empty = defer",
                     "",
                     "Host operations are typed subcommands outside the session:",
                     "  lisa settings · lisa tokens · lisa models · lisa policy · lisa last",
@@ -224,6 +237,12 @@ async def run_interactive_session(
     transport.model_prices, transport.model_cache_prices = _collect_model_pricing(runtime)
 
     session = InteractiveSession(runtime=runtime, transport=transport)
+    # Cooperative stop: a lone Esc while the activity screen is up maps to
+    # the engine's operator-stop request (kernel-polled at the next
+    # iteration boundary; loop state preserved). Duck-typed so test
+    # transports need not implement the seam.
+    if hasattr(transport, "set_stop_handler"):
+        transport.set_stop_handler(session.request_stop)
     reader = read_message or _default_message_reader(console, data_dir, profile)
     decider = read_approval or _read_approval_answer
     exit_code = 0
@@ -367,6 +386,12 @@ def _render_outcome(console: Console, outcome: TurnOutcome) -> None:
     """Render the engine outcome (the transport already streamed the body)."""
     if outcome.kind == "paused":
         console.print("[grey58]⏸ turn paused — send input to resume[/grey58]")
+        return
+    if outcome.kind == "stopped":
+        if outcome.operator_exit == "terminated":
+            console.print("[grey58]⏹ workflow terminated — state kept, no resume[/grey58]")
+        else:
+            console.print("[grey58]⏹ turn stopped — next message redirects it[/grey58]")
         return
     if outcome.kind == "cancelled":
         console.print("[grey58]⌧ turn cancelled[/grey58]")
