@@ -518,6 +518,7 @@ def read_prompt_message_tui(
     swapped_keys: bool | None = None,
     data_dir: str | Path = "",
     profile: str = "",
+    prefill: str = "",
 ) -> str | None:
     """Read a single-box message with prompt_toolkit (extra installed).
 
@@ -544,11 +545,20 @@ def read_prompt_message_tui(
       (returns ``None``); bare Ctrl-D or an empty submit also returns
       ``None`` (nothing to send).
 
-    Falls back to :func:`read_prompt_message` when the extra is absent.
+    ``prefill`` seeds the editor buffer with text (draft safety: the
+    interactive session hands back whatever the operator typed while the
+    previous turn ran). The text is fully editable — it is buffer
+    content, not a submitted value.
+
+    Falls back to :func:`read_prompt_message` when the extra is absent
+    (a prefill cannot be seeded into the plain reader; it is dropped with
+    a hint line so the operator still sees their text).
     The bottom toolbar respects ``LISA_PROMPT_PS1`` (suppressed when
     empty, custom text when set).
     """
     if _PT is None:
+        if prefill:
+            console.print(f"[grey58](draft kept: {prefill})[/grey58]")
         console.print(
             "[yellow]Full editor unavailable: prompt-toolkit is not installed. "
             "Using plain input; Ctrl-D on an empty line sends.[/yellow]"
@@ -581,6 +591,11 @@ def read_prompt_message_tui(
             key_bindings=bindings,
             bottom_toolbar=hint_html,
         )
+        # Seed the prefill as editable buffer content: ``default=`` would
+        # treat it as a submitted value on empty input, not text to edit.
+        if prefill:
+            buffer = session.default_buffer
+            buffer.insert_text(prefill, move_cursor=True)
         text: str | None = session.prompt("❯ ", enable_suspend=True)
     except KeyboardInterrupt:
         console.print("[red]⏹ Entry aborted by operator (Ctrl-C).[/red]")

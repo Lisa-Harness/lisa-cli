@@ -69,13 +69,18 @@ def _outcome(kind: str = "ok", **fields: Any) -> TurnOutcome:
 def _scripted_reader(messages: list[Any]) -> Any:
     """Build a reader that yields the given messages in order.
 
+    Matches the loop's reader contract (one optional ``prefill`` argument).
     ``KeyboardInterrupt`` instances in the list are raised instead of
     returned; everything else is returned verbatim.
     """
     queue = list(messages)
     raised = {"first_ctrl_c": False}
 
-    async def _read() -> Any:
+    async def _read(prefill: str = "") -> Any:
+        if prefill:
+            # Draft safety: an un-consumed prefill replays as the next
+            # message so the operator's typed text is never lost.
+            queue.insert(0, prefill)
         if not queue:
             return None  # EOF ends the loop
         item = queue.pop(0)
@@ -120,6 +125,8 @@ def surface(monkeypatch: pytest.MonkeyPatch, console: Console) -> Any:
             self.runtime = runtime or _StubRuntime()
             self.transport = transport or _NullTransport()
             self.outcomes: list[TurnOutcome] = []
+            self._queue: list[str] = []
+            self.last_outcome: TurnOutcome | None = None
 
         async def start(self) -> None:
             return None
@@ -129,10 +136,12 @@ def surface(monkeypatch: pytest.MonkeyPatch, console: Console) -> Any:
 
         async def run_turn(self, message: str) -> TurnOutcome:
             self.outcomes.append(_outcome("ok", text=f"echo:{message}"))
+            self.last_outcome = self.outcomes[-1]
             return self.outcomes[-1]
 
         async def decide_approval(self, request_id: str, **kwargs: Any) -> TurnOutcome:
             self.outcomes.append(_outcome("ok", text="continuation"))
+            self.last_outcome = self.outcomes[-1]
             return self.outcomes[-1]
 
     monkeypatch.setattr(interactive_mod, "InteractiveSession", _Session)
@@ -324,7 +333,7 @@ def test_substitution_failure_keeps_session(surface: Any) -> None:
 def test_loop_cancellation_exits_cleanly(surface: Any) -> None:
     """A task-level cancellation (SIGINT mid-turn) exits 0 with the pool closed."""
 
-    async def _cancelled_reader() -> Any:
+    async def _cancelled_reader(prefill: str = "") -> Any:
         raise asyncio.CancelledError()
 
     code = _run_surface(surface, _cancelled_reader)
@@ -467,7 +476,203 @@ def test_classify_session_message() -> None:
     assert interactive_mod._classify_session_message("quit") == "quit"
     assert interactive_mod._classify_session_message("/exit") == "quit"
     assert interactive_mod._classify_session_message("/help") == "help"
+    assert interactive_mod._classify_session_message("/queue") == "queue"
+    assert interactive_mod._classify_session_message("/q") == "queue"
+    assert interactive_mod._classify_session_message("/drop") == "queue_drop"
     assert interactive_mod._classify_session_message("fix the parser") == "turn"
+
+
+def test_queue_command_lists_and_drop_removes(surface: Any) -> None:
+    """``/queue`` lists queued messages; ``/drop`` removes the newest."""
+    reader = _scripted_reader(["/queue", "/drop", "quit"])
+    code = _run_surface(surface, reader)
+    assert code == 0
+
+
+def test_queue_submitter_limit_is_loud(surface: Any) -> None:
+    """A queue-limit refusal prints the error; the queue stays bounded."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import _QUEUE_MAX_MESSAGES
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_NullTransport())
+    counting = _NullTransport()
+    submit = interactive_mod._make_queue_submitter(session, counting, surface.console)
+    for _ in range(_QUEUE_MAX_MESSAGES):
+        submit("fill")
+    before = len(session.queued_messages())
+    submit("one too many")  # must not raise; must report to the console
+    assert len(session.queued_messages()) == before
+    assert before == _QUEUE_MAX_MESSAGES
+
+
+def test_render_queue_prints_entries(surface: Any) -> None:
+    """``/queue`` output names each queued message with its position."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_NullTransport())
+    session.queue_message("first follow-up")
+    session.queue_message("second follow-up")
+    interactive_mod._render_queue(session, surface.console)
+    interactive_mod._drop_last_queued(session, surface.console)
+    assert session.queued_messages() == ["first follow-up"]
+
+
+def test_drop_on_empty_queue_reports(surface: Any) -> None:
+    """``/drop`` with an empty queue says so instead of raising."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_NullTransport())
+    interactive_mod._drop_last_queued(session, surface.console)
+
+
+def test_pop_transport_draft_tolerates_nonstring(surface: Any) -> None:
+    """A transport draft seam returning non-text reads as empty."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    class _OddTransport(_NullTransport):
+        def pop_draft(self) -> Any:
+            return None
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_OddTransport())
+    assert interactive_mod._pop_transport_draft(session) == ""
+
+
+def test_mid_turn_submit_queues_and_drains(surface: Any) -> None:
+    """A queued follow-up drains as its own turn, in FIFO order, after the turn."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_NullTransport())
+    monkeypatched = None
+    del monkeypatched
+    seen: list[str] = []
+
+    async def _fake_handle(rt: Any, message: str, transport: Any) -> Any:
+        seen.append(message)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(text="ok", data={}, is_error=False, operator_exit="")
+
+    import runtime.handle_message as hm
+
+    original = hm.handle_message
+    hm.handle_message = _fake_handle
+
+    async def scenario() -> None:
+        await session.start()
+        await interactive_mod._handle_session_message(session, surface.console, "first turn", None)
+        session.queue_message("queued one")
+        session.queue_message("queued two")
+        await interactive_mod._drain_queue(session, surface.console, None)
+        await session.aclose()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        hm.handle_message = original
+    assert seen == ["first turn", "queued one", "queued two"]
+
+
+def test_drain_pauses_for_pending_approval(surface: Any) -> None:
+    """A deferred approval pauses the drain; the remaining queue stays queued."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    async def _deferring_decider(_console: Any) -> Any:
+        return ""  # defer
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_NullTransport())
+    seen: list[str] = []
+
+    async def _fake_handle(rt: Any, message: str, transport: Any) -> Any:
+        seen.append(message)
+        from types import SimpleNamespace
+
+        data = {"approval": {"request_id": "req-1"}} if message == "first" else {}
+        return SimpleNamespace(text="ok", data=data, is_error=False, operator_exit="")
+
+    import runtime.handle_message as hm
+
+    original = hm.handle_message
+    hm.handle_message = _fake_handle
+
+    async def scenario() -> None:
+        await session.start()
+        await interactive_mod._handle_session_message(
+            session, surface.console, "first", _deferring_decider
+        )
+        session.queue_message("waiting turn")
+        await interactive_mod._drain_queue(session, surface.console, _deferring_decider)
+        # The deferred approval paused the drain: the queued turn never ran…
+        assert seen == ["first"]
+        # …and the queue kept its order for the next drain.
+        assert session.queued_messages() == ["waiting turn"]
+        await session.aclose()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        hm.handle_message = original
+
+
+def test_queue_submitter_records_and_stamps_count(surface: Any) -> None:
+    """The submit callback queues through the engine and stamps the transport."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_NullTransport())
+
+    class _Counting:
+        queued_count = -1
+
+        def set_queued_count(self, count: int) -> None:
+            self.queued_count = count
+
+    counting = _Counting()
+    submit = interactive_mod._make_queue_submitter(session, counting, surface.console)
+    submit("follow-up one")
+    submit("follow-up two")
+    assert session.queued_messages() == ["follow-up one", "follow-up two"]
+    assert counting.queued_count == 2
 
 
 def test_expand_message_passthrough() -> None:

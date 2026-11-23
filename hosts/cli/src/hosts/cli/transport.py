@@ -163,56 +163,204 @@ _SCROLL_KEYS: dict[bytes, str] = {
     b"\x1b[4~": "end",
 }
 
+#: One parsed key event: ``(kind, arg)``. Scroll/stop events carry ``""``;
+#: ``text`` events carry the raw UTF-8 bytes typed (decoded by the
+#: transport's incremental decoder so a paste split mid-character does
+#: not corrupt the draft).
+KeyAction = tuple[str, str]
 
-def _parse_scroll_keys(buf: bytes) -> tuple[list[str], bytes]:
-    """Split ``buf`` into key actions; return them and any partial escape.
+_CR = b"\r"
+_LF = b"\n"
+_DEL = b"\x7f"
+_CTRL_U = b"\x15"
 
-    A LONE ``Esc`` — at the end of the buffer with no ``[``/``O``
-    continuation behind it — is dispatched as the ``stop`` action: the
-    operator's stop-requested key while a turn runs (Milestone 2).
-    Terminals deliver arrow/PgUp sequences as one read, so a trailing
-    Esc here means the key arrived alone; only an Esc *followed by*
-    ``[``/``O`` stays a (possibly partial) sequence, so arrow keys never
-    trigger a stop.
+#: Named control bytes → draft events. CR/LF submit; DEL backspaces the
+#: draft (whole grapheme clusters); Ctrl-U clears it (readline kill-line).
+_CONTROL_KEYS: dict[int, str] = {
+    _CR[0]: "submit",
+    _LF[0]: "submit",
+    _DEL[0]: "draft_backspace",
+    _CTRL_U[0]: "draft_clear",
+}
+
+
+#: UTF-8 byte thresholds (named for the linter and the reader alike).
+_UTF8_CONT_MIN = 0x80
+_UTF8_CONT_MAX = 0xC0
+_UTF8_LEAD_2 = 0xC0
+_UTF8_LEAD_3 = 0xE0
+_UTF8_LEAD_4 = 0xF0
+_ASCII_PRINT_MIN = 0x20
+#: Longest UTF-8 sequence — bounds the walk-back over continuation bytes.
+_UTF8_MAX_CONTINUATION = 3
+
+
+def _utf8_pending_tail(buf: bytes) -> int:
+    """Length of a trailing incomplete UTF-8 sequence, or 0.
+
+    A paste can split a multi-byte character across reads; decoding a
+    truncated tail would replace it with U+FFFD. The caller returns the
+    tail as ``pending`` so it joins the next chunk first — the same
+    contract partial escape sequences already follow.
     """
-    actions: list[str] = []
-    i = 0
-    while i < len(buf):
-        if buf[i] != _ESC:
-            i += 1
-            continue
-        end = i + 1
-        if end >= len(buf):
-            # Bare Esc at the end of the read: the key arrived alone.
-            actions.append("stop")
-            return actions, b""
-        if buf[end] in b"[O":
-            end += 1
-            while end < len(buf) and not _CSI_FINAL_MIN <= buf[end] <= _CSI_FINAL_MAX:
-                end += 1
-            if end >= len(buf):
-                return actions, buf[i:]
+    # The last lead byte can start at most 3 bytes before the end (the
+    # longest sequence minus one continuation in flight).
+    for start in range(max(0, len(buf) - 3), len(buf)):
+        lead = buf[start]
+        if _UTF8_LEAD_2 <= lead < _UTF8_LEAD_3:
+            expected = 2
+        elif _UTF8_LEAD_3 <= lead < _UTF8_LEAD_4:
+            expected = 3
+        elif lead >= _UTF8_LEAD_4:
+            expected = 4
         else:
-            # Bare Esc mid-buffer: not a CSI/SS3 prefix — a lone keypress.
-            actions.append("stop")
-            i += 1
             continue
-        action = _SCROLL_KEYS.get(buf[i : end + 1])
-        if action:
-            actions.append(action)
-        i = end + 1
+        have = len(buf) - start
+        if have < expected:
+            return have
+    return 0
+
+
+def _scan_escape(work: bytes, i: int, buf: bytes) -> tuple[str, int, bytes | None]:
+    """Scan one Esc-prefixed sequence at ``work[i]``.
+
+    Returns ``(kind, next_index, pending)``: ``kind`` is the scroll name
+    or ``stop``; ``pending`` is non-None when the sequence is incomplete —
+    the caller must return it as the parser's partial tail instead of
+    consuming further.
+    """
+    end = i + 1
+    if end >= len(work):
+        # Bare Esc at the end of the read: the key arrived alone.
+        return "stop", len(work), None
+    if work[end] in b"[O":
+        end += 1
+        while end < len(work) and not _CSI_FINAL_MIN <= work[end] <= _CSI_FINAL_MAX:
+            end += 1
+        if end >= len(work):
+            return "", 0, buf[i:]
+    else:
+        # Bare Esc mid-buffer: not a CSI/SS3 prefix — a lone keypress.
+        return "stop", i + 1, None
+    scroll = _SCROLL_KEYS.get(work[i : end + 1])
+    return scroll or "", end + 1, None
+
+
+def _decode_text_run(
+    work: bytes, start: int | None, end: int
+) -> tuple[KeyAction | None, int | None]:
+    """Flush one pending text run; returns ``(event, new_start)``.
+
+    ``start`` is the run's first index (``None`` = no run); returns the
+    decoded ``text`` event (or ``None`` when the run is empty) and the
+    cleared start so the caller tracks it without a closure.
+    """
+    if start is not None and end > start:
+        return ("text", work[start:end].decode("utf-8", errors="replace")), None
+    return None, None
+
+
+def _parse_scroll_keys(buf: bytes) -> tuple[list[KeyAction], bytes]:
+    """Split ``buf`` into key events; return them and any partial tail.
+
+    Event kinds:
+
+    * ``scroll:<up|down|pgup|pgdn|home|end>`` — Esc-prefixed sequences.
+    * ``stop`` — a LONE ``Esc`` (end-of-buffer, no ``[``/``O``
+      continuation). Terminals deliver arrow/PgUp sequences as one read,
+      so a trailing Esc here means the key arrived alone.
+    * ``text`` — a run of printable/UTF-8 bytes (arg = the decoded
+      characters; a trailing incomplete multi-byte sequence is returned
+      as pending so a paste split mid-character never corrupts it).
+      Control bytes other than the named keys are skipped: cbreak keeps
+      signals on, so Ctrl-C never arrives here, and unmapped controls
+      echo nothing. Newlines are NOT text — see ``submit``.
+    * ``submit`` — CR (Enter) or LF (Ctrl-J): the draft is complete. A
+      multi-line paste therefore queues one message per line, in order.
+    * ``draft_backspace`` — DEL/Backspace; the transport deletes whole
+      grapheme clusters from the draft.
+    * ``draft_clear`` — Ctrl-U (readline kill-line): clear the draft.
+    """
+    actions: list[KeyAction] = []
+    # Carve a trailing incomplete UTF-8 sequence off before processing: a
+    # paste split mid-character must join the next chunk before decoding
+    # (same contract partial escape sequences follow), never flush as
+    # U+FFFD.
+    pending_len = _utf8_pending_tail(buf)
+    work = buf if not pending_len else buf[: len(buf) - pending_len]
+
+    def _flush(start: int | None, end: int) -> int | None:
+        event, new_start = _decode_text_run(work, start, end)
+        if event is not None:
+            actions.append(event)
+        return new_start
+
+    text_start, pending = _scan_key_bytes(work, buf, actions, _flush)
+    if pending is not None:
+        _flush(text_start, len(work))
+        return actions, pending
+    _flush(text_start, len(work))
+    if pending_len:
+        return actions, buf[len(buf) - pending_len :]
     return actions, b""
 
 
+def _scan_key_bytes(
+    work: bytes,
+    buf: bytes,
+    actions: list[KeyAction],
+    flush: Callable[[int | None, int], int | None],
+) -> tuple[int | None, bytes | None]:
+    """Walk the work buffer, appending key events; returns ``(text_start, pending)``.
+
+    ``text_start`` is the in-progress text run's first index (``None`` when
+    not inside one) — the caller flushes it at end-of-buffer. ``pending`` is
+    non-None when an escape sequence was split mid-read: the caller must
+    return it as the parser's partial tail. ``flush(start, end)`` emits one
+    ``text`` event and returns the cleared start.
+    """
+    text_start: int | None = None
+    i = 0
+    while i < len(work):
+        code = work[i]
+        if code == _ESC:
+            text_start = flush(text_start, i)
+            kind, next_i, pending = _scan_escape(work, i, buf)
+            if pending is not None:
+                return text_start, pending
+            if kind:
+                actions.append((kind, ""))
+            i = next_i
+            continue
+        control_action = _CONTROL_KEYS.get(code)
+        if control_action is not None:
+            text_start = flush(text_start, i)
+            actions.append((control_action, ""))
+            i += 1
+            continue
+        if code >= _ASCII_PRINT_MIN or code >= _UTF8_CONT_MIN:
+            # Printable ASCII, high-byte UTF-8 lead/continuation: draft text.
+            if text_start is None:
+                text_start = i
+            i += 1
+            continue
+        # Any other control byte: skip (echo nothing, store nothing).
+        text_start = flush(text_start, i)
+        i += 1
+    return text_start, None
+
+
 class _ScrollKeyReader:
-    """Read scroll keys from a tty stdin while the live screen is up.
+    """Read key events from a tty stdin while the live screen is up.
 
     Puts the terminal in cbreak mode (no echo, signals intact so Ctrl-C
-    still aborts), reads on a daemon thread, and hands each action to the
-    event loop that started it so transcript state is only touched there.
+    still aborts), reads on a daemon thread, and hands each parsed event
+    to the event loop that started it so transport state is only touched
+    there. Events are ``(kind, arg)`` tuples — scroll/stop plus the
+    in-turn draft composer's text/submit/backspace events.
     """
 
-    def __init__(self, fd: int, saved: list[Any], on_action: Callable[[str], None]) -> None:
+    def __init__(self, fd: int, saved: list[Any], on_action: Callable[[KeyAction], None]) -> None:
         import asyncio
         import threading
 
@@ -228,7 +376,7 @@ class _ScrollKeyReader:
         self._thread.start()
 
     @classmethod
-    def start(cls, on_action: Callable[[str], None]) -> _ScrollKeyReader | None:
+    def start(cls, on_action: Callable[[KeyAction], None]) -> _ScrollKeyReader | None:
         try:
             import termios
             import tty
@@ -242,7 +390,7 @@ class _ScrollKeyReader:
             return None
         return cls(fd, saved, on_action)
 
-    def _dispatch(self, action: str) -> None:
+    def _dispatch(self, action: KeyAction) -> None:
         if self._loop is not None:
             with contextlib.suppress(RuntimeError):
                 self._loop.call_soon_threadsafe(self._on_action, action)
@@ -602,6 +750,16 @@ class PromptTransport:
         self._scrollback_flushed_rows = 0
         self._scrollback_prompt_printed = False
         self._scrollback_rule_printed = False
+        # ── In-turn draft composer (Milestone 3) ─────────────────────
+        #: Draft text typed while a turn runs. Kept on the transport so
+        #: it survives redraws and lands in the editor as the next turn's
+        #: prefill; cleared when the surface accepts it (or on Ctrl-U).
+        self._draft_text: str = ""
+        #: Surface-assigned submit seam: called with the completed draft
+        #: when the operator presses Enter/Ctrl-J mid-turn. ``None`` (the
+        #: one-shot prompt path) makes Enter a no-op — the draft still
+        #: accumulates (harmless) but nothing is ever submitted.
+        self._submit_handler: Callable[[str], None] | None = None
         # ── Operator stop seam (interactive sessions only) ───────────
         #: Surface-assigned callback for the activity keys' ``stop`` action
         #: (lone Esc): the interactive session wires its cooperative stop
@@ -612,6 +770,10 @@ class PromptTransport:
         #: drives the "⏹ stopping…" status segment so the request is visibly
         #: acknowledged; cleared at the next turn start.
         self._stop_requested: bool = False
+        #: Queued follow-up count stamped by the surface whenever the
+        #: engine's queue changes — the status line renders it without
+        #: the transport ever owning the queue itself.
+        self._queued_count: int = 0
 
     def _init_status_counters(self) -> None:
         """Reset outcome and per-turn token/cost counters shared by the footer.
@@ -737,6 +899,31 @@ class PromptTransport:
         one-shot prompt path never does, so lone Esc stays inert there.
         """
         self._stop_handler = handler
+
+    def set_submit_handler(self, handler: Callable[[str], None] | None) -> None:
+        """Wire (or clear) the mid-turn draft submit seam.
+
+        The interactive session assigns a callback that queues the draft
+        as a follow-up message (Enter queues while a turn runs). The
+        one-shot prompt path never does, so Enter mid-turn is a no-op.
+        """
+        self._submit_handler = handler
+
+    def set_queued_count(self, count: int) -> None:
+        """Stamp the queued follow-up count for the status line."""
+        self._queued_count = max(0, int(count))
+        self._redraw_activity(refresh=True)
+
+    def pop_draft(self) -> str:
+        """Return and clear the accumulated in-turn draft.
+
+        The surface calls this after a turn settles to prefill the next
+        editor invocation with the text the operator already typed, so
+        nothing typed mid-turn is lost to the editor taking over.
+        """
+        draft = self._draft_text
+        self._draft_text = ""
+        return draft
 
     def stop_activity(self) -> None:
         reader = self._key_reader
@@ -1730,40 +1917,77 @@ class PromptTransport:
                 window.append(Text(label, style=STYLE_TEXT_MUTED))
         return Group(*window)
 
-    def _scroll_activity(self, action: str) -> None:
-        """Apply one key action from the activity key reader.
+    def _scroll_activity(self, action: KeyAction) -> None:
+        """Apply one key event from the activity key reader.
 
-        Scroll actions move the pinned middle transcript; the ``stop``
-        action routes to the operator-stop seam (set once by the surface
-        — the kernel polls it at the next iteration boundary and ends the
-        turn cooperatively, preserving loop state and the warm pool).
+        Scroll events move the pinned middle transcript; the ``stop``
+        event routes to the operator-stop seam (Milestone 2); the draft
+        events feed the in-turn composer (Milestone 3): text accumulates,
+        Backspace deletes whole grapheme clusters, Ctrl-U clears, and
+        Enter/Ctrl-J hands the completed draft to the surface's submit
+        seam (queue-while-working).
         """
-        if action == "stop":
+        kind, arg = action
+        if kind == "stop":
             if self._stop_handler is None:
                 return
             self._stop_requested = True
             self._redraw_activity(refresh=True)
             self._stop_handler()
             return
+        if kind == "text":
+            self._draft_text += arg
+            self._redraw_activity(refresh=True)
+            return
+        if kind == "submit":
+            draft, self._draft_text = self._draft_text, ""
+            self._redraw_activity(refresh=True)
+            if self._submit_handler is not None and draft.strip():
+                self._submit_handler(draft)
+            return
+        if kind == "draft_backspace":
+            self._draft_text = self._backspace_grapheme(self._draft_text)
+            self._redraw_activity(refresh=True)
+            return
+        if kind == "draft_clear":
+            self._draft_text = ""
+            self._redraw_activity(refresh=True)
+            return
+        self._apply_scroll(kind)
+
+    def _apply_scroll(self, kind: str) -> None:
+        """Move the middle transcript per one scroll event and redraw."""
         rows = max(1, self._activity_view_rows)
         width = max(1, (self.console.size.width or self._ACTIVITY_WIDTH) - 2)
         total = len(self._activity_lines(width=width, output_budget=None))
         bottom = max(0, total - rows)
         top = bottom if self._activity_scroll_top is None else self._activity_scroll_top
         page = max(1, rows - 2)
-        step = {"up": -1, "down": 1, "pgup": -page, "pgdn": page}.get(action)
-        if action == "home":
+        step = {"up": -1, "down": 1, "pgup": -page, "pgdn": page}.get(kind)
+        if kind == "home":
             new_top: int | None = 0
-        elif action == "end" or step is None:
+        elif kind == "end" or step is None:
             new_top = None
         else:
             new_top = max(0, min(bottom, top + step))
-            if new_top >= bottom and action in ("down", "pgdn"):
+            if new_top >= bottom and kind in ("down", "pgdn"):
                 new_top = None
         if new_top is not None and bottom == 0:
             new_top = None
         self._activity_scroll_top = new_top
         self._redraw_activity(refresh=True)
+
+    def _backspace_grapheme(self, text: str) -> str:
+        """Delete the last extended grapheme cluster from ``text``.
+
+        Multi-codepoint emoji (ZWJ families, flags, skin tones) must not
+        tear — the same UAX #29-like rule the editor uses
+        (:func:`hosts.cli.entry._delete_last_grapheme`), kept in one place.
+        """
+        from hosts.cli.entry import _delete_last_grapheme
+
+        cut = _delete_last_grapheme(text)
+        return text[: len(text) - cut] if cut else text
 
     def _append_activity_row(self, row: Text) -> None:
         self._activity_rows.append(row)
@@ -1787,14 +2011,31 @@ class PromptTransport:
         transport = self
         width = transport.console.size.width or transport._ACTIVITY_WIDTH
         line = transport._status_line(width)
-        boxes: list[RenderableType] = []
+        rows: list[RenderableType] = [line]
         box = transport._stream_box_renderable() if transport._stream_box_active() else None
         if box is not None:
-            boxes.append(box)
-        if len(boxes) == 1:
-            return Group(line, boxes[0])
-        if boxes:
-            return Group(line, *boxes)
+            rows.append(box)
+        draft = transport._draft_row(width)
+        if draft is not None:
+            rows.append(draft)
+        if len(rows) == 1:
+            return line
+        return Group(*rows)
+
+    def _draft_row(self, width: int) -> Text | None:
+        """The in-turn draft echo row, or ``None`` when nothing is typed.
+
+        Mirrors the editor's prompt glyph (``›``) so the composer reads as
+        the same surface the operator uses between turns. One logical
+        line: wraps at the terminal edge, folded; the visible truncation
+        is honest (the draft itself is complete in memory).
+        """
+        if not self._draft_text:
+            return None
+        prefix = Text("› ", style="bold " + STYLE_ROW_TOOL)
+        draft = Text(self._draft_text.replace("\n", " "), style=STYLE_TEXT_PRIMARY)
+        line = Text.assemble(prefix, draft)
+        line.truncate(max(0, width - 2))
         return line
 
     def _status_line(self, width: int) -> _TrailingSpinner:
@@ -1819,6 +2060,8 @@ class PromptTransport:
             parts.append(Text("⏹ stopping…", style=STYLE_ROW_TRANSITION))
         elif self._stop_handler is not None and self._key_reader is not None:
             parts.append(Text("Esc stop", style=STYLE_TEXT_MUTED))
+        if self._queued_count > 0:
+            parts.append(Text(f"queued {self._queued_count}", style=STYLE_ROW_TRANSITION))
         if self._iteration_max:
             parts.append(
                 Text(f"iter {self._iteration_current}/{self._iteration_max}", style=STYLE_STAGE)

@@ -102,19 +102,9 @@ _HELP_WORDS = {"/help"}
 #: Session-local banner hints (the editor's own hint line carries the key
 #: model; these name what is unique to the persistent session).
 _BANNER_HINTS = (
-    "/help · /quit · Esc stops a running turn · Ctrl-D exits",
+    "/help · /quit · Esc stops a running turn · Enter queues a follow-up",
     "approvals are decided in place; the request id survives if you defer",
 )
-
-
-def _is_quit(message: str) -> bool:
-    """True for the session-local quit controls (never model content)."""
-    return message.strip().lower() in _QUIT_WORDS
-
-
-def _is_help(message: str) -> bool:
-    """True for the session-local help listing."""
-    return message.strip().lower() in _HELP_WORDS
 
 
 def _print_help(console: Console) -> None:
@@ -126,9 +116,12 @@ def _print_help(console: Console) -> None:
                     "Session controls:",
                     "  /help               this list",
                     "  /quit               end the session (also: exit, quit, Ctrl-D)",
+                    "  /queue              list queued follow-ups (/q)",
+                    "  /drop               drop the newest queued message",
                     "  Esc                 stop the running turn; next message redirects it",
                     "  Ctrl-C              cancel the running turn; session stays alive",
                     "  Ctrl-C at prompt    first aborts entry; second exits",
+                    "  while a turn runs   type to draft; Enter queues it as the next turn",
                     "  Approvals           a = allow · r <prefix> = allow + remember",
                     "                     d = deny · empty = defer",
                     "",
@@ -192,9 +185,14 @@ def _read_approval_answer(console: Console) -> str | None:
 
 
 def _default_message_reader(console: Console, data_dir: str, profile: str) -> Any:
-    """Build the editor-based message reader (runs the PT editor off-loop)."""
+    """Build the editor-based message reader (runs the PT editor off-loop).
 
-    async def _read() -> str | None:
+    The returned callable takes one ``prefill`` argument — text the editor
+    starts with (draft safety: an operator typing while a turn ran keeps
+    their text; the PT reader seeds it into the editable buffer).
+    """
+
+    async def _read(prefill: str = "") -> str | None:
         return await asyncio.to_thread(
             read_prompt_message_tui,
             console,
@@ -202,6 +200,7 @@ def _default_message_reader(console: Console, data_dir: str, profile: str) -> An
             swapped_keys=None,
             data_dir=data_dir,
             profile=profile,
+            prefill=prefill,
         )
 
     return _read
@@ -243,6 +242,11 @@ async def run_interactive_session(
     # transports need not implement the seam.
     if hasattr(transport, "set_stop_handler"):
         transport.set_stop_handler(session.request_stop)
+    # Queue-while-working: Enter mid-turn queues the typed draft as the
+    # next follow-up message (the engine owns the FIFO; the drain runs
+    # after each settled turn). Duck-typed for test transports.
+    if hasattr(transport, "set_submit_handler"):
+        transport.set_submit_handler(_make_queue_submitter(session, transport, console))
     reader = read_message or _default_message_reader(console, data_dir, profile)
     decider = read_approval or _read_approval_answer
     exit_code = 0
@@ -264,6 +268,32 @@ async def run_interactive_session(
     return exit_code
 
 
+def _make_queue_submitter(
+    session: InteractiveSession,
+    transport: Any,
+    console: Console,
+) -> Any:
+    """Build the mid-turn submit callback: queue the draft, stamp the count.
+
+    The transport's key reader invokes this on Enter while a turn runs.
+    ``$(...)`` expansion is deliberately NOT applied here: the queued text
+    runs through the ordinary turn path later (expanding at drain time,
+    when its side effects are observable), and a queue-time expansion
+    failure would need its own error surface mid-frame.
+    """
+
+    def _submit(draft: str) -> None:
+        try:
+            count = session.queue_message(draft)
+        except Exception as exc:  # pylint: disable=broad-except  # queue-limit/state
+            console.print(f"[red]Could not queue the message: {exc}[/red]")
+            return
+        if hasattr(transport, "set_queued_count"):
+            transport.set_queued_count(count)
+
+    return _submit
+
+
 async def _session_loop(
     session: InteractiveSession,
     console: Console,
@@ -272,9 +302,10 @@ async def _session_loop(
 ) -> int:
     """Serve turns until quit; returns the session's exit code."""
     ctrl_c_at_prompt = False
+    pending_draft: list[str] = []
     while True:
         try:
-            message = await reader()
+            message = await reader(pending_draft.pop(0) if pending_draft else "")
         except KeyboardInterrupt:
             message = None  # Ctrl-C at entry == aborted entry
         if message is None:
@@ -285,22 +316,87 @@ async def _session_loop(
             ctrl_c_at_prompt = True
             continue
         ctrl_c_at_prompt = False
-        step = _classify_session_message(message)
-        if step == "quit":
+        handled = await _handle_session_message(session, console, message, decider)
+        if handled in ("quit", "restart"):
             return 0
-        if step == "help":
-            _print_help(console)
+        if handled == "continue":
             continue
-        if step == "skip":
-            continue
-        expanded, failure = _expand_message(message)
+        # handled == "turn": preserve the composer draft for the next read.
+        draft = _pop_transport_draft(session)
+        if draft:
+            pending_draft.append(draft)
+        if await _drain_queue(session, console, decider):
+            return 0
+
+
+async def _handle_session_message(
+    session: InteractiveSession,
+    console: Console,
+    message: str,
+    decider: Any,
+) -> str:
+    """Dispatch one submitted message; returns ``turn``, ``continue``, ``quit``, or ``restart``."""
+    step = _classify_session_message(message)
+    if step != "turn":
+        return _handle_local_step(session, console, step)
+    expanded, failure = _expand_message(message)
+    if failure:
+        console.print(f"[red]Shell substitution failed: {failure}[/red]")
+        return "continue"
+    await _run_one_turn(session, console, expanded, decider)
+    if session.runtime.session.restart_required:
+        _render_restart_notice(console, session.runtime.session.restart_reason)
+        return "restart"
+    return "turn"
+
+
+def _handle_local_step(
+    session: InteractiveSession,
+    console: Console,
+    step: str,
+) -> str:
+    """Serve one session-local control step; every path returns ``continue`` or ``quit``."""
+    if step == "quit":
+        return "quit"
+    if step == "help":
+        _print_help(console)
+        return "continue"
+    if step == "queue":
+        _render_queue(session, console)
+        return "continue"
+    if step == "queue_drop":
+        _drop_last_queued(session, console)
+        return "continue"
+    return "continue"  # skip
+
+
+async def _drain_queue(
+    session: InteractiveSession,
+    console: Console,
+    decider: Any,
+) -> bool:
+    """Run queued follow-ups FIFO; True when the session must restart and exit.
+
+    A pending operator decision (approval/yield) pauses the drain — the
+    operator's next message settles it, and the remaining queue keeps its
+    order for the next drain. The check runs BEFORE each queued turn (the
+    turn that queued these may itself have ended pending) and after it.
+    """
+    while True:
+        if _pending_decision(session):
+            return False
+        queued = session._pop_queued()
+        if queued is None:
+            return False
+        _stamp_queued_count(session)
+        expanded, failure = _expand_message(queued)
         if failure:
             console.print(f"[red]Shell substitution failed: {failure}[/red]")
             continue
         await _run_one_turn(session, console, expanded, decider)
         if session.runtime.session.restart_required:
             _render_restart_notice(console, session.runtime.session.restart_reason)
-            return 0
+            return True
 
 
 def _handle_prompt_interrupt(console: Console, ctrl_c_at_prompt: bool) -> bool:
@@ -320,10 +416,15 @@ def _classify_session_message(message: str) -> str:
     """Classify one operator message: ``turn`` (expandable), ``quit``, ``help``, or ``skip``."""
     if not message.strip():
         return "skip"
-    if _is_quit(message):
+    lowered = message.strip().lower()
+    if lowered in _QUIT_WORDS:
         return "quit"
-    if _is_help(message):
+    if lowered in _HELP_WORDS:
         return "help"
+    if lowered in {"/queue", "/q"}:
+        return "queue"
+    if lowered in {"/drop", "/queue drop"}:
+        return "queue_drop"
     return "turn"
 
 
@@ -402,6 +503,51 @@ def _render_outcome(console: Console, outcome: TurnOutcome) -> None:
     from rich.rule import Rule
 
     console.print(Rule(style="grey42"))
+
+
+def _render_queue(session: InteractiveSession, console: Console) -> None:
+    """List queued follow-ups with their positions (oldest first)."""
+    queued = session.queued_messages()
+    if not queued:
+        console.print("[grey58]Queue is empty.[/grey58]")
+        return
+    console.print(f"[grey58]Queued ({len(queued)}), oldest first:[/grey58]")
+    for index, message in enumerate(queued, start=1):
+        console.print(f"[grey58]  {index}.[/grey58] {message}")
+
+
+def _drop_last_queued(session: InteractiveSession, console: Console) -> None:
+    """Drop the newest queued message (the operator's most recent mistake)."""
+    try:
+        dropped = session.drop_queued(-1)
+    except IndexError:
+        console.print("[grey58]Queue is empty.[/grey58]")
+        return
+    console.print(f"[grey58]Dropped queued message: {dropped}[/grey58]")
+    _stamp_queued_count(session)
+
+
+def _stamp_queued_count(session: InteractiveSession) -> None:
+    """Mirror the engine's queue length onto the transport's status chip."""
+    transport = session.transport
+    if hasattr(transport, "set_queued_count"):
+        transport.set_queued_count(len(session.queued_messages()))
+
+
+def _pop_transport_draft(session: InteractiveSession) -> str:
+    """Take the in-turn composer's draft off the transport (draft safety)."""
+    transport = session.transport
+    pop = getattr(transport, "pop_draft", None)
+    if pop is None:
+        return ""
+    draft = pop()
+    return draft if isinstance(draft, str) else ""
+
+
+def _pending_decision(session: InteractiveSession) -> bool:
+    """True when the last outcome left an approval/yield the operator must settle."""
+    outcome = session.last_outcome
+    return outcome is not None and outcome.kind in {"approval", "yield"}
 
 
 def _render_restart_notice(console: Console, reason: str) -> None:

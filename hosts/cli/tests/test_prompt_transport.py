@@ -736,35 +736,77 @@ def test_one_line_prompt_header_takes_two_rows() -> None:
 
 def test_parse_scroll_keys_handles_split_sequences() -> None:
     actions, pending = _parse_scroll_keys(b"\x1b[Ax\x1b[5~\x1b[")
-    assert actions == ["up", "pgup"]
+    assert actions == [("up", ""), ("text", "x"), ("pgup", "")]
     assert pending == b"\x1b["
     actions, pending = _parse_scroll_keys(pending + b"B\x1b[F")
-    assert actions == ["down", "end"]
+    assert actions == [("down", ""), ("end", "")]
     assert pending == b""
 
 
 def test_parse_scroll_keys_lone_esc_is_stop() -> None:
     """A lone Esc byte (no CSI/SS3 continuation) dispatches the stop action."""
     actions, pending = _parse_scroll_keys(b"\x1b")
-    assert actions == ["stop"]
+    assert actions == [("stop", "")]
     assert pending == b""
-    # Esc between other keys still reads as stop.
+    # Esc between other keys still reads as stop (surrounding text runs flush).
     actions, _ = _parse_scroll_keys(b"x\x1by")
-    assert actions == ["stop"]
+    assert actions == [("text", "x"), ("stop", ""), ("text", "y")]
 
 
 def test_parse_scroll_keys_arrow_keys_never_stop() -> None:
     """Esc-prefixed sequences (arrows, PgUp, Home) stay their own actions."""
     actions, pending = _parse_scroll_keys(b"\x1b[A\x1b[B\x1b[5~\x1b[H")
-    assert actions == ["up", "down", "pgup", "home"]
+    assert actions == [("up", ""), ("down", ""), ("pgup", ""), ("home", "")]
     assert pending == b""
 
 
 def test_parse_scroll_keys_esc_then_arrow_is_stop_then_scroll() -> None:
     """A fast Esc-then-arrow sequence parses as both actions, in order."""
     actions, pending = _parse_scroll_keys(b"\x1b\x1b[A")
-    assert actions == ["stop", "up"]
+    assert actions == [("stop", ""), ("up", "")]
     assert pending == b""
+
+
+# ── draft composer key parsing (Milestone 3) ──────────────────────────
+
+
+def test_parse_keys_text_runs_decode_utf8() -> None:
+    """Printable runs become text events; multi-byte UTF-8 decodes."""
+    actions, pending = _parse_scroll_keys("héllo".encode())
+    assert actions == [("text", "héllo")]
+    assert pending == b""
+
+
+def test_parse_keys_split_utf8_character_is_pending() -> None:
+    """A paste split mid-character holds the partial bytes, never U+FFFD."""
+    raw = "日本語".encode()
+    head, tail = raw[:5], raw[5:]
+    actions, pending = _parse_scroll_keys(head)
+    assert pending, "the truncated character must be pending, not decoded"
+    emitted = "".join(arg for kind, arg in actions if kind == "text")
+    assert "\ufffd" not in emitted, "a split character must not decode as U+FFFD"
+    actions, pending = _parse_scroll_keys(pending + tail)
+    joined = "".join(arg for kind, arg in actions if kind == "text")
+    assert emitted + joined == "日本語"
+    assert pending == b""
+
+
+def test_parse_keys_submit_backspace_clear() -> None:
+    """Enter/Ctrl-J submit; DEL backspaces; Ctrl-U clears the draft."""
+    actions, _ = _parse_scroll_keys(b"go\r")
+    assert actions == [("text", "go"), ("submit", "")]
+    actions, _ = _parse_scroll_keys(b"two\nlines")
+    assert actions == [("text", "two"), ("submit", ""), ("text", "lines")]
+    actions, _ = _parse_scroll_keys(b"ab\x7f")
+    assert actions == [("text", "ab"), ("draft_backspace", "")]
+    actions, _ = _parse_scroll_keys(b"abc\x15")
+    assert actions == [("text", "abc"), ("draft_clear", "")]
+
+
+def test_parse_keys_control_bytes_echo_nothing() -> None:
+    """Unmapped control bytes (Ctrl-D, tabs) produce no events."""
+    actions, _ = _parse_scroll_keys(b"a\x04b\tc")
+    assert actions == [("text", "a"), ("text", "b"), ("text", "c")]
 
 
 # ── scroll key reader (tty stdin) ─────────────────────────────────────
@@ -781,7 +823,7 @@ def test_scroll_key_reader_dispatches_parsed_actions() -> None:
 
     from hosts.cli.transport import _ScrollKeyReader
 
-    actions: list[str] = []
+    actions: list[Any] = []
     reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
     reader._fd = 0
     reader._saved = []
@@ -810,7 +852,7 @@ def test_scroll_key_reader_dispatches_parsed_actions() -> None:
         real_os.read = real_read  # type: ignore[assignment]
         real_select.select = real_select_fn  # type: ignore[assignment]
 
-    assert actions == ["up", "down"]
+    assert actions == [("up", ""), ("down", "")]
 
 
 def test_scroll_key_reader_dispatch_uses_the_event_loop() -> None:
@@ -820,7 +862,7 @@ def test_scroll_key_reader_dispatch_uses_the_event_loop() -> None:
 
     from hosts.cli.transport import _ScrollKeyReader
 
-    actions: list[str] = []
+    actions: list[Any] = []
     reader = _ScrollKeyReader.__new__(_ScrollKeyReader)
     reader._fd = 0
     reader._saved = []
@@ -830,11 +872,11 @@ def test_scroll_key_reader_dispatch_uses_the_event_loop() -> None:
 
     async def scenario() -> None:
         reader._loop = asyncio.get_running_loop()
-        reader._dispatch("up")
+        reader._dispatch(("up", ""))
         await asyncio.sleep(0)
 
     asyncio.run(scenario())
-    assert actions == ["up"]
+    assert actions == [("up", "")]
 
 
 def test_scroll_key_reader_captures_the_running_loop() -> None:
@@ -993,18 +1035,18 @@ def test_scrolling_reveals_oldest_rows_and_end_resumes_tail() -> None:
     following = _rendered_plain(console, transport._activity_history(max_rows=10))
     assert "tool row 0" not in following
 
-    transport._scroll_activity("home")
+    transport._scroll_activity(("home", ""))
     top = _rendered_plain(console, transport._activity_history(max_rows=10))
     assert "tool row 0" in top
     assert "newer lines" in top
 
-    transport._scroll_activity("pgdn")
-    transport._scroll_activity("up")
+    transport._scroll_activity(("pgdn", ""))
+    transport._scroll_activity(("up", ""))
     transport._append_activity_row(Text("tool row new"))
     anchored = _rendered_plain(console, transport._activity_history(max_rows=10))
     assert "tool row new" not in anchored
 
-    transport._scroll_activity("end")
+    transport._scroll_activity(("end", ""))
     assert transport._activity_scroll_top is None
     tail = _rendered_plain(console, transport._activity_history(max_rows=10))
     assert "tool row new" in tail
@@ -1018,7 +1060,7 @@ def test_stop_action_without_handler_is_inert() -> None:
     transport, _console = _make_tty_transport()
     transport._screen_mode = True
     transport._append_activity_row(Text("working"))
-    transport._scroll_activity("stop")
+    transport._scroll_activity(("stop", ""))
     assert transport._stop_requested is False
 
 
@@ -1029,7 +1071,7 @@ def test_stop_action_invokes_the_handler_once() -> None:
     transport._append_activity_row(Text("working"))
     calls: list[str] = []
     transport.set_stop_handler(lambda: calls.append("stop"))
-    transport._scroll_activity("stop")
+    transport._scroll_activity(("stop", ""))
     assert calls == ["stop"]
     assert transport._stop_requested is True
 
@@ -1053,9 +1095,116 @@ def test_status_line_shows_stop_hint_and_stopping_segment() -> None:
     idle = _rendered_plain(console, transport._compose_status_body(width=80))
     assert "Esc stop" in idle
 
-    transport._scroll_activity("stop")
+    transport._scroll_activity(("stop", ""))
     stopping = _rendered_plain(console, transport._compose_status_body(width=80))
     assert "⏹ stopping…" in stopping
+
+
+# ── in-turn draft composer (Milestone 3) ───────────────────────────────
+
+
+def test_draft_accumulates_and_submits_through_the_seam() -> None:
+    """Typed text builds the draft; Enter hands it to the submit seam."""
+    transport, _console = _make_tty_transport()
+    submitted: list[str] = []
+    transport.set_submit_handler(submitted.append)
+
+    events, _pending = _parse_scroll_keys(b"follow up\r")
+    for event in events:
+        transport._scroll_activity(event)
+    assert submitted == ["follow up"]
+    assert transport.pop_draft() == ""
+
+
+def test_draft_submit_without_handler_is_a_noop() -> None:
+    """The one-shot path wires no submit seam: Enter stores nothing, calls nothing."""
+    transport, _console = _make_tty_transport()
+    events, _pending = _parse_scroll_keys(b"orphan\r")
+    for event in events:
+        transport._scroll_activity(event)
+    assert transport.pop_draft() == ""
+
+
+def test_draft_whitespace_submit_is_dropped() -> None:
+    """A whitespace-only draft never reaches the submit seam."""
+    transport, _console = _make_tty_transport()
+    submitted: list[str] = []
+    transport.set_submit_handler(submitted.append)
+    events, _pending = _parse_scroll_keys(b"   \r")
+    for event in events:
+        transport._scroll_activity(event)
+    assert submitted == []
+
+
+def test_draft_backspace_deletes_whole_grapheme_clusters() -> None:
+    """Backspace removes one emoji family as a unit, not one codepoint."""
+    transport, _console = _make_tty_transport()
+    family = "👨‍👩‍👧‍👦"
+    events, _pending = _parse_scroll_keys(family.encode() + b" x")
+    for event in events:
+        transport._scroll_activity(event)
+    assert transport._draft_text == f"{family} x"
+    # Two presses remove the two clusters "x" and " ", leaving the family.
+    for _ in range(2):
+        transport._scroll_activity(("draft_backspace", ""))
+    assert transport._draft_text == family
+    # One more removes the whole family as a single cluster.
+    transport._scroll_activity(("draft_backspace", ""))
+    assert transport._draft_text == ""
+
+
+def test_draft_clear_empties_the_composer() -> None:
+    """Ctrl-U clears the whole draft."""
+    transport, _console = _make_tty_transport()
+    events, _pending = _parse_scroll_keys(b"everything")
+    for event in events:
+        transport._scroll_activity(event)
+    transport._scroll_activity(("draft_clear", ""))
+    assert transport._draft_text == ""
+
+
+def test_draft_row_renders_typed_text_with_prompt_glyph() -> None:
+    """The draft echo row shows › and the typed text, truncated to the width."""
+    transport, console = _make_tty_transport()
+    transport._screen_mode = True
+    assert transport._draft_row(width=80) is None
+    transport._draft_text = "meanwhile, queue this"
+    row = transport._draft_row(width=80)
+    rendered = _rendered_plain(console, row)
+    assert "›" in rendered
+    assert "meanwhile, queue this" in rendered
+
+
+def test_status_line_shows_queued_count() -> None:
+    """The queued segment appears once the surface stamps a count."""
+    transport, console = _make_tty_transport()
+    transport._screen_mode = True
+    body = _rendered_plain(console, transport._compose_status_body(width=80))
+    assert "queued" not in body
+    transport.set_queued_count(2)
+    body = _rendered_plain(console, transport._compose_status_body(width=80))
+    assert "queued 2" in body
+
+
+def test_activity_frame_includes_draft_row() -> None:
+    """The frame appends the draft echo row under the status line and box."""
+    transport, console = _make_tty_transport()
+    transport._screen_mode = True
+    transport._draft_text = "typed mid-turn"
+    frame = transport._activity_frame()
+    rendered = _rendered_plain(console, frame)
+    assert "› typed mid-turn" in rendered
+
+
+def test_utf8_pending_tail_two_and_four_byte_sequences() -> None:
+    """The pending-tail check covers 2-byte and 4-byte lead splits."""
+    from hosts.cli.transport import _utf8_pending_tail
+
+    assert _utf8_pending_tail("é".encode()[:1]) == 1  # 2-byte lead alone
+    assert _utf8_pending_tail("😀".encode()[:2]) == 2  # 4-byte lead + 1 cont
+    assert _utf8_pending_tail("😀".encode()) == 0  # complete
+    assert _utf8_pending_tail(b"") == 0
+    assert _utf8_pending_tail(b"ascii") == 0
 
 
 def test_scrolled_view_expands_collapsed_tool_output() -> None:
@@ -1066,7 +1215,7 @@ def test_scrolled_view_expands_collapsed_tool_output() -> None:
     for index in range(50):
         transport._append_activity_row(_OutputLine(f"    │ out {index}"))
 
-    transport._scroll_activity("home")
+    transport._scroll_activity(("home", ""))
     plain = _rendered_plain(console, transport._activity_history(max_rows=12))
 
     assert "out 1" in plain

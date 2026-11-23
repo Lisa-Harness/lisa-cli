@@ -244,6 +244,92 @@ def test_stopped_exit_classifies_as_stopped(
     asyncio.run(scenario())
 
 
+# ── Queue mechanics (Milestone 3) ─────────────────────────────────────
+
+
+def test_queue_message_fifo_and_inspection(stub_runtime: Any) -> None:
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        assert session.queue_message("one") == 1
+        assert session.queue_message("two") == 2
+        assert session.queued_messages() == ["one", "two"]
+
+    asyncio.run(scenario())
+
+
+def test_queue_message_ignores_whitespace(stub_runtime: Any) -> None:
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        assert session.queue_message("   \n  ") == 0
+        assert session.queued_messages() == []
+
+    asyncio.run(scenario())
+
+
+def test_queue_message_bounded(stub_runtime: Any) -> None:
+    """The queue refuses past its bound so a runaway paste cannot grow it."""
+    from hosts.cli.session import _QUEUE_MAX_MESSAGES, QueueLimitError
+
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        for i in range(_QUEUE_MAX_MESSAGES):
+            session.queue_message(f"m{i}")
+        with pytest.raises(QueueLimitError):
+            session.queue_message("overflow")
+        assert len(session.queued_messages()) == _QUEUE_MAX_MESSAGES
+
+    asyncio.run(scenario())
+
+
+def test_queue_message_closed_session_raises(stub_runtime: Any) -> None:
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        await session.aclose()
+        with pytest.raises(SessionStateError):
+            session.queue_message("late")
+
+    asyncio.run(scenario())
+
+
+def test_drop_queued_newest_and_oldest(stub_runtime: Any) -> None:
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        session.queue_message("first")
+        session.queue_message("second")
+        assert session.drop_queued() == "second"
+        assert session.queued_messages() == ["first"]
+        assert session.drop_queued(0) == "first"
+        assert session.queued_messages() == []
+        with pytest.raises(IndexError):
+            session.drop_queued()
+
+    asyncio.run(scenario())
+
+
+def test_last_outcome_tracks_each_turn(stub_runtime: Any, monkeypatch: Any) -> None:
+    """The engine's last_outcome surfaces the most recent turn's classification."""
+    _patch_handle(monkeypatch, _stub_handle_message)
+    session = _make_session(stub_runtime)
+
+    async def scenario() -> None:
+        await session.start()
+        assert session.last_outcome is None
+        outcome = await session.run_turn("probe")
+        assert session.last_outcome is outcome
+
+    asyncio.run(scenario())
+
+
 def test_stop_requests_tolerate_a_sessionless_runtime() -> None:
     """A runtime without a session seam: the stop requests are no-ops."""
 

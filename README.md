@@ -380,8 +380,17 @@ In the session:
 
 - Input uses the same editor as `lisa prompt` — Enter adds a line, Ctrl-J
   sends (or `--swap-keys`/`LISA_PROMPT_KEYS` for Enter-sends), Alt+Up
-  recalls history, and `$(command)` expands. `/help` and `/quit` are the
-  only session-local slash controls.
+  recalls history, and `$(command)` expands. Session-local controls:
+  `/help`, `/quit`, `/queue` (list queued follow-ups), `/drop` (drop the
+  newest queued message).
+- **Type while a turn runs.** The composer stays live: typed text shows
+  as a `› draft` line, Backspace deletes whole emoji clusters, Ctrl-U
+  clears, and **Enter queues the draft as the next follow-up** — the
+  status line shows `queued N`, and queued turns run in order after the
+  current one settles. A pending approval or model question pauses the
+  drain until you settle it; the queue keeps its order. Text left
+  un-submitted when the turn ends seeds the next editor invocation, so
+  nothing typed is ever lost.
 - **Esc stops the running turn cooperatively.** The kernel honors the stop
   request at its next iteration boundary: the current step finishes, loop
   state is preserved, and your next message redirects the turn. Nothing

@@ -73,6 +73,16 @@ class SessionStateError(RuntimeError):
     """A turn was requested while the session engine is not in an idle state."""
 
 
+class QueueLimitError(RuntimeError):
+    """The session's queued-message bound was reached; the message was refused."""
+
+
+#: Bound on queued messages. A queue is a short "next up" list for a running
+#: turn, not a durable backlog; an unbounded one invites runaway memory from
+#: a pasted script or a stuck key repeat.
+_QUEUE_MAX_MESSAGES = 16
+
+
 @dataclass(slots=True)
 class TurnOutcome:
     """The structural result of one engine turn.
@@ -108,6 +118,15 @@ class InteractiveSession:
     _started: bool = field(default=False, init=False, repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _turn_active: bool = field(default=False, init=False, repr=False, compare=False)
+    #: FIFO of operator messages submitted while a turn runs (or between
+    #: decision rounds). Drained by the surface after each settled turn;
+    #: approval/yield states preempt the drain — the operator must settle
+    #: the pending state first, and queued work stays queued.
+    _queue: list[str] = field(default_factory=list, init=False, repr=False, compare=False)
+    #: The last completed turn's outcome (``None`` before the first turn).
+    #: Surfaces read it to decide whether the queue drain must pause for a
+    #: pending operator decision; the engine never mutates it retroactively.
+    last_outcome: TurnOutcome | None = field(default=None, init=False, repr=False, compare=False)
     #: The structured approval payload of the turn that last paused on one
     #: (``data["approval"]``), or ``None``. Cleared at the start of the next
     #: turn and refreshed by classification.
@@ -160,6 +179,52 @@ class InteractiveSession:
 
         session.operator_signal_value = OperatorSignal.TERMINATE
 
+    # ── Queued follow-ups (Milestone 3) ─────────────────────────────────
+
+    def queue_message(self, message: str) -> int:
+        """Queue a follow-up message to run after the active turn settles.
+
+        Returns the queue's new length. Whitespace-only messages are
+        ignored (return the current length) — an accidental Enter submits
+        nothing. Raises :class:`SessionStateError` on a closed session and
+        :class:`QueueLimitError` past the bound, so a runaway paste cannot
+        grow the queue without the operator hearing about it.
+
+        Queueing is safe at any moment (idle, mid-turn, paused-for-approval):
+        the queue is a plain FIFO drained by the surface only after a turn
+        settles without a pending decision.
+        """
+        if self._closed:
+            raise SessionStateError("The session is closed; build a new session.")
+        if not message.strip():
+            return len(self._queue)
+        if len(self._queue) >= _QUEUE_MAX_MESSAGES:
+            raise QueueLimitError(
+                f"Queue is full ({_QUEUE_MAX_MESSAGES} messages); "
+                "wait for the running turn to settle."
+            )
+        self._queue.append(message)
+        return len(self._queue)
+
+    def queued_messages(self) -> list[str]:
+        """A copy of the queued follow-ups, oldest first."""
+        return list(self._queue)
+
+    def drop_queued(self, index: int = -1) -> str:
+        """Remove one queued message (default: the newest) and return it.
+
+        Index follows list semantics: ``-1`` drops the newest, ``0`` the
+        oldest. An out-of-range index raises ``IndexError`` — the caller
+        refreshed from :meth:`queued_messages` and raced; re-read and retry.
+        """
+        return self._queue.pop(index)
+
+    def _pop_queued(self) -> str | None:
+        """Pop the oldest queued message, or ``None`` when the queue is empty."""
+        if not self._queue:
+            return None
+        return self._queue.pop(0)
+
     async def start(self) -> None:
         """Start the runtime's MCP pool inside the session's event loop.
 
@@ -194,15 +259,15 @@ class InteractiveSession:
                 result = await self._handle_message(message)
             except asyncio.CancelledError:
                 await self._recover_after_cancel()
-                return TurnOutcome(kind="cancelled")
+                return self._remember_outcome(TurnOutcome(kind="cancelled"))
             except KeyboardInterrupt:
                 await self._recover_after_cancel()
-                return TurnOutcome(kind="cancelled")
+                return self._remember_outcome(TurnOutcome(kind="cancelled"))
             except Exception as exc:  # pylint: disable=broad-except
                 logger.error("interactive turn failed: %s: %s", type(exc).__name__, exc)
                 await self.transport.on_error(f"Turn failed: {type(exc).__name__}: {exc}", exc)
                 self._record_session_turn(succeeded=False, started_perf=started_perf)
-                return TurnOutcome(kind="error")
+                return self._remember_outcome(TurnOutcome(kind="error"))
         finally:
             self._turn_active = False
         outcome = self._outcome_from_result(result)
@@ -212,6 +277,11 @@ class InteractiveSession:
         )
         self._pending_approval = None
         self._pending_yield_question = ""
+        return self._remember_outcome(outcome)
+
+    def _remember_outcome(self, outcome: TurnOutcome) -> TurnOutcome:
+        """Record the turn's outcome for surface reads (queue-drain preemption)."""
+        self.last_outcome = outcome
         return outcome
 
     async def decide_approval(
@@ -255,21 +325,21 @@ class InteractiveSession:
                 )
             except asyncio.CancelledError:
                 await self._recover_after_cancel()
-                return TurnOutcome(kind="cancelled")
+                return self._remember_outcome(TurnOutcome(kind="cancelled"))
             except KeyboardInterrupt:
                 await self._recover_after_cancel()
-                return TurnOutcome(kind="cancelled")
+                return self._remember_outcome(TurnOutcome(kind="cancelled"))
             except Exception as exc:  # pylint: disable=broad-except
                 logger.error("approval decision failed: %s: %s", type(exc).__name__, exc)
                 await self.transport.on_error(
                     f"Approval decision failed: {type(exc).__name__}: {exc}", exc
                 )
-                return TurnOutcome(kind="error")
+                return self._remember_outcome(TurnOutcome(kind="error"))
         finally:
             self._turn_active = False
         self._pending_approval = None
         self._pending_yield_question = ""
-        return self._outcome_from_result(result)
+        return self._remember_outcome(self._outcome_from_result(result))
 
     def _require_ready(self) -> None:
         """Raise the engine state errors for a closed or not-yet-started session."""

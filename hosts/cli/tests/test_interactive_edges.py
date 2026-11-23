@@ -167,6 +167,58 @@ def test_ledger_failure_is_tolerated(tmp_path: Any, monkeypatch: Any) -> None:
     asyncio.run(scenario())
 
 
+def test_drain_returns_true_on_restart_required() -> None:
+    """A restart-required drained turn stops the session with the notice."""
+    import tempfile
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession as _Engine
+
+    console = _console()
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = _Engine(runtime=runtime, transport=_Transport())
+
+    async def _fake_handle(rt: Any, message: str, transport: Any) -> Any:
+        rt.session.restart_required = True
+        rt.session.restart_reason = "pack install"
+        return SimpleNamespace(text="ok", data={}, is_error=False, operator_exit="")
+
+    import runtime.handle_message as hm
+
+    original = hm.handle_message
+    hm.handle_message = _fake_handle
+
+    async def scenario() -> bool:
+        await session.start()
+        session.queue_message("trigger")
+        return await interactive_mod._drain_queue(session, console, None)
+
+    try:
+        must_restart = asyncio.run(scenario())
+    finally:
+        hm.handle_message = original
+    assert must_restart is True
+
+
+def test_stop_requests_on_sessionless_runtime_are_noops() -> None:
+    """request_stop/request_terminate tolerate a runtime without a session."""
+
+    class _BareRuntime:
+        session = None  # type: ignore[assignment]
+
+        async def start(self) -> None:
+            return None
+
+    from hosts.cli.session import InteractiveSession
+
+    session = InteractiveSession(runtime=_BareRuntime(), transport=_Transport())  # type: ignore[arg-type]
+    session.request_stop()
+    session.request_terminate()
+
+
 def test_resolve_pending_without_approval_service(tmp_path: Any) -> None:
     """A runtime with no approval service resolves no pending id."""
 
@@ -176,6 +228,8 @@ def test_resolve_pending_without_approval_service(tmp_path: Any) -> None:
 
         async def start(self) -> None:
             return None
+
+    from hosts.cli.session import InteractiveSession
 
     session = InteractiveSession(runtime=_NoServiceRuntime(), transport=_Transport())  # type: ignore[arg-type]
     resolved = asyncio.run(session._resolve_pending_request_id())
