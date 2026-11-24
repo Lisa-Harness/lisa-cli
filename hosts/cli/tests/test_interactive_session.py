@@ -19,6 +19,7 @@ from __future__ import annotations
 
 # pylint: disable=protected-access
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -340,6 +341,139 @@ def test_loop_cancellation_exits_cleanly(surface: Any) -> None:
     assert code == 0
 
 
+def test_resume_switch_rebuilds_conversation(surface: Any) -> None:
+    """``/resume <id>`` closes the session and rebuilds with the new id."""
+    constructed: list[dict[str, Any]] = []
+    closed: list[bool] = []
+
+    class _SwitchSession(surface.session_cls):  # type: ignore[misc]
+        def __init__(self, *, runtime: Any = None, transport: Any = None) -> None:
+            super().__init__(runtime=runtime, transport=transport)
+            constructed.append({"runtime": self.runtime})
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    original_session = interactive_mod.InteractiveSession
+    interactive_mod.InteractiveSession = _SwitchSession
+
+    def _fake_local_step(session: Any, console: Any, step: str, arg: str = "") -> str:
+        if step == "resume" and arg == "alpha":
+            raise interactive_mod._SessionSwitch("alpha")
+        if step == "quit":
+            return "quit"
+        return "continue"
+
+    original_step = interactive_mod._handle_local_step
+    interactive_mod._handle_local_step = _fake_local_step
+    try:
+        reader = _scripted_reader(["/resume alpha", "quit"])
+        code = _run_surface(surface, reader)
+        assert code == 0
+        # Two conversations ran: the switch rebuilt once, then quit closed.
+        assert len(constructed) == 2
+        assert closed, "the first session must close before the rebuild"
+    finally:
+        interactive_mod.InteractiveSession = original_session
+        interactive_mod._handle_local_step = original_step
+
+
+def test_switch_keeps_conversation_id_in_kwargs(surface: Any) -> None:
+    """The conversation cycle threads the switched id into the next boot."""
+    seen: list[str] = []
+
+    async def _fake_run_conversation(console: Any, runtime_kwargs: Any, reader: Any, decider: Any):
+        seen.append(str(runtime_kwargs.get("conversation_id") or ""))
+        return None, None, 0
+
+    original = interactive_mod._run_conversation
+    interactive_mod._run_conversation = _fake_run_conversation
+    try:
+        reader = _scripted_reader(["quit"])
+        code = asyncio.run(
+            interactive_mod.run_interactive_session(
+                console=surface.console,
+                data_dir="",
+                profile="",
+                runtime_kwargs={"conversation_id": "alpha"},
+                read_message=reader,
+            )
+        )
+        assert code == 0
+        assert seen == ["alpha"]
+    finally:
+        interactive_mod._run_conversation = original
+
+
+def test_latest_resolution_picks_newest_conversation(surface: Any, monkeypatch: Any) -> None:
+    """``latest`` resolves through the probe + catalog before the first boot."""
+    from types import SimpleNamespace
+
+    from hosts.cli import cli_runtime as cli_runtime_mod
+    from hosts.cli import conversations as catalog_mod
+    from hosts.cli.conversations import ConversationRecord
+
+    probe_calls: list[dict[str, Any]] = []
+
+    def _fake_probe_init(**kwargs: Any) -> Any:
+        probe_calls.append(dict(kwargs))
+        return SimpleNamespace(
+            paths=SimpleNamespace(thread_dir=Path("/t")),
+            config=SimpleNamespace(user_slug="cli-user"),
+        )
+
+    monkeypatch.setattr(cli_runtime_mod, "_initialize_runtime_or_exit", _fake_probe_init)
+    newest = ConversationRecord("beta", "cli-user--beta", 4, "2026-11-23T12:00:00", "s", "default")
+    monkeypatch.setattr(catalog_mod, "latest_conversation", lambda d, *, user_slug: newest)
+
+    resolved = interactive_mod._resolve_latest_conversation(
+        {"conversation_id": "", "data_dir": "/x"}
+    )
+    assert resolved == "beta"
+    # The probe never carries the conversation id or the in-process flag.
+    assert "conversation_id" not in probe_calls[0]
+
+    # The default store as latest means nothing to switch to.
+    default_latest = ConversationRecord(
+        "default", "cli-user", 4, "2026-11-23T12:00:00", "s", "default"
+    )
+    monkeypatch.setattr(catalog_mod, "latest_conversation", lambda d, *, user_slug: default_latest)
+    assert interactive_mod._resolve_latest_conversation({}) is None
+
+    # An empty catalog resolves nothing.
+    monkeypatch.setattr(catalog_mod, "latest_conversation", lambda d, *, user_slug: None)
+    assert interactive_mod._resolve_latest_conversation({}) is None
+
+    # A probe construction failure resolves nothing (never raises).
+    def _boom(**_kwargs: Any) -> Any:
+        raise RuntimeError("no config")
+
+    monkeypatch.setattr("hosts.cli.cli_runtime._initialize_runtime_or_exit", _boom)
+    assert interactive_mod._resolve_latest_conversation({}) is None
+
+
+def test_run_conversation_startup_failure_returns_two(surface: Any) -> None:
+    """A runtime-construction failure exits 2 without touching the loop."""
+
+    async def _fake_session_loop(*_args: Any) -> int:
+        raise AssertionError("the loop must not run")
+
+    original_loop = interactive_mod._session_loop
+    from hosts.cli import cli_runtime as cli_runtime_mod
+
+    original_init = cli_runtime_mod._initialize_runtime_or_exit
+    interactive_mod._session_loop = _fake_session_loop
+    cli_runtime_mod._initialize_runtime_or_exit = lambda **kwargs: None
+    try:
+        _session, _switch, code = asyncio.run(
+            interactive_mod._run_conversation(surface.console, {}, _scripted_reader([]), None)
+        )
+        assert code == 2
+    finally:
+        interactive_mod._session_loop = original_loop
+        cli_runtime_mod._initialize_runtime_or_exit = original_init
+
+
 def test_render_outcome_lines(surface: Any) -> None:
     """Outcome renderers map each engine kind to its operator notice."""
     from rich.console import Console as _Console
@@ -471,15 +605,18 @@ def test_parse_approval_answer_vocabulary() -> None:
 
 
 def test_classify_session_message() -> None:
-    assert interactive_mod._classify_session_message("") == "skip"
-    assert interactive_mod._classify_session_message("   ") == "skip"
-    assert interactive_mod._classify_session_message("quit") == "quit"
-    assert interactive_mod._classify_session_message("/exit") == "quit"
-    assert interactive_mod._classify_session_message("/help") == "help"
-    assert interactive_mod._classify_session_message("/queue") == "queue"
-    assert interactive_mod._classify_session_message("/q") == "queue"
-    assert interactive_mod._classify_session_message("/drop") == "queue_drop"
-    assert interactive_mod._classify_session_message("fix the parser") == "turn"
+    assert interactive_mod._classify_session_message("") == ("skip", "")
+    assert interactive_mod._classify_session_message("   ") == ("skip", "")
+    assert interactive_mod._classify_session_message("quit") == ("quit", "")
+    assert interactive_mod._classify_session_message("/exit") == ("quit", "")
+    assert interactive_mod._classify_session_message("/help") == ("help", "")
+    assert interactive_mod._classify_session_message("/queue") == ("queue", "")
+    assert interactive_mod._classify_session_message("/q") == ("queue", "")
+    assert interactive_mod._classify_session_message("/drop") == ("queue_drop", "")
+    assert interactive_mod._classify_session_message("/resume alpha") == ("resume", "alpha")
+    assert interactive_mod._classify_session_message("/resume") == ("resume", "")
+    assert interactive_mod._classify_session_message("/new") == ("new", "")
+    assert interactive_mod._classify_session_message("fix the parser") == ("turn", "")
 
 
 def test_queue_command_lists_and_drop_removes(surface: Any) -> None:
@@ -685,3 +822,134 @@ def test_expand_message_failure_is_loud() -> None:
     expanded, failure = interactive_mod._expand_message("$(definitely-not-a-command-xyz)")
     assert failure, "a failed substitution must be reported, not silently dropped"
     assert expanded == "$(definitely-not-a-command-xyz)"
+
+
+def test_resolve_resume_target_messages(surface: Any) -> None:
+    """Bare /resume with no catalog and unknown ids report clearly."""
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    session = InteractiveSession(runtime=runtime, transport=_NullTransport())
+    console = surface.console
+
+    # No conversations at all.
+    assert interactive_mod._resolve_resume_target(session, console, "") is None
+    # Explicit id that does not exist.
+    assert interactive_mod._resolve_resume_target(session, console, "ghost") is None
+
+
+def test_resolve_resume_target_current_is_reported(surface: Any) -> None:
+    """Bare /resume when the latest IS the current conversation says so."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from runtime.testing import build_test_runtime
+
+    from hosts.cli.session import InteractiveSession
+
+    runtime = build_test_runtime(Path(tempfile.mkdtemp()), models_yaml="")
+    thread_dir = runtime.paths.thread_dir
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    slug = runtime.config.user_slug
+    (thread_dir / f"{slug}.current.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp_utc": "2026-11-23T10:00:00",
+                "user_slug": slug,
+                "mode_id": "default",
+                "query": "only turn",
+                "response_text": "ok",
+                "turn": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    session = InteractiveSession(runtime=runtime, transport=_NullTransport())
+    # The latest conversation is the default store, which is already current.
+    assert interactive_mod._resolve_resume_target(session, surface.console, "") is None
+
+
+def test_run_conversation_surfaces_switch_and_closes(surface: Any) -> None:
+    """The real conversation runner: a switch raises out and lands cleanly."""
+    original = interactive_mod.InteractiveSession
+
+    async def _loop(session: Any, console: Any, reader: Any, decider: Any) -> int:
+        raise interactive_mod._SessionSwitch("beta")
+
+    original_loop = interactive_mod._session_loop
+    interactive_mod._session_loop = _loop
+    try:
+        _session, switch, code = asyncio.run(
+            interactive_mod._run_conversation(
+                surface.console,
+                {"conversation_id": "alpha"},
+                _scripted_reader([]),
+                None,
+            )
+        )
+        assert switch == "beta"
+        assert code == 0
+    finally:
+        interactive_mod._session_loop = original_loop
+        interactive_mod.InteractiveSession = original
+
+
+def test_run_conversation_error_closes_and_exits_one(surface: Any) -> None:
+    """An unexpected loop failure closes the session and exits 1."""
+
+    async def _boom(*_args: Any) -> int:
+        raise RuntimeError("loop exploded")
+
+    original_loop = interactive_mod._session_loop
+    interactive_mod._session_loop = _boom
+    try:
+        _session, switch, code = asyncio.run(
+            interactive_mod._run_conversation(surface.console, {}, _scripted_reader([]), None)
+        )
+        assert switch is None
+        assert code == 1
+    finally:
+        interactive_mod._session_loop = original_loop
+
+
+def test_close_session_none_is_clean(surface: Any) -> None:
+    """Closing a None session (startup failed before construction) is clean."""
+    assert asyncio.run(interactive_mod._close_session(None, surface.console)) is True
+
+
+def test_latest_flag_threads_conversation_into_first_boot(surface: Any) -> None:
+    """``latest`` resolves before the cycle and threads the id into kwargs."""
+    seen: list[dict[str, Any]] = []
+
+    async def _fake_run_conversation(console: Any, runtime_kwargs: Any, reader: Any, decider: Any):
+        seen.append(dict(runtime_kwargs))
+        return None, None, 0
+
+    original = interactive_mod._run_conversation
+    original_resolve = interactive_mod._resolve_latest_conversation
+    interactive_mod._run_conversation = _fake_run_conversation
+    interactive_mod._resolve_latest_conversation = lambda kwargs: "resolved-id"
+    try:
+        reader = _scripted_reader(["quit"])
+        code = asyncio.run(
+            interactive_mod.run_interactive_session(
+                console=surface.console,
+                data_dir="",
+                profile="",
+                runtime_kwargs={"conversation_id": ""},
+                read_message=reader,
+                latest=True,
+            )
+        )
+        assert code == 0
+        assert seen[0]["conversation_id"] == "resolved-id"
+    finally:
+        interactive_mod._run_conversation = original
+        interactive_mod._resolve_latest_conversation = original_resolve

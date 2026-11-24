@@ -15,6 +15,7 @@ from hosts.cli.commands import catalog
 from hosts.cli.commands import host
 from hosts.cli.commands import mcp
 from hosts.cli.commands import packs
+from hosts.cli.commands import sessions
 from hosts.cli.commands import update_command
 from hosts.cli import prompt
 from hosts.cli.commands import intake
@@ -26,6 +27,7 @@ _COMPAT_MODULES: tuple[ModuleType, ...] = (
     prompt,
     catalog,
     host,
+    sessions,
     mcp,
     packs,
     update_command,

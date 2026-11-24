@@ -391,6 +391,20 @@ def _cli_callback(
         hidden=True,
         help="With lazy prompt routing: hoist the prompt turn's key-layout flag.",
     ),
+    resume: str = typer.Option(
+        "",
+        "--resume",
+        metavar="[CONVERSATION]",
+        help=(
+            "Start the interactive session on a conversation: the latest "
+            "when no id is given, or `lisa sessions` ids. Implies interactive mode."
+        ),
+    ),
+    continue_latest: bool = typer.Option(
+        False,
+        "--continue",
+        help="Start the interactive session on the most recent conversation.",
+    ),
 ) -> None:
     # The group-level copies of the prompt-only flags exist so Click parses
     # `lisa -r "fix it"` as [group flags, prompt] instead of dying on an
@@ -405,6 +419,23 @@ def _cli_callback(
     if version:
         console.print(f"lisa v{_get_version()}")
         raise typer.Exit()
+    if resume or continue_latest:
+        # Session-resume entry: route to the interactive surface with the
+        # requested conversation (Click already consumed the flag; no
+        # subcommand name follows).
+        _launch_session_resume(resume=resume, continue_latest=continue_latest, ctx=ctx)
+        raise typer.Exit()
     if ctx.invoked_subcommand is None:
         console.print(ctx.get_help())
         raise typer.Exit(code=2)
+
+
+def _launch_session_resume(*, resume: str, continue_latest: bool, ctx: typer.Context) -> None:
+    """Route a root ``--resume``/``--continue`` into the interactive session."""
+    del ctx  # the group callback already parsed everything this needs
+    from hosts.cli.interactive import interactive_command
+
+    interactive_command(
+        conversation_id=resume.strip(),
+        latest=continue_latest or not resume.strip(),
+    )

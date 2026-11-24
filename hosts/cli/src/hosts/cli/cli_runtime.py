@@ -63,6 +63,7 @@ def _initialize_runtime(
     streaming: str = "",
     host_log_path: str = "",
     in_process_mcp: bool = False,
+    conversation_id: str = "",
 ) -> HostRuntime:
     """Build and wire a HostRuntime from CLI args + env vars.
 
@@ -79,9 +80,11 @@ def _initialize_runtime(
 
     ``session_context`` is the optional path to a Markdown session plan
     file; ``user_slug`` is left to the framework (it derives from the
-    compiled plan's manifest name). The MCP pool is NOT started here —
-    ``runtime.start()`` must be called inside the host's event loop (see
-    the prompt/verify paths).
+    compiled plan's manifest name). ``conversation_id`` isolates the
+    thread store (``<user_slug>--<conversation_id>``; the interactive
+    session's resume/switch path and ``LISA_CONVERSATION_ID`` both land
+    here). The MCP pool is NOT started here — ``runtime.start()`` must be
+    called inside the host's event loop (see the prompt/verify paths).
     """
     # .env + packs-venv bootstrap before any framework import or
     # configuration resolution (PROMPT_STARTUP Slice C: the sweep is
@@ -104,6 +107,7 @@ def _initialize_runtime(
         streaming=streaming,
         host_log_path=host_log_path,
         in_process_mcp=in_process_mcp,
+        conversation_id=conversation_id,
     )
 
 

@@ -328,6 +328,9 @@ lisa                                # show usage
 lisa --help                         # also works after subcommands, e.g., prompt --help
 lisa verify                         # runs the diagnostic check including model availability
 lisa update                         # upgrade the installed CLI (uv tool upgrade)
+lisa sessions                       # list resumable conversations (no model call)
+lisa --continue                     # interactive session on the latest conversation
+lisa --resume <id>                  # interactive session on a specific conversation
 lisa interactive                    # persistent session: one runtime, many turns
 lisa prompt                         # run a turn with input via the turn editor
 lisa prompt "Hi"                    # run a turn with the CLI args as the input
@@ -411,6 +414,15 @@ In the session:
   resumes from it rather than the one-shot exit-4 dead end.
 - A pack change that needs a restart ends the session with a notice;
   relaunch `lisa interactive` to pick it up.
+- **Conversations.** `lisa sessions` lists resumable conversations (id,
+  turns, last activity, summary) from the durable thread stores — no model
+  call. `lisa --continue` starts the session on the most recent
+  conversation; `lisa --resume` with no id does the same, and
+  `lisa --resume <id>` targets a specific one. In the session, `/resume`
+  (or `/resume <id>`) switches by closing the current runtime and
+  rebuilding around the selected conversation's thread, and `/new`
+  starts a fresh default conversation. Resume restores the conversation's
+  context — it never rewrites your working tree.
 
 Host operations are unchanged: typed subcommands (`lisa settings`,
 `lisa models`, `lisa policy`, …) run in a separate process; the session

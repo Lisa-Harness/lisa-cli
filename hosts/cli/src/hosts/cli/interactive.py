@@ -107,6 +107,20 @@ _BANNER_HINTS = (
 )
 
 
+class _SessionSwitch(Exception):
+    """A conversation switch request unwinding the session loop.
+
+    Raised by ``/resume <id>`` and ``/new``; carries the target
+    conversation id (``"default"`` for a fresh conversation). The
+    conversation cycle catches it, closes the current session, and
+    rebuilds a runtime around the new identity.
+    """
+
+    def __init__(self, conversation_id: str) -> None:
+        super().__init__(conversation_id)
+        self.conversation_id = conversation_id
+
+
 def _print_help(console: Console) -> None:
     """Print the session-local control list (host commands stay real subcommands)."""
     console.print(
@@ -118,12 +132,16 @@ def _print_help(console: Console) -> None:
                     "  /quit               end the session (also: exit, quit, Ctrl-D)",
                     "  /queue              list queued follow-ups (/q)",
                     "  /drop               drop the newest queued message",
+                    "  /resume [id]        switch to a conversation (latest when bare)",
+                    "  /new                start a fresh default conversation",
                     "  Esc                 stop the running turn; next message redirects it",
                     "  Ctrl-C              cancel the running turn; session stays alive",
                     "  Ctrl-C at prompt    first aborts entry; second exits",
                     "  while a turn runs   type to draft; Enter queues it as the next turn",
                     "  Approvals           a = allow · r <prefix> = allow + remember",
                     "                     d = deny · empty = defer",
+                    "",
+                    "Conversations: `lisa sessions` lists them; `lisa --resume <id>` starts here.",
                     "",
                     "Host operations are typed subcommands outside the session:",
                     "  lisa settings · lisa tokens · lisa models · lisa policy · lisa last",
@@ -214,21 +232,62 @@ async def run_interactive_session(
     runtime_kwargs: dict[str, Any],
     read_message: Any | None = None,
     read_approval: Any | None = None,
+    latest: bool = False,
 ) -> int:
-    """Run one persistent session to operator exit; returns the exit code.
+    """Run the interactive workspace until operator exit; returns the exit code.
 
-    Boots the runtime once, serves turns until quit/EOF, then closes once.
+    Boots a runtime for the starting ``conversation_id`` (from
+    ``runtime_kwargs``), serves turns until quit/EOF, and honors
+    ``/resume <id>`` and ``/new`` by closing the current session and
+    rebuilding a runtime around the selected conversation — durable
+    threads make the switch a clean rebuild, not a live path mutation.
+
+    ``latest`` (``--continue`` / ``--resume`` with no id) picks the most
+    recently active conversation before the first boot: the user slug is
+    resolved from the session plan, the catalog picks the newest thread,
+    and the session boots straight into it.
+
     The exit code mirrors the one-shot contract: 0 clean; 2 startup error
     (raised as ``typer.Exit`` by the constructor path); 1 teardown failure
     (the bounded close did not complete — the operator must know); 130 the
     conventional SIGINT-abort code for exit-via-Ctrl-C.
+    """
+    kwargs = dict(runtime_kwargs)
+    if latest and not str(kwargs.get("conversation_id") or "").strip():
+        resolved = _resolve_latest_conversation(kwargs)
+        if resolved is not None:
+            kwargs["conversation_id"] = resolved
+    reader = read_message or _default_message_reader(console, data_dir, profile)
+    decider = read_approval or _read_approval_answer
+    exit_code = 0
+    while True:
+        session, switch, exit_code = await _run_conversation(console, kwargs, reader, decider)
+        if switch is None:
+            return exit_code
+        # A conversation switch: close the old session cleanly and rebuild
+        # with the new identity. ``conversation_id`` rides the runtime
+        # kwargs (the env var alone cannot change mid-process).
+        await _close_session(session, console)
+
+
+async def _run_conversation(
+    console: Console,
+    runtime_kwargs: dict[str, Any],
+    reader: Any,
+    decider: Any,
+) -> tuple[Any, str | None, int]:
+    """Boot one runtime, serve its loop; returns (session, switch, exit code).
+
+    The switch directive is ``"default"`` for ``/new`` or a conversation
+    id for ``/resume <id>``; ``None`` means the operator exited. The exit
+    code is the loop's code (0/130) or 1 on an unexpected session error.
     """
     from hosts.cli.cli_runtime import _initialize_runtime_or_exit
     from hosts.cli.transport import PromptTransport
 
     runtime = _initialize_runtime_or_exit(**runtime_kwargs)
     if runtime is None:
-        return 2
+        return None, None, 2
     transport = PromptTransport(console=console)
     transport.streaming_mode = runtime.config.streaming.mode
     from hosts.cli.prompt import _collect_model_pricing
@@ -247,25 +306,79 @@ async def run_interactive_session(
     # after each settled turn). Duck-typed for test transports.
     if hasattr(transport, "set_submit_handler"):
         transport.set_submit_handler(_make_queue_submitter(session, transport, console))
-    reader = read_message or _default_message_reader(console, data_dir, profile)
-    decider = read_approval or _read_approval_answer
-    exit_code = 0
     try:
         await session.start()
         _print_banner(console, _model_hint(runtime))
         exit_code = await _session_loop(session, console, reader, decider)
+        # Normal exit: close here — the conversation cycle only closes on
+        # a switch (where the session must stay alive until the rebuild).
+        if not await _close_session(session, console):
+            exit_code = 1
+        return session, None, exit_code
     except asyncio.CancelledError:
         # SIGINT during a turn cancels the loop task; the engine already
-        # recovered the turn (pool warm, state reset). Nothing else to do.
-        pass
-    finally:
-        try:
-            await session.aclose()
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.error("interactive session close failed: %s", exc)
-            console.print(f"[red]Session teardown did not complete cleanly: {exc}[/red]")
-            exit_code = 1
-    return exit_code
+        # recovered the turn (pool warm, state reset). Close what we can.
+        await _close_session(session, console)
+        return session, None, 0
+    except _SessionSwitch as switch:
+        return session, switch.conversation_id, 0
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("interactive conversation failed: %s", exc)
+        console.print(f"[red]Session error: {exc}[/red]")
+        await _close_session(session, console)
+        return session, None, 1
+
+
+async def _close_session(session: Any, console: Console) -> bool:
+    """Close one conversation's session; True when the close was clean.
+
+    A teardown failure is loud (logged + red notice) and returns False so
+    the caller can exit nonzero — never silently treated as success.
+    """
+    if session is None:
+        return True
+    try:
+        await session.aclose()
+        return True
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.error("interactive session close failed: %s", exc)
+        console.print(f"[red]Session teardown did not complete cleanly: {exc}[/red]")
+        return False
+
+
+def _resolve_latest_conversation(runtime_kwargs: dict[str, Any]) -> str | None:
+    """The most recently active conversation id, or ``None`` when none exist.
+
+    Resolves the user slug the same way the session boot does (a probe
+    runtime construction — no pool start, no model, discarded afterward),
+    then asks the catalog for the newest thread. Never raises: a probe or
+    scan failure means "no latest to resume", not a broken session.
+    """
+    from hosts.cli.conversations import latest_conversation
+
+    probe_kwargs = {
+        key: value
+        for key, value in runtime_kwargs.items()
+        if key not in {"conversation_id", "in_process_mcp"}
+    }
+    try:
+        from hosts.cli.cli_runtime import _initialize_runtime_or_exit
+
+        runtime = _initialize_runtime_or_exit(**probe_kwargs)
+        if runtime is None:
+            return None
+        record = latest_conversation(
+            runtime.paths.thread_dir,
+            user_slug=runtime.config.user_slug,
+        )
+        if record is None or record.turn_count <= 0:
+            return None
+        if record.conversation_id == "default":
+            return None  # the default store is where an un-flagged boot lands anyway
+        return record.conversation_id
+    except Exception:  # pylint: disable=broad-except
+        logger.debug("interactive: latest-conversation probe failed", exc_info=True)
+        return None
 
 
 def _make_queue_submitter(
@@ -336,9 +449,9 @@ async def _handle_session_message(
     decider: Any,
 ) -> str:
     """Dispatch one submitted message; returns ``turn``, ``continue``, ``quit``, or ``restart``."""
-    step = _classify_session_message(message)
+    step, arg = _classify_session_message(message)
     if step != "turn":
-        return _handle_local_step(session, console, step)
+        return _handle_local_step(session, console, step, arg)
     expanded, failure = _expand_message(message)
     if failure:
         console.print(f"[red]Shell substitution failed: {failure}[/red]")
@@ -354,8 +467,13 @@ def _handle_local_step(
     session: InteractiveSession,
     console: Console,
     step: str,
+    arg: str = "",
 ) -> str:
-    """Serve one session-local control step; every path returns ``continue`` or ``quit``."""
+    """Serve one session-local control step; returns ``continue``/``quit``/``restart``.
+
+    ``resume``/``new`` raise :class:`_SessionSwitch` — the conversation
+    cycle (not the message loop) owns closing and rebuilding the session.
+    """
     if step == "quit":
         return "quit"
     if step == "help":
@@ -367,7 +485,49 @@ def _handle_local_step(
     if step == "queue_drop":
         _drop_last_queued(session, console)
         return "continue"
+    if step == "new":
+        raise _SessionSwitch("default")
+    if step == "resume":
+        target = _resolve_resume_target(session, console, arg)
+        if target is not None:
+            raise _SessionSwitch(target)
+        return "continue"
     return "continue"  # skip
+
+
+def _resolve_resume_target(
+    session: InteractiveSession,
+    console: Console,
+    arg: str,
+) -> str | None:
+    """Resolve a ``/resume`` argument to a conversation id, or ``None``.
+
+    An explicit id resolves through the catalog (existence check with a
+    helpful error for unknown ids); bare ``/resume`` picks the most
+    recently active conversation other than the current one, if any.
+    """
+    from hosts.cli.conversations import latest_conversation, resolve_conversation
+
+    runtime = session.runtime
+    thread_dir = runtime.paths.thread_dir
+    slug = runtime.config.user_slug
+    current = runtime.config.conversation_id.strip() or "default"
+    if arg:
+        record = resolve_conversation(thread_dir, user_slug=slug, conversation_id=arg)
+        if record is None:
+            console.print(
+                f"[red]No conversation {arg!r} found. Run `lisa sessions` to list them.[/red]"
+            )
+            return None
+        return record.conversation_id
+    record = latest_conversation(thread_dir, user_slug=slug)
+    if record is None:
+        console.print("[grey58]No conversations to resume yet.[/grey58]")
+        return None
+    if record.conversation_id == current:
+        console.print("[grey58]That is already the current conversation.[/grey58]")
+        return None
+    return record.conversation_id
 
 
 async def _drain_queue(
@@ -412,20 +572,39 @@ def _handle_prompt_interrupt(console: Console, ctrl_c_at_prompt: bool) -> bool:
     return False
 
 
-def _classify_session_message(message: str) -> str:
-    """Classify one operator message: ``turn`` (expandable), ``quit``, ``help``, or ``skip``."""
-    if not message.strip():
-        return "skip"
-    lowered = message.strip().lower()
-    if lowered in _QUIT_WORDS:
-        return "quit"
-    if lowered in _HELP_WORDS:
-        return "help"
-    if lowered in {"/queue", "/q"}:
-        return "queue"
-    if lowered in {"/drop", "/queue drop"}:
-        return "queue_drop"
-    return "turn"
+def _classify_session_message(message: str) -> tuple[str, str]:
+    """Classify one operator message into ``(step, arg)``.
+
+    Steps: ``turn`` (expandable), ``quit``, ``help``, ``skip``, ``queue``,
+    ``queue_drop``, ``resume <id>``, ``new``. The argument carries the
+    resume target id (empty for bare ``/resume`` = latest).
+    """
+    stripped = message.strip()
+    if not stripped:
+        return "skip", ""
+    lowered = stripped.lower()
+    step = _WORD_STEPS.get(lowered)
+    if step is not None:
+        return step, ""
+    if lowered.startswith("/resume"):
+        return "resume", stripped.split(None, 1)[1].strip() if " " in stripped else ""
+    return "turn", ""
+
+
+#: Exact-match session-local words → steps. ``/resume <id>`` (with its
+#: argument) and ordinary prose fall through to the classifier.
+_WORD_STEPS: dict[str, str] = {
+    **dict.fromkeys(_QUIT_WORDS, "quit"),
+    **dict.fromkeys(_HELP_WORDS, "help"),
+    "/queue": "queue",
+    "/q": "queue",
+    "/drop": "queue_drop",
+    "/queue drop": "queue_drop",
+    "/new": "new",
+    "new session": "new",
+    "new conversation": "new",
+    "/resume": "resume",
+}
 
 
 def _expand_message(message: str) -> tuple[str, str]:
@@ -585,6 +764,16 @@ def interactive_command(
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "",
     host_log: HostLogOption = "",
+    conversation_id: str = typer.Option(
+        "",
+        "--conversation-id",
+        help="Isolate the thread store to this conversation (<user>--<id>).",
+    ),
+    latest: bool = typer.Option(
+        False,
+        "--latest",
+        help="Resume the most recently active conversation (over the default).",
+    ),
 ) -> None:
     """``lisa interactive`` — persistent session (registered by commands/host.py)."""
     code = asyncio.run(
@@ -592,6 +781,7 @@ def interactive_command(
             console=app_console,
             data_dir=data_dir,
             profile=profile,
+            latest=latest,
             runtime_kwargs={
                 "log_level": log_level,
                 "log_path": log,
@@ -607,6 +797,7 @@ def interactive_command(
                 "streaming": streaming,
                 "host_log_path": host_log,
                 "in_process_mcp": True,
+                "conversation_id": conversation_id,
             },
         )
     )

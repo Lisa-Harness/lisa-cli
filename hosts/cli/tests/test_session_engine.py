@@ -869,8 +869,8 @@ def test_parse_approval_answer_vocabulary() -> None:
 def test_classify_session_message() -> None:
     from hosts.cli.interactive import _classify_session_message
 
-    assert _classify_session_message("  ") == "skip"
-    assert _classify_session_message("quit") == "quit"
-    assert _classify_session_message("/exit") == "quit"
-    assert _classify_session_message("/help") == "help"
-    assert _classify_session_message("fix the parser") == "turn"
+    assert _classify_session_message("  ") == ("skip", "")
+    assert _classify_session_message("quit") == ("quit", "")
+    assert _classify_session_message("/exit") == ("quit", "")
+    assert _classify_session_message("/help") == ("help", "")
+    assert _classify_session_message("fix the parser") == ("turn", "")

@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 from e2etest.scripted import Reply
 
+from hosts.cli.cli_runtime import _aclose_runtime_bounded
 from hosts.cli.session import InteractiveSession
 
 pytestmark = pytest.mark.integration
@@ -209,3 +210,83 @@ def test_cooperative_stop_ends_turn_and_preserves_session(
 
     after = _run(scenario())
     assert "still alive after stop" in after.text
+
+
+# ── Scenario 4: conversation isolation across rebuilt runtimes ────────
+
+
+def test_conversation_id_isolates_threads_and_resume_reads_own_context(
+    offline_runtime_factory: Any,
+    scripted_gateway: Any,
+    scenario_plan: Path,
+    tmp_path: Path,
+) -> None:
+    """Turns under a conversation id land in its own thread; a rebuilt
+    runtime on the same id rehydrates that conversation's context.
+
+    This is the resume contract the interactive surface's ``/resume``
+    switch relies on: switch = close + rebuild with the id, and the
+    durable store carries the conversation forward.
+    """
+    # First runtime: an isolated conversation takes one turn.
+    first_gateway = scripted_gateway(lambda turn: Reply.text("alpha reply"))
+    runtime = offline_runtime_factory(
+        tmp_path, session_plan=str(scenario_plan), conversation_id="alpha"
+    )
+    runtime.session.provider_gateways_override = first_gateway
+
+    async def first_run() -> Any:
+        from runtime.handle_message import handle_message
+
+        await runtime.start()
+        try:
+            return await handle_message(runtime, "alpha question", _RecordingTransport())
+        finally:
+            runtime.session.provider_gateways_override = None
+            await _aclose_runtime_bounded(runtime)
+
+    _run(first_run())
+
+    # The alpha store exists and carries the turn; the default store does not.
+    thread_dir = tmp_path / "data" / "threads"
+    slug = runtime.config.user_slug
+    alpha_store = thread_dir / f"{slug}--alpha.current.jsonl"
+    default_store = thread_dir / f"{slug}.current.jsonl"
+    assert alpha_store.is_file(), "the isolated conversation must own its thread"
+    persisted = alpha_store.read_text(encoding="utf-8")
+    assert "alpha question" in persisted
+    assert "alpha reply" in persisted
+    assert not default_store.exists(), "the default conversation must stay untouched"
+
+    # Second runtime (the rebuild shape): same data dir, same conversation
+    # id, fresh construction. The scripted model echoes what the context
+    # assembly fed it, proving the prior turn rehydrated.
+    seen_context: list[str] = []
+
+    def context_probe(turn: Any) -> Reply:
+        for message in turn.request.messages:
+            if message.get("role") == "user" and "alpha question" in str(message.get("content")):
+                seen_context.append("rehydrated")
+                break
+        return Reply.text("beta reply")
+
+    resume_gateway = scripted_gateway(context_probe)
+    second = offline_runtime_factory(
+        tmp_path, session_plan=str(scenario_plan), conversation_id="alpha"
+    )
+    second.session.provider_gateways_override = resume_gateway
+
+    async def second_run() -> Any:
+        from runtime.handle_message import handle_message
+
+        await second.start()
+        try:
+            return await handle_message(second, "beta question", _RecordingTransport())
+        finally:
+            second.session.provider_gateways_override = None
+            await _aclose_runtime_bounded(second)
+
+    _run(second_run())
+    assert seen_context == ["rehydrated"], (
+        "the rebuilt runtime must rehydrate the conversation's prior turn"
+    )
