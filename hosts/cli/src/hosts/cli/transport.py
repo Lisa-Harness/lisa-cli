@@ -163,6 +163,9 @@ _SCROLL_KEYS: dict[bytes, str] = {
     b"\x1b[4~": "end",
 }
 
+#: Ctrl+T (the toggle-plan chord) arrives as the single byte 0x14.
+_CTRL_T = b"\x14"
+
 #: One parsed key event: ``(kind, arg)``. Scroll/stop events carry ``""``;
 #: ``text`` events carry the raw UTF-8 bytes typed (decoded by the
 #: transport's incremental decoder so a paste split mid-character does
@@ -174,13 +177,15 @@ _LF = b"\n"
 _DEL = b"\x7f"
 _CTRL_U = b"\x15"
 
-#: Named control bytes → draft events. CR/LF submit; DEL backspaces the
-#: draft (whole grapheme clusters); Ctrl-U clears it (readline kill-line).
+#: Named control bytes → key events. CR/LF submit; DEL backspaces the
+#: draft (whole grapheme clusters); Ctrl-U clears it (readline
+#: kill-line); Ctrl-T toggles the plan panel (Milestone 5).
 _CONTROL_KEYS: dict[int, str] = {
     _CR[0]: "submit",
     _LF[0]: "submit",
     _DEL[0]: "draft_backspace",
     _CTRL_U[0]: "draft_clear",
+    _CTRL_T[0]: "toggle_plan",
 }
 
 
@@ -774,6 +779,13 @@ class PromptTransport:
         #: engine's queue changes — the status line renders it without
         #: the transport ever owning the queue itself.
         self._queued_count: int = 0
+        # ── Plan panel (Ctrl+T toggle) ───────────────────────────────
+        #: Surface-assigned provider that renders the plan checklist on
+        #: demand (the surface owns derivation from the durable thread).
+        #: ``None`` leaves Ctrl+T inert — the one-shot path wires nothing.
+        self._plan_provider: Callable[[], Any] | None = None
+        self._plan_visible: bool = False
+        self._plan_text: str = ""
 
     def _init_status_counters(self) -> None:
         """Reset outcome and per-turn token/cost counters shared by the footer.
@@ -913,6 +925,25 @@ class PromptTransport:
         """Stamp the queued follow-up count for the status line."""
         self._queued_count = max(0, int(count))
         self._redraw_activity(refresh=True)
+
+    def set_plan_provider(self, provider: Callable[[], Any] | None) -> None:
+        """Wire (or clear) the plan-panel provider for the Ctrl+T toggle.
+
+        The provider returns a renderable plan body (the surface derives
+        it from the durable thread); ``None`` disables the toggle — the
+        one-shot prompt path never wires one.
+        """
+        self._plan_provider = provider
+
+    def _refresh_plan_text(self) -> None:
+        """Pull a fresh plan body through the provider (best-effort)."""
+        if self._plan_provider is None:
+            return
+        try:
+            body = self._plan_provider()
+            self._plan_text = str(getattr(body, "plain", body) or "")
+        except Exception:  # pylint: disable=broad-except  # plan read must not break a turn
+            self._plan_text = "(plan unavailable)"
 
     def pop_draft(self) -> str:
         """Return and clear the accumulated in-turn draft.
@@ -1925,35 +1956,52 @@ class PromptTransport:
         events feed the in-turn composer (Milestone 3): text accumulates,
         Backspace deletes whole grapheme clusters, Ctrl-U clears, and
         Enter/Ctrl-J hands the completed draft to the surface's submit
-        seam (queue-while-working).
+        seam (queue-while-working). Ctrl-T toggles the read-only plan
+        panel (Milestone 5).
         """
         kind, arg = action
-        if kind == "stop":
-            if self._stop_handler is None:
-                return
-            self._stop_requested = True
-            self._redraw_activity(refresh=True)
-            self._stop_handler()
+        handled = self._apply_composer_key(kind, arg)
+        if handled:
             return
+        self._apply_scroll(kind)
+
+    def _apply_composer_key(self, kind: str, arg: str) -> bool:
+        """Handle one composer/stop/plan key; False for scroll events."""
+        if kind == "stop":
+            if self._stop_handler is not None:
+                self._stop_requested = True
+                self._redraw_activity(refresh=True)
+                self._stop_handler()
+            return True
         if kind == "text":
             self._draft_text += arg
             self._redraw_activity(refresh=True)
-            return
+            return True
         if kind == "submit":
             draft, self._draft_text = self._draft_text, ""
             self._redraw_activity(refresh=True)
             if self._submit_handler is not None and draft.strip():
                 self._submit_handler(draft)
-            return
-        if kind == "draft_backspace":
-            self._draft_text = self._backspace_grapheme(self._draft_text)
+            return True
+        if kind in ("draft_backspace", "draft_clear", "toggle_plan"):
+            if kind == "toggle_plan":
+                if self._plan_provider is None:
+                    return True  # no plan surface wired (one-shot): inert
+                self._toggle_plan()
+            elif kind == "draft_backspace":
+                self._draft_text = self._backspace_grapheme(self._draft_text)
+            else:
+                self._draft_text = ""
             self._redraw_activity(refresh=True)
-            return
-        if kind == "draft_clear":
-            self._draft_text = ""
-            self._redraw_activity(refresh=True)
-            return
-        self._apply_scroll(kind)
+            return True
+        return False
+
+    def _toggle_plan(self) -> None:
+        """Flip the plan panel's visibility and refresh its body."""
+        self._plan_visible = not self._plan_visible
+        if self._plan_visible:
+            self._refresh_plan_text()
+        self._redraw_activity(refresh=True)
 
     def _apply_scroll(self, kind: str) -> None:
         """Move the middle transcript per one scroll event and redraw."""
@@ -2012,6 +2060,8 @@ class PromptTransport:
         width = transport.console.size.width or transport._ACTIVITY_WIDTH
         line = transport._status_line(width)
         rows: list[RenderableType] = [line]
+        if transport._plan_visible and transport._plan_text:
+            rows.append(Text(transport._plan_text, style=STYLE_TEXT_MUTED))
         box = transport._stream_box_renderable() if transport._stream_box_active() else None
         if box is not None:
             rows.append(box)

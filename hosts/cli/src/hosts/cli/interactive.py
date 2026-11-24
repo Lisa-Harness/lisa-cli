@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import typer
@@ -132,6 +133,8 @@ def _print_help(console: Console) -> None:
                     "  /quit               end the session (also: exit, quit, Ctrl-D)",
                     "  /queue              list queued follow-ups (/q)",
                     "  /drop               drop the newest queued message",
+                    "  /diff [staged|ref]  working-tree diff (read-only)",
+                    "  /plan               the active workflow checklist (Ctrl+T pins it)",
                     "  /resume [id]        switch to a conversation (latest when bare)",
                     "  /new                start a fresh default conversation",
                     "  Esc                 stop the running turn; next message redirects it",
@@ -306,6 +309,10 @@ async def _run_conversation(
     # after each settled turn). Duck-typed for test transports.
     if hasattr(transport, "set_submit_handler"):
         transport.set_submit_handler(_make_queue_submitter(session, transport, console))
+    # Read-only plan panel: Ctrl+T toggles the derived checklist (the
+    # surface owns thread derivation; the transport only renders).
+    if hasattr(transport, "set_plan_provider"):
+        transport.set_plan_provider(_make_plan_provider(session))
     try:
         await session.start()
         _print_banner(console, _model_hint(runtime))
@@ -379,6 +386,22 @@ def _resolve_latest_conversation(runtime_kwargs: dict[str, Any]) -> str | None:
     except Exception:  # pylint: disable=broad-except
         logger.debug("interactive: latest-conversation probe failed", exc_info=True)
         return None
+
+
+def _make_plan_provider(session: InteractiveSession) -> Any:
+    """Build the Ctrl+T plan provider: a synchronous checklist snapshot.
+
+    The transport calls this on toggle (never per frame); derivation reads
+    the durable thread through the runtime's read API. Failures render as
+    an honest placeholder, never a broken toggle.
+    """
+
+    def _provide() -> Any:
+        from hosts.cli.session_plan_view import render_plan_panel_sync
+
+        return render_plan_panel_sync(session.runtime)
+
+    return _provide
 
 
 def _make_queue_submitter(
@@ -469,21 +492,23 @@ def _handle_local_step(
     step: str,
     arg: str = "",
 ) -> str:
-    """Serve one session-local control step; returns ``continue``/``quit``/``restart``.
+    """Serve one session-local control step; returns ``continue``/``quit``.
 
     ``resume``/``new`` raise :class:`_SessionSwitch` — the conversation
     cycle (not the message loop) owns closing and rebuilding the session.
     """
     if step == "quit":
         return "quit"
-    if step == "help":
-        _print_help(console)
-        return "continue"
-    if step == "queue":
-        _render_queue(session, console)
-        return "continue"
-    if step == "queue_drop":
-        _drop_last_queued(session, console)
+    display_steps: dict[str, Callable[[], object]] = {
+        "help": lambda: _print_help(console),
+        "queue": lambda: _render_queue(session, console),
+        "queue_drop": lambda: _drop_last_queued(session, console),
+        "diff": lambda: asyncio.ensure_future(_render_diff_command(session, console, arg)),
+        "plan": lambda: asyncio.ensure_future(_render_plan_command(session, console)),
+    }
+    handler = display_steps.get(step)
+    if handler is not None:
+        handler()
         return "continue"
     if step == "new":
         raise _SessionSwitch("default")
@@ -491,8 +516,38 @@ def _handle_local_step(
         target = _resolve_resume_target(session, console, arg)
         if target is not None:
             raise _SessionSwitch(target)
-        return "continue"
-    return "continue"  # skip
+    return "continue"  # skip, or a resume that did not resolve
+
+
+async def _render_diff_command(
+    session: InteractiveSession,
+    console: Console,
+    scope: str,
+) -> None:
+    """``/diff [scope]`` — render the working tree through the workspace service."""
+    from pathlib import Path
+
+    from hosts.cli.commands.diff_view import render_diff
+    from hosts.cli.workspace import read_diff
+
+    stripped = scope.strip()
+    staged = stripped.lower() == "staged"
+    ref = "" if staged or not stripped else stripped
+    result = await read_diff(Path.cwd(), staged=staged, ref=ref)
+    title = ref or "Working tree"
+    render_diff(result, console, title=title)
+
+
+async def _render_plan_command(session: InteractiveSession, console: Console) -> None:
+    """``/plan`` — render the active workflow plan from the durable thread.
+
+    The view derives from the thread (single source of truth; never
+    persisted), so the plan reflects what the conversation actually
+    completed — read-only by design.
+    """
+    from hosts.cli.session_plan_view import render_plan_panel
+
+    console.print(render_plan_panel(session.runtime))
 
 
 def _resolve_resume_target(
@@ -576,8 +631,9 @@ def _classify_session_message(message: str) -> tuple[str, str]:
     """Classify one operator message into ``(step, arg)``.
 
     Steps: ``turn`` (expandable), ``quit``, ``help``, ``skip``, ``queue``,
-    ``queue_drop``, ``resume <id>``, ``new``. The argument carries the
-    resume target id (empty for bare ``/resume`` = latest).
+    ``queue_drop``, ``resume <id>``, ``new``, ``diff [scope]``, ``plan``.
+    The argument carries the target (resume id; diff scope: staged or a
+    git ref), empty where the step's default applies.
     """
     stripped = message.strip()
     if not stripped:
@@ -588,6 +644,8 @@ def _classify_session_message(message: str) -> tuple[str, str]:
         return step, ""
     if lowered.startswith("/resume"):
         return "resume", stripped.split(None, 1)[1].strip() if " " in stripped else ""
+    if lowered.startswith("/diff"):
+        return "diff", stripped.split(None, 1)[1].strip() if " " in stripped else ""
     return "turn", ""
 
 
@@ -604,6 +662,8 @@ _WORD_STEPS: dict[str, str] = {
     "new session": "new",
     "new conversation": "new",
     "/resume": "resume",
+    "/plan": "plan",
+    "/diff": "diff",
 }
 
 
@@ -764,16 +824,8 @@ def interactive_command(
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "",
     host_log: HostLogOption = "",
-    conversation_id: str = typer.Option(
-        "",
-        "--conversation-id",
-        help="Isolate the thread store to this conversation (<user>--<id>).",
-    ),
-    latest: bool = typer.Option(
-        False,
-        "--latest",
-        help="Resume the most recently active conversation (over the default).",
-    ),
+    conversation_id: str = "",
+    latest: bool = False,
 ) -> None:
     """``lisa interactive`` — persistent session (registered by commands/host.py)."""
     code = asyncio.run(

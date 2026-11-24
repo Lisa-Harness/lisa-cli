@@ -268,7 +268,11 @@ class _LisaGroup(typer.core.TyperGroup):
 
 app = typer.Typer(
     cls=_LisaGroup,
-    no_args_is_help=True,
+    # Bare `lisa` is decided in the group callback: a TTY launches the
+    # interactive workspace (Milestone 5's flip), anything else keeps the
+    # usage contract (help + exit 2) — so Typer's no-args-is-help shortcut
+    # must not intercept first.
+    no_args_is_help=False,
     help="Run the Lisa framework terminal host.",
     epilog=(
         "Scripting: `lisa prompt --raw 'task'` writes the response verbatim to "
@@ -426,6 +430,16 @@ def _cli_callback(
         _launch_session_resume(resume=resume, continue_latest=continue_latest, ctx=ctx)
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
+        # Bare `lisa` on a TTY: the persistent interactive workspace (the
+        # Milestone-5 flip). Piped/redirected invocations keep the usage
+        # contract — scripts must never land in an interactive loop.
+        import sys as _sys
+
+        if _sys.stdin.isatty() and _sys.stdout.isatty():
+            from hosts.cli.interactive import interactive_command
+
+            interactive_command()
+            raise typer.Exit()
         console.print(ctx.get_help())
         raise typer.Exit(code=2)
 

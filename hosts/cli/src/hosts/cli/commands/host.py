@@ -49,6 +49,16 @@ def _interactive_command(
     state_snapshot: StateSnapshotOption = "",
     streaming: StreamingOption = "",
     host_log: HostLogOption = "",
+    conversation_id: str = typer.Option(
+        "",
+        "--conversation-id",
+        help="Isolate the thread store to this conversation (<user>--<id>).",
+    ),
+    latest: bool = typer.Option(
+        False,
+        "--latest",
+        help="Resume the most recently active conversation (over the default).",
+    ),
 ) -> None:
     """Dispatch the persistent interactive session (engine + surface in hosts.cli.interactive)."""
     from hosts.cli.interactive import interactive_command
@@ -67,6 +77,8 @@ def _interactive_command(
         state_snapshot=state_snapshot,
         streaming=streaming,
         host_log=host_log,
+        conversation_id=conversation_id,
+        latest=latest,
     )
 
 

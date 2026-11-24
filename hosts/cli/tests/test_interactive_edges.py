@@ -289,6 +289,29 @@ def test_interactive_command_invocation_exits_cleanly(
     assert result in (None, 0)
     assert seen, "the wrapper must call the session runner"
     assert seen["runtime_kwargs"]["in_process_mcp"] is True
+    assert seen["runtime_kwargs"]["conversation_id"] == ""
+    assert seen["latest"] is False
+
+
+def test_interactive_command_forwards_conversation_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conversation and latest flags reach the interactive runtime."""
+    import hosts.cli.main as cli_main
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_session(**kwargs: Any) -> int:
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("hosts.cli.interactive.run_interactive_session", _fake_session)
+    cli_main.app(
+        args=["interactive", "--conversation-id", "alpha", "--latest"],
+        standalone_mode=False,
+    )
+    assert seen["runtime_kwargs"]["conversation_id"] == "alpha"
+    assert seen["latest"] is True
 
 
 def test_interactive_command_invocation_maps_exit_code(
@@ -325,3 +348,77 @@ def test_read_approval_answer_defers_on_eof(monkeypatch: Any) -> None:
 def test_read_approval_answer_returns_line(monkeypatch: Any) -> None:
     monkeypatch.setattr("builtins.input", lambda: "a")
     assert interactive_mod._read_approval_answer(_console()) == "a"
+
+
+def test_bare_lisa_on_a_tty_launches_the_interactive_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare `lisa` with ttys on stdin+stdout launches the workspace."""
+
+    import hosts.cli.main as cli_main
+    from hosts.cli import application as app_mod
+
+    launched: list[dict[str, Any]] = []
+
+    def _fake_interactive_command(**kwargs: Any) -> None:
+        launched.append(kwargs)
+
+    monkeypatch.setattr("hosts.cli.interactive.interactive_command", _fake_interactive_command)
+
+    class _FakeStdin:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    class _FakeStdout:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+        @staticmethod
+        def write(_text: Any) -> int:
+            return 0
+
+        @staticmethod
+        def flush() -> None:
+            return None
+
+    monkeypatch.setattr(app_mod.sys, "stdin", _FakeStdin())
+    monkeypatch.setattr(app_mod.sys, "stdout", _FakeStdout())
+    # No invoked subcommand → the TTY flip must fire before the help path.
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.app(args=[], standalone_mode=True)
+    assert excinfo.value.code in (None, 0)
+    assert launched, "bare `lisa` on a tty must launch the interactive session"
+
+
+def test_bare_lisa_piped_keeps_usage_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bare `lisa` under pipes/redirects prints help and exits 2 — never interactive."""
+
+    import hosts.cli.main as cli_main
+    from hosts.cli import application as app_mod
+
+    def _fail_if_launched(**kwargs: Any) -> None:
+        raise AssertionError("piped invocation must never launch the session")
+
+    monkeypatch.setattr("hosts.cli.interactive.interactive_command", _fail_if_launched)
+
+    class _FakeStdin:
+        @staticmethod
+        def isatty() -> bool:
+            return False
+
+    monkeypatch.setattr(app_mod.sys, "stdin", _FakeStdin())
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.app(args=[], standalone_mode=True)
+    assert excinfo.value.code == 2
+
+
+def test_classify_diff_and_plan_steps() -> None:
+    from hosts.cli.interactive import _classify_session_message
+
+    assert _classify_session_message("/diff") == ("diff", "")
+    assert _classify_session_message("/diff staged") == ("diff", "staged")
+    assert _classify_session_message("/diff HEAD~2") == ("diff", "HEAD~2")
+    assert _classify_session_message("/plan") == ("plan", "")
+    assert _classify_session_message("/plants") == ("turn", "")

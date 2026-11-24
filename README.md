@@ -324,11 +324,13 @@ The user should be reminded to remove this text once they have installed a web s
 ## Usage
 
 ```bash
-lisa                                # show usage
+lisa                                # on a terminal: the interactive workspace
+lisa                                # piped: usage (help, exit 2)
 lisa --help                         # also works after subcommands, e.g., prompt --help
 lisa verify                         # runs the diagnostic check including model availability
 lisa update                         # upgrade the installed CLI (uv tool upgrade)
 lisa sessions                       # list resumable conversations (no model call)
+lisa diff [staged|ref]              # working-tree git diff (read-only, no model call)
 lisa --continue                     # interactive session on the latest conversation
 lisa --resume <id>                  # interactive session on a specific conversation
 lisa interactive                    # persistent session: one runtime, many turns
@@ -385,7 +387,18 @@ In the session:
   sends (or `--swap-keys`/`LISA_PROMPT_KEYS` for Enter-sends), Alt+Up
   recalls history, and `$(command)` expands. Session-local controls:
   `/help`, `/quit`, `/queue` (list queued follow-ups), `/drop` (drop the
-  newest queued message).
+  newest queued message), `/diff [staged|ref]`, `/plan`.
+- **Bare `lisa` on a terminal** starts this interactive workspace
+  directly. Piped or redirected invocations keep the usage contract
+  (help, exit 2) — scripts never land in an interactive loop.
+- **Diff and plan.** `/diff` shows the working tree against HEAD (or
+  `staged` for the index, or a ref like `HEAD~2`/a branch) — read-only,
+  no model call, the same service behind the typed `lisa diff` command;
+  untracked files, renames, and binaries are shown for what they are.
+  `/plan` renders the active workflow checklist derived from the durable
+  thread, and **Ctrl+T** toggles the same checklist while a turn runs.
+  Lisa's own edits are not attributed — pre-existing user edits show as
+  they are.
 - **Type while a turn runs.** The composer stays live: typed text shows
   as a `› draft` line, Backspace deletes whole emoji clusters, Ctrl-U
   clears, and **Enter queues the draft as the next follow-up** — the
