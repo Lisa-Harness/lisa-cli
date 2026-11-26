@@ -24,7 +24,8 @@ def test_explicit_data_dir_wins_over_profile(monkeypatch: pytest.MonkeyPatch) ->
     from hosts.cli import main as cli_main
 
     monkeypatch.setenv("LISA_PROFILE", "taxes")
-    assert cli_main._resolve_profiled_data_dir("/tmp/explicit", "survey") == "/tmp/explicit"
+    expected = str(Path("/tmp/explicit"))
+    assert cli_main._resolve_profiled_data_dir("/tmp/explicit", "survey") == expected
 
 
 def test_profile_resolves_to_profiles_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

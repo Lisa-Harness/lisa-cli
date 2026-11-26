@@ -197,6 +197,7 @@ jobs:
       UV_PYTHON: "3.12"
       LISA_DATA_DIR: ${{ github.workspace }}/.lisa-smoke
       LISA_PACKS_VENV: ${{ github.workspace }}/.lisa-smoke-packs
+      LISA_OPENAI_API_KEY: "offline-smoke-key"
     strategy:
       fail-fast: false
       matrix:
