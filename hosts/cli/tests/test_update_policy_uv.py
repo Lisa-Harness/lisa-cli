@@ -62,7 +62,7 @@ def uv_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path
     for version in ("1.0.0", "1.1.0", "1.1.2", "1.2.0"):
         _wheel(wheels, "lisa-cli", version)
     for name, _ in update.FRAMEWORK_MEMBERS:
-        for version in ("0.5.2", "0.5.3", "0.6.0"):
+        for version in ("0.5.2", "0.5.3", "0.6.0", "0.6.1"):
             _wheel(wheels, name, version)
     _wheel(wheels, "fixture-extra", "1.0.0")
 
@@ -122,7 +122,7 @@ def test_real_uv_version_and_framework_policies(uv_home: tuple[Path, Path]) -> N
     tool_dir, wheels = uv_home
     _uv("tool", "install", "--no-sources", "lisa-cli[prompt]", "--with", "fixture-extra==1.0.0")
     assert _version(tool_dir, "lisa-cli") == "1.2.0"
-    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.0"
+    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.1"
 
     _run(tool_dir, update.Policy("version", "1.0.0"))
     assert _version(tool_dir, "lisa-cli") == "1.0.0"
@@ -150,13 +150,13 @@ def test_real_uv_version_and_framework_policies(uv_home: tuple[Path, Path]) -> N
     assert all(_version(tool_dir, name) == "0.5.2" for name, _ in update.FRAMEWORK_MEMBERS)
     assert not any(item["name"] in update._FRAMEWORK_NAMES for item in _requirements(tool_dir))
     _uv("tool", "upgrade", "lisa-cli")
-    assert all(_version(tool_dir, name) == "0.6.0" for name, _ in update.FRAMEWORK_MEMBERS)
+    assert all(_version(tool_dir, name) == "0.6.1" for name, _ in update.FRAMEWORK_MEMBERS)
 
     _run(tool_dir, framework=update.Policy("pin", "0.5.3"))
     _uv("tool", "upgrade", "lisa-cli")
     assert all(_version(tool_dir, name) == "0.5.3" for name, _ in update.FRAMEWORK_MEMBERS)
     _run(tool_dir, framework=update.Policy("latest"))
-    assert all(_version(tool_dir, name) == "0.6.0" for name, _ in update.FRAMEWORK_MEMBERS)
+    assert all(_version(tool_dir, name) == "0.6.1" for name, _ in update.FRAMEWORK_MEMBERS)
 
     receipt = tool_dir / "uv-receipt.toml"
     original = receipt.read_text(encoding="utf-8")
@@ -198,7 +198,7 @@ def test_real_uv_installer_selections(uv_home: tuple[Path, Path]) -> None:
     assert requirements == [{"name": "lisa-cli", "extras": ["prompt"]}]
     _uv("tool", "upgrade", "lisa-cli")
     assert _version(tool_dir, "lisa-cli") == "1.2.0"
-    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.0"
+    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.1"
 
     update.install_tool(
         "pypi",
@@ -224,7 +224,7 @@ def test_real_uv_installer_selections(uv_home: tuple[Path, Path]) -> None:
         "uv",
     )
     assert _version(tool_dir, "lisa-cli") == "1.2.0"
-    assert all(_version(tool_dir, name) == "0.6.0" for name, _ in update.FRAMEWORK_MEMBERS)
+    assert all(_version(tool_dir, name) == "0.6.1" for name, _ in update.FRAMEWORK_MEMBERS)
     assert _requirements(tool_dir) == [{"name": "lisa-cli", "extras": ["prompt"]}]
 
 
@@ -278,7 +278,7 @@ def test_installers_apply_selected_versions_offline(
     assert _requirements(tool_dir) == [{"name": "lisa-cli", "extras": ["prompt"]}]
     _uv("tool", "upgrade", "lisa-cli")
     assert _version(tool_dir, "lisa-cli") == "1.2.0"
-    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.0"
+    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.1"
 
 
 @pytest.mark.skipif(sys.version_info[:2] != (3, 12), reason="installer selects Python 3.12")
@@ -326,7 +326,7 @@ def test_piped_installer_defaults_to_pypi_and_persists_pin(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert _version(tool_dir, "lisa-cli") == "1.1.0"
-    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.0"
+    assert _version(tool_dir, "lisa-harness-runtime") == "0.6.1"
     _uv("tool", "upgrade", "lisa-cli")
     assert _version(tool_dir, "lisa-cli") == "1.1.0"
 
@@ -495,7 +495,7 @@ def test_real_uv_git_refs_and_return_to_releases(
     )
     _run(tool_dir, update.Policy("latest"), update.Policy("latest"))
     assert _version(tool_dir, "lisa-cli") == "1.2.0"
-    assert all(_version(tool_dir, name) == "0.6.0" for name, _ in update.FRAMEWORK_MEMBERS)
+    assert all(_version(tool_dir, name) == "0.6.1" for name, _ in update.FRAMEWORK_MEMBERS)
 
     update.install_tool(
         "pypi",

@@ -352,7 +352,7 @@ def _get_version() -> str:
         # Source-checkout runs have no installed distribution; the declared
         # version is the only honest answer there. Other metadata failures
         # (corrupt dist-info) propagate instead of lying about the version.
-        return "0.5.0"
+        return "0.6.0"
 
 
 _VERSION_OPTION = typer.Option(

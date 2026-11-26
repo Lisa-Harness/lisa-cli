@@ -118,7 +118,7 @@ def test_collect_model_pricing_loads_once_and_preserves_price_sentinels(
         prices, cache_prices = cli_main._collect_model_pricing(runtime)
     assert loader.call_count == 1
     assert prices["m"] == (0.0, 0.00001)
-    assert cache_prices["m"] == (0.0, 0.0)
+    assert cache_prices["m"] == (0.0, None)
 
     unknown = SimpleNamespace(
         model_id="unknown",
